@@ -18,7 +18,7 @@ const mk = (text) => {
 {
   const v = mk("- parent\n  - child\npara");
   const f = scanFences(v.state.doc);
-  ok("levels before nested child", JSON.stringify(computeDropIndents(v.state.doc, f, 2)) === "[0,2,4]",
+  ok("levels before nested child", JSON.stringify(computeDropIndents(v.state.doc, f, 2)) === "[0,2]",
     JSON.stringify(computeDropIndents(v.state.doc, f, 2)));
 }
 {
@@ -26,20 +26,17 @@ const mk = (text) => {
   const f = scanFences(v.state.doc);
   ok("no free indent under paragraphs", JSON.stringify(computeDropIndents(v.state.doc, f, 3)) === "[0]");
 }
-// Child level steps by one indent unit (default 4, matching Tab).
+// Child level uses the list marker's actual Markdown content column.
 {
   const v = mk("- item\n\nafter");
   const f = scanFences(v.state.doc);
-  ok("after bullet item: levels 0 and 4", JSON.stringify(computeDropIndents(v.state.doc, f, 2)) === "[0,4]");
+  ok("after bullet item: levels 0 and 2", JSON.stringify(computeDropIndents(v.state.doc, f, 2)) === "[0,2]");
 }
-// A narrower unit still respects the marker's content indent as the floor.
+// Numbered markers have a wider content column.
 {
   const v = mk("1. step one\n\nafter");
   const f = scanFences(v.state.doc);
-  ok("after numbered item: levels 0 and 4", JSON.stringify(computeDropIndents(v.state.doc, f, 2)) === "[0,4]");
-  ok("unit 2 clamps to numbered marker width 3",
-    JSON.stringify(computeDropIndents(v.state.doc, f, 2, undefined, 2)) === "[0,3]",
-    JSON.stringify(computeDropIndents(v.state.doc, f, 2, undefined, 2)));
+  ok("after numbered item: levels 0 and 3", JSON.stringify(computeDropIndents(v.state.doc, f, 2)) === "[0,3]");
 }
 // pickIndent snaps to nearest candidate
 {
@@ -53,23 +50,39 @@ const mk = (text) => {
   const f = scanFences(v.state.doc);
   const block = getBlockRange(v.state.doc, 3, f);
   moveBlock(v, block, 2, f, 9);
-  ok("numbered child indent = 4", v.state.doc.toString() === "1. step one\n    dragged para\n", JSON.stringify(v.state.doc.toString()));
+  ok("numbered child indent = 3", v.state.doc.toString() === "1. step one\n\n   dragged para\n", JSON.stringify(v.state.doc.toString()));
 }
 
-/* ---- indentOverride drop: drag paragraph to child depth via X ---- */
+/* ---- indentOverride drop: drag paragraph to child depth via X ----
+   A blank line is sealed in above the dropped paragraph so it becomes
+   the item's own child block (loose list) instead of merging into the
+   item's paragraph as a continuation line. ---- */
 {
   const v = mk("- item\n\nmoved para");
   const f = scanFences(v.state.doc);
   const block = getBlockRange(v.state.doc, 3, f);
   moveBlock(v, block, 2, f, 3); // X near child depth → child content of "- item"
-  ok("override indents into item", v.state.doc.toString() === "- item\n    moved para\n", JSON.stringify(v.state.doc.toString()));
+  ok("override indents into item", v.state.doc.toString() === "- item\n\n  moved para\n", JSON.stringify(v.state.doc.toString()));
 }
 {
   const v = mk("- item\n\nmoved para");
   const f = scanFences(v.state.doc);
   const block = getBlockRange(v.state.doc, 3, f);
-  moveBlock(v, block, 2, f, 8); // absurd X → clamped to max valid (4)
-  ok("override clamped to valid depth", v.state.doc.toString() === "- item\n    moved para\n", JSON.stringify(v.state.doc.toString()));
+  moveBlock(v, block, 2, f, 8); // absurd X → clamped to the valid child level
+  ok("override clamped to valid depth", v.state.doc.toString() === "- item\n\n  moved para\n", JSON.stringify(v.state.doc.toString()));
+}
+// Callouts must land at the marker's content column. Four spaces after a
+// bullet makes Obsidian parse the callout as an indented code block.
+{
+  const v = mk("- item\n\n> [!tip] nested\n> body");
+  const f = scanFences(v.state.doc);
+  const block = getBlockRange(v.state.doc, 3, f);
+  moveBlock(v, block, 2, f, 4);
+  ok(
+    "callout drop uses parseable list indent",
+    v.state.doc.toString() === "- item\n  > [!tip] nested\n  > body\n",
+    JSON.stringify(v.state.doc.toString())
+  );
 }
 // Tab-indenting vaults get real tabs for fresh indentation.
 {
@@ -77,14 +90,17 @@ const mk = (text) => {
   const f = scanFences(v.state.doc);
   const block = getBlockRange(v.state.doc, 3, f);
   moveBlock(v, block, 2, f, 4, { width: 4, useTab: true });
-  ok("tab unit writes tab char", v.state.doc.toString() === "- item\n\tmoved para\n", JSON.stringify(v.state.doc.toString()));
+  ok("tab unit writes exact two-column child indent", v.state.doc.toString() === "- item\n\n  moved para\n", JSON.stringify(v.state.doc.toString()));
 }
 {
-  const v = mk("- item\n  child\n\nlast");
+  // A blank makes this an independent child paragraph. Without it,
+  // `child` is the list item's legal lazy paragraph continuation and the
+  // parent item is the draggable block.
+  const v = mk("- item\n\n  child\n\nlast");
   const f = scanFences(v.state.doc);
-  const block = getBlockRange(v.state.doc, 2, f); // "  child"
-  moveBlock(v, block, 4, f, 0); // X at far left → force top-level
-  ok("override de-indents to top level", v.state.doc.toString() === "- item\n\nchild\nlast", JSON.stringify(v.state.doc.toString()));
+  const block = getBlockRange(v.state.doc, 3, f); // "  child"
+  moveBlock(v, block, 5, f, 0); // X at far left → force top-level
+  ok("override de-indents to top level", v.state.doc.toString() === "- item\n\nchild\n\nlast", JSON.stringify(v.state.doc.toString()));
 }
 
 /* ---- in-place horizontal drag: indent changes without moving ---- */
@@ -93,14 +109,14 @@ const mk = (text) => {
   const f = scanFences(v.state.doc);
   const block = getBlockRange(v.state.doc, 2, f); // "- B"
   moveBlock(v, block, 3, f, 4); // dropped on itself, X at child depth
-  ok("in-place drag indents item", v.state.doc.toString() === "- A\n    - B", JSON.stringify(v.state.doc.toString()));
+  ok("in-place drag indents item", v.state.doc.toString() === "- A\n  - B", JSON.stringify(v.state.doc.toString()));
 }
 {
   const v = mk("- A\n- B");
   const f = scanFences(v.state.doc);
   const block = getBlockRange(v.state.doc, 2, f);
   moveBlock(v, block, 3, f, 4, { width: 4, useTab: true });
-  ok("in-place indent uses tab char", v.state.doc.toString() === "- A\n\t- B", JSON.stringify(v.state.doc.toString()));
+  ok("in-place indent uses exact Markdown content column", v.state.doc.toString() === "- A\n  - B", JSON.stringify(v.state.doc.toString()));
 }
 {
   const v = mk("- A\n  - B\n- C");
@@ -129,7 +145,7 @@ const mk = (text) => {
   const f = scanFences(v.state.doc);
   ok(
     "exclude drops self-child level",
-    JSON.stringify(computeDropIndents(v.state.doc, f, 3, { startLine: 2, endLine: 2 })) === "[0,4]",
+    JSON.stringify(computeDropIndents(v.state.doc, f, 3, { startLine: 2, endLine: 2 })) === "[0,2]",
     JSON.stringify(computeDropIndents(v.state.doc, f, 3, { startLine: 2, endLine: 2 }))
   );
 }

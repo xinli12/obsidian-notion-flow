@@ -31,17 +31,46 @@ const mk = (text, from, to) => {
   applyHighlightColor(v, null);
   ok("mark unwrap", v.state.doc.toString() === "note this", v.state.doc.toString());
 }
-// clear formatting: markdown + color spans
+// clear formatting: markdown + color spans + underline HTML
 {
-  const v = mk('**bold** and <span style="color:#eb5757">red</span>', 0, 51);
+  const text = '**bold** and <span style="color:#eb5757">red</span> plus <u>under</u>';
+  const v = mk(text, 0, text.length);
   clearInlineFormatting(v);
-  ok("clear strips everything", v.state.doc.toString() === "bold and red", v.state.doc.toString());
+  ok(
+    "clear strips everything",
+    v.state.doc.toString() === "bold and red plus under",
+    v.state.doc.toString()
+  );
 }
 // clear formatting when selection surrounded by markers
 {
   const v = mk("**word**", 2, 6);
   clearInlineFormatting(v);
   ok("clear unwraps surrounding bold", v.state.doc.toString() === "word", v.state.doc.toString());
+}
+// Reverse wrapper orders both clear completely. A one-pass peel leaves the
+// outer bold/span behind after removing the inner underline.
+{
+  const text = "**<u>word</u>**";
+  const from = text.indexOf("word");
+  const v = mk(text, from, from + "word".length);
+  clearInlineFormatting(v);
+  ok("clear reverse nested bold + underline", v.state.doc.toString() === "word", v.state.doc.toString());
+}
+{
+  const text = '<span style="color:red"><u>word</u></span>';
+  const from = text.indexOf("word");
+  const v = mk(text, from, from + "word".length);
+  clearInlineFormatting(v);
+  ok("clear reverse nested color + underline", v.state.doc.toString() === "word", v.state.doc.toString());
+}
+// The underline tag alternative must be exact: <ul> and arbitrary custom
+// elements are content, not formatting wrappers owned by the toolbar.
+{
+  const text = "<ul><li>item</li></ul> <unknown>keep</unknown>";
+  const v = mk(text, 0, text.length);
+  clearInlineFormatting(v);
+  ok("clear preserves unrelated HTML", v.state.doc.toString() === text, v.state.doc.toString());
 }
 ok("palette has 8 text colors", TEXT_COLORS.length === 8);
 

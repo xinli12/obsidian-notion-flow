@@ -44,6 +44,23 @@
   width: 16px;
   height: 16px;
 }
+.nf-drag-handle.is-table-block {
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 5px;
+  background-color: var(--background-primary);
+  color: var(--text-muted);
+  box-shadow: var(--shadow-s);
+}
+.nf-drag-handle.is-table-block:hover {
+  border-color: var(--background-modifier-border-hover);
+  background-color: var(--background-modifier-hover);
+}
+.nf-drag-handle.is-table-block svg {
+  width: 12px;
+  height: 12px;
+}
 
 body.nf-dragging {
   user-select: none;
@@ -88,7 +105,6 @@ body.nf-dragging * {
   border: 1.5px dashed var(--interactive-accent);
   opacity: 0.6;
 }
-
 /* Floating preview of the block being dragged */
 .nf-drag-ghost {
   position: fixed;
@@ -117,6 +133,81 @@ body.nf-dragging * {
   color: var(--text-faint);
 }
 
+/* ---------- Block menu ---------- */
+/* A dedicated host keeps the handle menu's Notion-like treatment scoped;
+   Obsidian's other context menus retain the active theme's own styling. */
+.nf-block-menu-anchor {
+  position: fixed;
+  inset: 0;
+  z-index: var(--layer-menu, 40);
+  pointer-events: none;
+}
+.nf-block-menu-anchor .menu {
+  box-sizing: border-box;
+  width: 244px;
+  min-width: 244px;
+  max-width: min(280px, calc(100vw - 16px));
+  padding: 6px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 11px;
+  background-color: var(--background-primary);
+  background-color: color-mix(in srgb, var(--background-primary) 94%, transparent);
+  box-shadow: var(--shadow-l), 0 12px 32px rgba(0, 0, 0, 0.18);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  pointer-events: auto;
+  animation: nf-pop 0.12s ease-out;
+}
+.nf-block-menu-anchor .menu-scroll {
+  padding: 0;
+}
+.nf-block-menu-anchor .menu-item {
+  min-height: 30px;
+  margin: 1px 0;
+  padding: 4px 8px;
+  gap: 9px;
+  border-radius: 6px;
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  line-height: 1.25;
+}
+.nf-block-menu-anchor .menu-item:hover,
+.nf-block-menu-anchor .menu-item.selected,
+.nf-block-menu-anchor .menu-item.is-selected {
+  background-color: var(--background-modifier-hover);
+}
+.nf-block-menu-anchor .menu-item-icon {
+  display: flex;
+  width: 18px;
+  min-width: 18px;
+  color: var(--text-muted);
+}
+.nf-block-menu-anchor .menu-item-icon svg {
+  width: 15px;
+  height: 15px;
+  stroke-width: 1.8;
+}
+.nf-block-menu-anchor .menu-item.is-label {
+  min-height: 22px;
+  margin: 2px 0 0;
+  padding: 4px 8px 2px;
+  color: var(--text-faint);
+  font-size: var(--font-ui-smaller);
+  font-weight: 500;
+  pointer-events: none;
+}
+.nf-block-menu-anchor .menu-separator {
+  height: 1px;
+  margin: 5px 4px;
+  background-color: var(--background-modifier-border);
+}
+.nf-block-menu-anchor .menu-item.is-warning {
+  color: var(--text-error);
+}
+.nf-block-menu-anchor .menu-item.is-warning .menu-item-icon {
+  color: currentColor;
+}
+
 /* ---------- Floating toolbar ---------- */
 .nf-toolbar {
   position: fixed;
@@ -124,27 +215,62 @@ body.nf-dragging * {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  box-sizing: border-box;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
   padding: 5px;
-  border-radius: 10px;
+  border-radius: var(--radius-s, 6px);
   background-color: var(--background-primary);
-  background-color: color-mix(in srgb, var(--background-primary) 86%, transparent);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
   border: 1px solid var(--background-modifier-border);
-  box-shadow: var(--shadow-s), 0 6px 24px rgba(0, 0, 0, 0.18);
-  animation: nf-pop 0.12s ease-out;
+  box-shadow: var(--shadow-s);
+}
+.nf-toolbar::-webkit-scrollbar {
+  display: none;
 }
 .nf-toolbar-row {
   display: flex;
+  flex-wrap: wrap;
   gap: 2px;
   align-items: center;
+  min-width: 0;
+  max-width: 100%;
+}
+.nf-toolbar-main,
+.nf-toolbar-table {
+  justify-content: center;
+}
+.nf-toolbar-table {
+  overflow: visible;
+}
+.nf-toolbar-label {
+  flex: 0 0 auto;
+  padding: 0 6px;
+  color: var(--text-faint);
+  font-size: var(--font-ui-smaller);
+  font-weight: 600;
+  line-height: 28px;
+  user-select: none;
 }
 .nf-toolbar-palette {
   border-top: 1px solid var(--background-modifier-border);
-  padding-top: 4px;
+  justify-content: center;
+  padding: 4px 1px 1px;
+  overflow: visible;
+}
+.nf-toolbar-sep {
+  width: 1px;
+  height: 18px;
+  flex-shrink: 0;
+  background-color: var(--background-modifier-border);
+  margin: 0 3px;
 }
 .nf-swatch {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: center;
   width: 24px;
@@ -158,11 +284,15 @@ body.nf-dragging * {
   font-size: 13px;
   font-weight: 700;
   line-height: 1;
-  transition: transform 0.08s ease, border-color 0.08s ease;
+  transition: border-color 0.08s ease, box-shadow 0.08s ease;
 }
 .nf-swatch:hover {
   border-color: var(--interactive-accent);
-  transform: scale(1.14);
+  box-shadow: 0 0 0 1px var(--interactive-accent);
+}
+.nf-swatch.is-active {
+  border-color: var(--interactive-accent);
+  box-shadow: 0 0 0 2px hsla(var(--interactive-accent-hsl), 0.2);
 }
 .nf-swatch-default {
   background: linear-gradient(135deg, transparent 46%, rgba(255, 208, 0, 0.85) 46%);
@@ -180,6 +310,7 @@ body.nf-dragging * {
 }
 .nf-toolbar-btn {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: center;
   width: 28px;
@@ -196,6 +327,24 @@ body.nf-dragging * {
   background-color: var(--background-modifier-hover);
   color: var(--text-normal);
 }
+.nf-toolbar-btn:focus-visible,
+.nf-swatch:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 1px;
+}
+.nf-toolbar-btn:disabled {
+  opacity: 0.32;
+  cursor: not-allowed;
+}
+.nf-toolbar-btn:disabled:hover {
+  background: transparent;
+  color: var(--text-muted);
+}
+.nf-toolbar-btn.is-danger:not(:disabled):hover,
+.nf-toolbar-btn.is-danger:not(:disabled):focus-visible {
+  background-color: rgba(var(--color-red-rgb), 0.14);
+  color: var(--text-error);
+}
 .nf-toolbar-btn.is-active {
   background-color: var(--background-modifier-hover);
   color: var(--interactive-accent);
@@ -203,6 +352,20 @@ body.nf-dragging * {
 .nf-toolbar-btn svg {
   width: 16px;
   height: 16px;
+}
+
+@media (pointer: coarse) {
+  .nf-toolbar-btn {
+    width: 34px;
+    height: 34px;
+  }
+  .nf-swatch {
+    width: 30px;
+    height: 30px;
+  }
+  .nf-toolbar-label {
+    line-height: 34px;
+  }
 }
 
 /* ---------- Slash menu ---------- */
@@ -236,22 +399,141 @@ body.nf-dragging * {
 .nf-slash-name {
   font-size: var(--font-ui-medium);
 }
+.nf-slash-hint {
+  margin-left: auto;
+  padding-left: 12px;
+  flex-shrink: 0;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+  color: var(--text-faint);
+}
+
+/* ---------- Table size picker ---------- */
+.nf-table-picker {
+  --nf-table-picker-cell: 18px;
+  position: fixed;
+  z-index: var(--layer-menu, 40);
+  box-sizing: border-box;
+  width: max-content;
+  max-width: calc(100vw - 16px);
+  padding: 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 11px;
+  background-color: var(--background-primary);
+  background-color: color-mix(in srgb, var(--background-primary) 94%, transparent);
+  box-shadow: var(--shadow-l), 0 12px 32px rgba(0, 0, 0, 0.18);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  animation: nf-pop 0.12s ease-out;
+}
+.nf-table-picker:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
+}
+.nf-table-picker-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 8px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  font-weight: 500;
+}
+.nf-table-picker-size {
+  color: var(--text-normal);
+  font-variant-numeric: tabular-nums;
+}
+.nf-table-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(10, var(--nf-table-picker-cell));
+  gap: 4px;
+  touch-action: none;
+  user-select: none;
+}
+.nf-table-picker-cell {
+  width: var(--nf-table-picker-cell);
+  height: var(--nf-table-picker-cell);
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 3px;
+  background-color: var(--background-secondary);
+  box-shadow: none;
+  cursor: crosshair;
+  transition: border-color 0.06s ease, background-color 0.06s ease,
+    transform 0.06s ease;
+}
+.nf-table-picker-cell.is-active {
+  border-color: var(--interactive-accent);
+  background-color: hsla(var(--interactive-accent-hsl), 0.28);
+}
+.nf-table-picker-cell:hover {
+  transform: scale(1.08);
+}
+.nf-table-picker-hint {
+  margin-top: 8px;
+  color: var(--text-faint);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.35;
+}
+
+@media (pointer: coarse) {
+  .nf-table-picker {
+    --nf-table-picker-cell: 22px;
+  }
+}
 
 /* ---------- Cleaner WYSIWYG rendering ---------- */
 
 /* Bullets: let Obsidian's native Live Preview bullet render (no overlay —
-   doubling it up looks broken); just soften its color and dim numbered
-   markers to match. */
-body.nf-clean {
-  --list-marker-color: var(--text-faint);
+   doubling it up looks broken). nf-list-color is present whenever the
+   "List marker color" setting is not "Theme default" — independent of
+   the cleaner-rendering toggle; --nf-list-marker carries the color. */
+body.nf-list-color {
+  --list-marker-color: var(--nf-list-marker);
 }
-body.nf-clean .markdown-source-view.is-live-preview .cm-formatting-list-ol {
+body.nf-list-color .markdown-source-view.is-live-preview .cm-formatting-list-ol,
+body.nf-list-color .markdown-reading-view ol > li::marker {
   color: var(--list-marker-color);
 }
 
-/* Hide ">" quote markers (the themed border remains) */
-body.nf-clean .markdown-source-view.is-live-preview .cm-formatting-quote {
+/* Bullet shapes cycle with nesting depth, Notion-style: ● ○ ▪ ● …
+   Obsidian draws the Live Preview bullet as a small absolutely-positioned
+   circle in .list-bullet::after — restyle shape only, keep its layout. */
+body.nf-clean .markdown-source-view.is-live-preview
+  :is(.HyperMD-list-line-2, .HyperMD-list-line-5, .HyperMD-list-line-8)
+  .list-bullet::after {
+  background-color: transparent;
+  border: 1.5px solid var(--list-marker-color);
+  width: 5.5px;
+  height: 5.5px;
+  box-sizing: border-box;
+}
+body.nf-clean .markdown-source-view.is-live-preview
+  :is(.HyperMD-list-line-3, .HyperMD-list-line-6, .HyperMD-list-line-9)
+  .list-bullet::after {
+  border-radius: 1.5px;
+}
+
+/* Reading view: Obsidian owns unordered markers through .list-bullet::after.
+   Re-enabling native ul markers would paint a second bullet on top. Keep the
+   ordered-list cycle only; its marker is genuinely native. */
+body.nf-clean .markdown-reading-view ol { list-style-type: decimal; }
+body.nf-clean .markdown-reading-view ol ol { list-style-type: lower-alpha; }
+body.nf-clean .markdown-reading-view ol ol ol { list-style-type: lower-roman; }
+body.nf-clean .markdown-reading-view ol ol ol ol { list-style-type: decimal; }
+
+/* Hide ">" only while reading. Restore it on the active source line so
+   nested quote/callout prefixes remain understandable and editable. */
+body.nf-clean .markdown-source-view.is-live-preview
+  .hmd-inactive-line .cm-formatting-quote {
   color: transparent;
+}
+body.nf-clean .markdown-source-view.is-live-preview
+  .cm-active .cm-formatting-quote {
+  color: var(--text-faint);
 }
 
 /* Softer, centered divider instead of raw --- */
@@ -265,28 +547,9 @@ body.nf-clean .markdown-reading-view hr {
   margin: 1.5em 0;
 }
 
-/* Near-invisible inline formatting tokens on the active line — the text
-   stays editable, the syntax stops shouting */
-body.nf-clean .markdown-source-view.is-live-preview .cm-active .cm-formatting-strong,
-body.nf-clean .markdown-source-view.is-live-preview .cm-active .cm-formatting-em,
-body.nf-clean .markdown-source-view.is-live-preview .cm-active .cm-formatting-strikethrough,
-body.nf-clean .markdown-source-view.is-live-preview .cm-active .cm-formatting-highlight,
-body.nf-clean .markdown-source-view.is-live-preview .cm-active .cm-formatting-code {
-  opacity: 0.18;
-}
-
 /* Heading hashes: nearly gone on the active line too */
 body.nf-clean .markdown-source-view.is-live-preview .cm-active .cm-formatting-header {
   opacity: 0.15;
-}
-
-/* Link/wikilink brackets and URLs: fade on the active line */
-body.nf-clean .markdown-source-view.is-live-preview .cm-active .cm-formatting-link,
-body.nf-clean .markdown-source-view.is-live-preview .cm-active .cm-formatting-link-start,
-body.nf-clean .markdown-source-view.is-live-preview .cm-active .cm-formatting-link-end,
-body.nf-clean .markdown-source-view.is-live-preview .cm-active .cm-formatting-link-string,
-body.nf-clean .markdown-source-view.is-live-preview .cm-active .cm-url {
-  opacity: 0.35;
 }
 
 /* Task checkboxes: rounder, accent-colored, slightly larger */
@@ -310,7 +573,7 @@ body.nf-clean .markdown-source-view.is-live-preview .task-list-item-checkbox:che
 /* Callout source markers ("> [!note]") fade on the active line */
 body.nf-clean .markdown-source-view.is-live-preview .cm-active .cm-formatting-quote,
 body.nf-clean .markdown-source-view.is-live-preview .cm-active .callout-title-inner ~ .cm-formatting {
-  opacity: 0.25;
+  opacity: 0.45;
 }
 
 /* Notion-like breathing room */
@@ -338,16 +601,321 @@ body.nf-clean .markdown-source-view.is-live-preview .cm-inline-code:not(.cm-form
   padding: 0.08em 0.25em;
 }
 
-/* Blockquote: soften the border and text */
+/* Blockquote: tint Obsidian's native ::before rule. Adding a real border to
+   the line changes its box width and doubles some themes' quote rule. */
 body.nf-clean .markdown-source-view.is-live-preview .HyperMD-quote {
-  border-left: 3px solid var(--interactive-accent);
+  --blockquote-border-color: var(--interactive-accent);
   opacity: 0.95;
 }
 
-/* Nested code fences / callouts: shift the whole line box (background
-   included) by the block's indent so it sits under its parent item */
+/* ---------- Tables: Notion-like clean look ---------- */
+
+/* Reading view gets a deliberate horizontal-scroll boundary for wide
+   tables. Live Preview keeps Obsidian's own wrapper behavior so native
+   row/column drag handles are never clipped. */
+.markdown-reading-view .nf-table-scroll,
+body.nf-tables .markdown-reading-view .table-wrapper {
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--background-modifier-border-hover) transparent;
+  padding-bottom: 3px;
+}
+.markdown-reading-view .nf-table-scroll:focus-visible {
+  outline: 2px solid hsla(var(--interactive-accent-hsl), 0.45);
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+body.nf-tables .markdown-source-view.is-live-preview .table-wrapper {
+  max-width: 100%;
+}
+
+/* Obsidian's native controls default to opacity:0 until the pointer is
+   exactly over a narrow handle. Keep the relevant handle and the add-row /
+   add-column rails visible while the table is being approached. */
+body.nf-tables .markdown-source-view.is-live-preview .cm-table-widget
+  :is(th, td):is(:hover, :focus-within) > :is(.table-row-drag-handle, .table-col-drag-handle) {
+  opacity: 1;
+}
+body.nf-tables .markdown-source-view.is-live-preview .cm-table-widget
+  .table-wrapper:is(:hover, :focus-within) :is(.table-row-btn, .table-col-btn) {
+  opacity: 0.58;
+  transition: opacity 0.08s ease, background-color 0.08s ease;
+}
+body.nf-tables .markdown-source-view.is-live-preview .cm-table-widget
+  :is(.table-row-btn, .table-col-btn):hover {
+  opacity: 1;
+  background-color: var(--background-modifier-hover);
+}
+
+/* One outer border with rounded corners; cells only draw a soft inner
+   grid. (No overflow:hidden — it would clip Obsidian's native row/column
+   drag handles; the corner cells carry the radius instead.) */
+body.nf-tables .markdown-source-view.is-live-preview table,
+body.nf-tables .markdown-reading-view table {
+  /* Scope Obsidian's border variables to the Markdown table itself; body
+     level variables would leak into settings and other plugin views. */
+  --table-border-width: 0px;
+  --table-header-border-width: 0px;
+  --table-column-first-border-width: 0px;
+  --table-column-last-border-width: 0px;
+  --table-row-last-border-width: 0px;
+  border-collapse: separate;
+  border-spacing: 0;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  width: 100%;
+  max-width: 100%;
+  line-height: 1.45;
+}
+body.nf-tables .markdown-source-view.is-live-preview table th,
+body.nf-tables .markdown-source-view.is-live-preview table td,
+body.nf-tables .markdown-reading-view table th,
+body.nf-tables .markdown-reading-view table td {
+  border: none;
+  border-right: 1px solid
+    color-mix(in srgb, var(--background-modifier-border) 55%, transparent);
+  border-bottom: 1px solid
+    color-mix(in srgb, var(--background-modifier-border) 55%, transparent);
+  padding: 7px 11px;
+  min-width: 64px;
+  height: 36px;
+  box-sizing: border-box;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+  word-break: normal;
+  transition: box-shadow 0.1s ease, background-image 0.1s ease;
+}
+/* Live Preview nests a .table-cell-wrapper with its own spacing. Put the
+   comfortable inset on that wrapper once; padding both layers doubles the
+   row height and diverges from Reading View. */
+body.nf-tables .markdown-source-view.is-live-preview table :is(th, td) {
+  padding: 0;
+}
+body.nf-tables .markdown-source-view.is-live-preview table
+  :is(th, td) .table-cell-wrapper {
+  min-height: 34px;
+  box-sizing: border-box;
+  padding: 7px 11px;
+}
+body.nf-tables .markdown-source-view.is-live-preview table :is(th, td):last-child,
+body.nf-tables .markdown-reading-view table :is(th, td):last-child {
+  border-right: none;
+}
+body.nf-tables .markdown-source-view.is-live-preview table
+  > :is(tbody:last-child, thead:last-child) > tr:last-child > :is(th, td),
+body.nf-tables .markdown-reading-view table
+  > :is(tbody:last-child, thead:last-child) > tr:last-child > :is(th, td) {
+  border-bottom: none;
+}
+/* Corner cells carry the rounding so header/cell tints don't overpaint it */
+body.nf-tables .markdown-source-view.is-live-preview table
+  > :is(thead:first-child, tbody:first-child) > tr:first-child > :first-child,
+body.nf-tables .markdown-reading-view table
+  > :is(thead:first-child, tbody:first-child) > tr:first-child > :first-child {
+  border-top-left-radius: 7px;
+}
+body.nf-tables .markdown-source-view.is-live-preview table
+  > :is(thead:first-child, tbody:first-child) > tr:first-child > :last-child,
+body.nf-tables .markdown-reading-view table
+  > :is(thead:first-child, tbody:first-child) > tr:first-child > :last-child {
+  border-top-right-radius: 7px;
+}
+body.nf-tables .markdown-source-view.is-live-preview table
+  > :is(tbody:last-child, thead:last-child) > tr:last-child > :first-child,
+body.nf-tables .markdown-reading-view table
+  > :is(tbody:last-child, thead:last-child) > tr:last-child > :first-child {
+  border-bottom-left-radius: 7px;
+}
+body.nf-tables .markdown-source-view.is-live-preview table
+  > :is(tbody:last-child, thead:last-child) > tr:last-child > :last-child,
+body.nf-tables .markdown-reading-view table
+  > :is(tbody:last-child, thead:last-child) > tr:last-child > :last-child {
+  border-bottom-right-radius: 7px;
+}
+/* Header tint: --nf-table-header-bg is set from the plugin's "Table
+   header background" setting (theme palette tint / transparent); the
+   fallback is a soft wash of the theme's secondary background */
+body.nf-tables .markdown-source-view.is-live-preview table th,
+body.nf-tables .markdown-reading-view table th {
+  background-color: var(
+    --nf-table-header-bg,
+    color-mix(in srgb, var(--background-secondary) 72%, transparent)
+  );
+  font-weight: 600;
+  color: var(--text-normal);
+}
+/* A header tint chosen in settings (nf-thead-tint) applies even when
+   the Notion table look is off, so the two settings stay independent */
+body.nf-thead-tint .markdown-source-view.is-live-preview table th,
+body.nf-thead-tint .markdown-reading-view table th {
+  background-color: var(--nf-table-header-bg);
+}
+/* Row states are painted on cells, not <tr>, so per-table and per-cell
+   background colors cannot hide stripes, hover, or keyboard focus. */
+body.nf-table-stripes .markdown-source-view.is-live-preview table tbody tr:nth-child(even) > td,
+body.nf-table-stripes .markdown-reading-view table tbody tr:nth-child(even) > td {
+  background-image: linear-gradient(
+    color-mix(in srgb, var(--background-secondary) 58%, transparent),
+    color-mix(in srgb, var(--background-secondary) 58%, transparent)
+  );
+}
+body.nf-tables .markdown-source-view.is-live-preview table tbody tr:hover > td,
+body.nf-tables .markdown-reading-view table tbody tr:hover > td {
+  background-image: linear-gradient(
+    color-mix(in srgb, var(--background-modifier-hover) 72%, transparent),
+    color-mix(in srgb, var(--background-modifier-hover) 72%, transparent)
+  );
+}
+body.nf-tables .markdown-source-view.is-live-preview table tr:focus-within > :is(th, td),
+body.nf-tables .markdown-reading-view table tr:focus-within > :is(th, td) {
+  background-image: linear-gradient(
+    hsla(var(--interactive-accent-hsl), 0.075),
+    hsla(var(--interactive-accent-hsl), 0.075)
+  );
+}
+body.nf-tables .markdown-source-view.is-live-preview table :is(th, td):focus-within,
+body.nf-tables .markdown-reading-view table :is(th, td):focus-within {
+  position: relative;
+  z-index: 1;
+  box-shadow: inset 0 0 0 2px hsla(var(--interactive-accent-hsl), 0.55);
+}
+
+@media (max-width: 600px) {
+  body.nf-tables .markdown-source-view.is-live-preview table :is(th, td),
+  body.nf-tables .markdown-reading-view table :is(th, td) {
+    min-width: 56px;
+  }
+  body.nf-tables .markdown-reading-view table :is(th, td),
+  body.nf-tables .markdown-source-view.is-live-preview table
+    :is(th, td) .table-cell-wrapper {
+    padding: 6px 8px;
+  }
+}
+
+/* ---------- Per-table / per-cell backgrounds ---------- */
+/* Driven by class-only marker spans stored in the table markdown (set
+   from the floating toolbar or right-click menu). Not gated on nf-clean:
+   colors are content and must survive turning clean rendering off.
+   Table tint: header row gets the color, body rows a faint wash.
+   Cell rules carry the same specificity as the table rules (both name
+   the table element) and come after them, so a cell color wins inside a
+   tinted table. */
+
+.markdown-source-view.is-live-preview table:has(span.nf-tbl-red) th,
+.markdown-reading-view table:has(span.nf-tbl-red) th { background-color: rgba(var(--color-red-rgb), 0.22); }
+.markdown-source-view.is-live-preview table:has(span.nf-tbl-red) td,
+.markdown-reading-view table:has(span.nf-tbl-red) td { background-color: rgba(var(--color-red-rgb), 0.07); }
+.markdown-source-view.is-live-preview table:has(span.nf-tbl-orange) th,
+.markdown-reading-view table:has(span.nf-tbl-orange) th { background-color: rgba(var(--color-orange-rgb), 0.22); }
+.markdown-source-view.is-live-preview table:has(span.nf-tbl-orange) td,
+.markdown-reading-view table:has(span.nf-tbl-orange) td { background-color: rgba(var(--color-orange-rgb), 0.07); }
+.markdown-source-view.is-live-preview table:has(span.nf-tbl-yellow) th,
+.markdown-reading-view table:has(span.nf-tbl-yellow) th { background-color: rgba(var(--color-yellow-rgb), 0.22); }
+.markdown-source-view.is-live-preview table:has(span.nf-tbl-yellow) td,
+.markdown-reading-view table:has(span.nf-tbl-yellow) td { background-color: rgba(var(--color-yellow-rgb), 0.07); }
+.markdown-source-view.is-live-preview table:has(span.nf-tbl-green) th,
+.markdown-reading-view table:has(span.nf-tbl-green) th { background-color: rgba(var(--color-green-rgb), 0.22); }
+.markdown-source-view.is-live-preview table:has(span.nf-tbl-green) td,
+.markdown-reading-view table:has(span.nf-tbl-green) td { background-color: rgba(var(--color-green-rgb), 0.07); }
+.markdown-source-view.is-live-preview table:has(span.nf-tbl-cyan) th,
+.markdown-reading-view table:has(span.nf-tbl-cyan) th { background-color: rgba(var(--color-cyan-rgb), 0.22); }
+.markdown-source-view.is-live-preview table:has(span.nf-tbl-cyan) td,
+.markdown-reading-view table:has(span.nf-tbl-cyan) td { background-color: rgba(var(--color-cyan-rgb), 0.07); }
+.markdown-source-view.is-live-preview table:has(span.nf-tbl-blue) th,
+.markdown-reading-view table:has(span.nf-tbl-blue) th { background-color: rgba(var(--color-blue-rgb), 0.22); }
+.markdown-source-view.is-live-preview table:has(span.nf-tbl-blue) td,
+.markdown-reading-view table:has(span.nf-tbl-blue) td { background-color: rgba(var(--color-blue-rgb), 0.07); }
+.markdown-source-view.is-live-preview table:has(span.nf-tbl-purple) th,
+.markdown-reading-view table:has(span.nf-tbl-purple) th { background-color: rgba(var(--color-purple-rgb), 0.22); }
+.markdown-source-view.is-live-preview table:has(span.nf-tbl-purple) td,
+.markdown-reading-view table:has(span.nf-tbl-purple) td { background-color: rgba(var(--color-purple-rgb), 0.07); }
+.markdown-source-view.is-live-preview table:has(span.nf-tbl-pink) th,
+.markdown-reading-view table:has(span.nf-tbl-pink) th { background-color: rgba(var(--color-pink-rgb), 0.22); }
+.markdown-source-view.is-live-preview table:has(span.nf-tbl-pink) td,
+.markdown-reading-view table:has(span.nf-tbl-pink) td { background-color: rgba(var(--color-pink-rgb), 0.07); }
+
+.markdown-source-view.is-live-preview table :is(td, th):has(span.nf-cell-red),
+.markdown-reading-view table :is(td, th):has(span.nf-cell-red) { background-color: rgba(var(--color-red-rgb), 0.25); }
+.markdown-source-view.is-live-preview table :is(td, th):has(span.nf-cell-orange),
+.markdown-reading-view table :is(td, th):has(span.nf-cell-orange) { background-color: rgba(var(--color-orange-rgb), 0.25); }
+.markdown-source-view.is-live-preview table :is(td, th):has(span.nf-cell-yellow),
+.markdown-reading-view table :is(td, th):has(span.nf-cell-yellow) { background-color: rgba(var(--color-yellow-rgb), 0.28); }
+.markdown-source-view.is-live-preview table :is(td, th):has(span.nf-cell-green),
+.markdown-reading-view table :is(td, th):has(span.nf-cell-green) { background-color: rgba(var(--color-green-rgb), 0.25); }
+.markdown-source-view.is-live-preview table :is(td, th):has(span.nf-cell-cyan),
+.markdown-reading-view table :is(td, th):has(span.nf-cell-cyan) { background-color: rgba(var(--color-cyan-rgb), 0.25); }
+.markdown-source-view.is-live-preview table :is(td, th):has(span.nf-cell-blue),
+.markdown-reading-view table :is(td, th):has(span.nf-cell-blue) { background-color: rgba(var(--color-blue-rgb), 0.25); }
+.markdown-source-view.is-live-preview table :is(td, th):has(span.nf-cell-purple),
+.markdown-reading-view table :is(td, th):has(span.nf-cell-purple) { background-color: rgba(var(--color-purple-rgb), 0.25); }
+.markdown-source-view.is-live-preview table :is(td, th):has(span.nf-cell-pink),
+.markdown-reading-view table :is(td, th):has(span.nf-cell-pink) { background-color: rgba(var(--color-pink-rgb), 0.25); }
+
+/* ---------- List-contained block layers ---------------------------- */
+
+/* CodeMirror paints quote/code rows as full-width lines. Their source-indent
+   spans only account for the literal Markdown whitespace, not the list's
+   visual content column, which left text, quote rules and code backgrounds
+   at different X positions. Shift the complete line exactly once by the
+   logical list depth so every layer stays together while editing. */
 .markdown-source-view.is-live-preview .cm-line.nf-nested-block {
-  margin-left: var(--nf-nest, 0px) !important;
+  box-sizing: border-box;
+  margin-inline-start: var(--nf-nest, 0px) !important;
+  width: calc(100% - var(--nf-nest, 0px)) !important;
+}
+.markdown-source-view.is-live-preview
+  .cm-line.nf-nested-quote::before {
+  inset-inline-start: 0 !important;
+}
+/* Obsidian gives the first quote row a list-indent span, while continuation
+   rows only retain their literal whitespace span. Add the missing marker
+   space to continuation rows so every quote line starts at the same X. */
+.markdown-source-view.is-live-preview
+  .cm-line.nf-nested-quote:not(:has(> .cm-hmd-list-indent))
+  > .cm-hmd-indent-in-quote:first-child {
+  padding-inline-start: calc(
+    var(--list-indent-editing) + var(--list-marker-space)
+  );
+}
+
+/* Callout widgets are direct children of .cm-content in Live Preview; the
+   outer widget does not inherit its source line's list layout. Apply the
+   logical offset in both rendered and source-edit (<pre>) states so the
+   block does not jump or become a full-width slab when editing begins. */
+.markdown-source-view.is-live-preview
+  .cm-embed-block.nf-nested-widget {
+  box-sizing: border-box;
+  margin-inline-start: var(--nf-nest, 0px) !important;
+  width: calc(100% - var(--nf-nest, 0px)) !important;
+}
+
+/* Older notes can already contain a callout immediately followed by a
+   shallower sibling. Obsidian renders both inside one source <pre>. Keep the
+   outer widget at the shallowest shared depth, and paint the source panel
+   only behind the actual callout rows so the sibling no longer looks like
+   part of the callout. Source text remains untouched and fully editable. */
+.markdown-source-view.is-live-preview
+  .cm-embed-block.nf-mixed-widget pre {
+  position: relative;
+  background: transparent !important;
+}
+.markdown-source-view.is-live-preview
+  .cm-embed-block.nf-mixed-widget pre::before {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  inset: 0 0 auto;
+  height: var(--nf-mixed-cut, 100%);
+  border-radius: var(--radius-s, 4px);
+  background: var(--code-background);
+  pointer-events: none;
+}
+.markdown-source-view.is-live-preview
+  .cm-embed-block.nf-mixed-widget pre > code {
+  position: relative;
+  z-index: 1;
 }
 
 /* Vertical guides for nested lists: Obsidian draws these natively on
@@ -355,10 +923,23 @@ body.nf-clean .markdown-source-view.is-live-preview .HyperMD-quote {
    the same pseudo-element doubled every guide and left broken segments,
    so we don't — native guides are the single source of truth. */
 
-/* Lines shifted right by nf-nested-block (nested code fences, callouts)
-   carry their indent guides along, which paints stray lines inside the
-   shifted block's background. Hide guides on those lines only. */
-.markdown-source-view.is-live-preview .cm-line.nf-nested-block .cm-indent::before,
-.markdown-source-view.is-live-preview .cm-line.nf-nested-block .cm-indent::after {
-  display: none;
+@media (prefers-reduced-motion: reduce) {
+  .nf-block-menu-anchor .menu,
+  .nf-table-picker,
+  .nf-toolbar,
+  .nf-drag-handle,
+  .nf-plus-btn {
+    animation: none;
+  }
+  .nf-drag-handle,
+  .nf-plus-btn,
+  .nf-drop-indicator,
+  .nf-block-highlight,
+  .nf-table-picker-cell,
+  .nf-swatch,
+  .nf-toolbar-btn,
+  body.nf-tables .markdown-source-view.is-live-preview table :is(th, td),
+  body.nf-tables .markdown-reading-view table :is(th, td) {
+    transition: none;
+  }
 }

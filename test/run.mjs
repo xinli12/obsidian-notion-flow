@@ -31,7 +31,7 @@ const cases = [
   [11, [11,12], "callout"],
   [14, [14,16], "code fence"],
   [17, [17,17], "last line"],
-  [2, null, "blank -> null"],
+  [2, [2, 2], "blank line is its own block"],
 ];
 
 let fail = 0;

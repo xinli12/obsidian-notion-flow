@@ -1,5 +1,13 @@
 import { EditorState, EditorSelection } from "@codemirror/state";
-import { toggleWrap, insertLink, SlashSuggest, SLASH_COMMANDS } from "./bundle.mjs";
+import {
+  getWrapState,
+  isUnderlineActive,
+  toggleUnderline,
+  toggleWrap,
+  insertLink,
+  SlashSuggest,
+  SLASH_COMMANDS,
+} from "./bundle.mjs";
 
 let fail = 0;
 const ok = (name, cond, extra = "") => {
@@ -55,6 +63,45 @@ function makeView(docText, from, to) {
   toggleWrap(v, "==");
   toggleWrap(v, "==");
   ok("highlight round-trip", v.state.doc.toString() === "note taking", v.state.doc.toString());
+}
+// underline uses portable HTML with different opening/closing markers
+{
+  const v = makeView("under this", 0, 5);
+  toggleUnderline(v);
+  ok("underline wrap", v.state.doc.toString() === "<u>under</u> this", v.state.doc.toString());
+  ok(
+    "underline active state",
+    isUnderlineActive(v.state),
+    getWrapState(v.state, "<u>", "</u>")
+  );
+  toggleUnderline(v);
+  ok("underline round-trip", v.state.doc.toString() === "under this", v.state.doc.toString());
+}
+// underline remains active around nested Markdown and toggles the existing
+// outer pair instead of adding a second <u> around the selected text
+{
+  const text = "<u>**under**</u> this";
+  const from = text.indexOf("under");
+  const v = makeView(text, from, from + "under".length);
+  ok("nested underline active state", isUnderlineActive(v.state));
+  toggleUnderline(v);
+  ok("nested underline unwrap", v.state.doc.toString() === "**under** this", v.state.doc.toString());
+  ok(
+    "nested underline keeps text selected",
+    v.state.doc.sliceString(v.state.selection.main.from, v.state.selection.main.to) === "under"
+  );
+}
+// choose the smallest enclosing underline pair when underlines are nested
+{
+  const text = "<u>outer <u>inner</u></u>";
+  const from = text.indexOf("inner");
+  const v = makeView(text, from, from + "inner".length);
+  toggleUnderline(v);
+  ok(
+    "smallest underline pair removed",
+    v.state.doc.toString() === "<u>outer inner</u>",
+    v.state.doc.toString()
+  );
 }
 // link
 {
@@ -113,13 +160,18 @@ const cmd = (id) => SLASH_COMMANDS.find((c) => c.id === id);
   ok("code fence inserted", ed.text() === "```\n\n```", JSON.stringify(ed.text()));
   ok("cursor after opening fence", ed.cursor.line === 0 && ed.cursor.ch === 3, JSON.stringify(ed.cursor));
 }
-// table inserts and places cursor in first cell
+// table inserts a padded 3-column skeleton, cursor in first header cell
 {
   const s = makeSuggest();
   const ed = new MockEditor(["/table"]);
   s.context = { editor: ed, start: { line: 0, ch: 0 }, end: { line: 0, ch: 6 } };
   s.selectSuggestion(cmd("table"), {});
-  ok("table inserted", ed.text() === "|  |  |\n| --- | --- |\n|  |  |", JSON.stringify(ed.text()));
+  ok(
+    "table inserted",
+    ed.text() ===
+      "|     |     |     |\n| --- | --- | --- |\n|     |     |     |\n|     |     |     |",
+    JSON.stringify(ed.text())
+  );
   ok("cursor in first cell", ed.cursor.line === 0 && ed.cursor.ch === 2, JSON.stringify(ed.cursor));
 }
 // filtering
@@ -127,6 +179,8 @@ const cmd = (id) => SLASH_COMMANDS.find((c) => c.id === id);
   const s = makeSuggest();
   const got = s.getSuggestions({ query: "cal" }).map((c) => c.id);
   ok("filter 'cal' finds callout", got.includes("callout"), JSON.stringify(got));
+  const links = s.getSuggestions({ query: "link" }).map((c) => c.id);
+  ok("English link keyword finds internal link", links.includes("wikilink"), JSON.stringify(links));
 }
 // Chinese keywords filter the slash menu in any UI language
 {
@@ -145,6 +199,8 @@ const cmd = (id) => SLASH_COMMANDS.find((c) => c.id === id);
   ok("trigger after CJK char", !!t && t.start.ch === 2, JSON.stringify(t));
   const t2 = s.onTrigger({ line: 0, ch: 6 }, new MockEditor(["中文/hea"]), null);
   ok("CJK trigger captures query", !!t2 && t2.query === "hea", JSON.stringify(t2));
+  const t3 = s.onTrigger({ line: 0, ch: 5 }, new MockEditor(["中文/表格"]), null);
+  ok("Chinese query is typable", !!t3 && t3.query === "表格", JSON.stringify(t3));
 }
 // "/" inside a code fence must NOT trigger
 {

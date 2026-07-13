@@ -22,9 +22,12 @@ function check(name, hoverLine, targetLine, expected) {
   else console.log(`PASS ${name}`);
 }
 
-// Move "first para" (line 3) below "- item B" (insert before line 8, the blank)
+// Move "first para" (line 3) below "- item B" (insert before line 8, the
+// blank). The two blanks that used to surround it collapse into one, and
+// a fresh blank is sealed in above the paragraph so "- item B" does not
+// absorb it as lazy continuation.
 check("para down", 3, 8,
-  "# Title\n\n\n- item A\n  - child\n- item B\nfirst para\n\nlast para");
+  "# Title\n\n- item A\n  - child\n- item B\n\nfirst para\n\nlast para");
 
 // Move "- item A"+child (lines 5-6) to end (line 10 > doc.lines 9)
 check("list to end", 5, 10,

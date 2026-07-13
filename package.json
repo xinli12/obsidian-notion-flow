@@ -1,11 +1,11 @@
 {
   "name": "notion-flow",
-  "version": "1.0.0",
-  "description": "Notion-style editing for Obsidian: drag-and-drop blocks, slash commands, floating toolbar with colors, cleaner WYSIWYG. English & 中文.",
+  "version": "1.1.0",
+  "description": "Notion-style editing for Obsidian: drag-and-drop blocks, table editing, slash commands, floating toolbar with colors, cleaner WYSIWYG. English & 中文.",
   "scripts": {
-    "build": "esbuild src/main.ts --bundle --external:obsidian --external:@codemirror/view --external:@codemirror/state --external:@codemirror/language --external:electron --format=cjs --target=es2020 --outfile=main.js",
+    "build": "esbuild src/main.ts --bundle --external:obsidian --external:@codemirror/view --external:@codemirror/state --external:@codemirror/language --format=cjs --target=es2020 --outfile=main.js",
     "typecheck": "tsc -noEmit",
-    "test": "esbuild src/main.ts --bundle --alias:obsidian=./test/obsidian-stub.mjs --alias:@codemirror/view=./test/view-stub.mjs --format=esm --outfile=test/bundle.mjs && for t in test/run*.mjs; do node $t || exit 1; done"
+    "test": "esbuild src/main.ts --bundle --alias:obsidian=./test/obsidian-stub.mjs --alias:@codemirror/view=./test/view-stub.mjs --alias:@codemirror/language=./test/language-stub.mjs --format=esm --outfile=test/bundle.mjs && for t in test/run*.mjs; do node $t || exit 1; done"
   },
   "keywords": [
     "obsidian",
@@ -17,8 +17,10 @@
   "author": "Xin",
   "license": "MIT",
   "devDependencies": {
+    "@codemirror/language": "^6.12.4",
     "@codemirror/state": "^6.7.1",
     "@codemirror/view": "^6.43.6",
+    "@lezer/markdown": "^1.7.1",
     "esbuild": "^0.28.1",
     "obsidian": "^1.13.1",
     "typescript": "^7.0.2"

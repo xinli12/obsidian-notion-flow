@@ -60,7 +60,15 @@ const noteText = [
   const block = getBlockRange(v.state.doc, 3, fences);
   moveBlock(v, block, 11, fences);
   const lines = v.state.doc.toString().split("\n");
-  ok("paragraph dropped into item is indented", lines[9] === "  First paragraph.", JSON.stringify(lines));
+  // The blanks that surrounded the paragraph collapse to one, so the
+  // whole list sits one line higher than before the move. A blank is
+  // sealed in below the dropped paragraph so "child note" stays its own
+  // block instead of merging into the same paragraph.
+  ok(
+    "paragraph dropped into item is indented",
+    lines[8] === "  First paragraph." && lines[9] === "" && lines[10] === "  child note",
+    JSON.stringify(lines)
+  );
 }
 
 // Drag whole list item (5-11) to very top.
