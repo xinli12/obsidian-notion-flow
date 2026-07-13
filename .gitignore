@@ -1,0 +1,12 @@
+# Dependencies
+node_modules/
+
+# Build output (attached to GitHub releases, not committed)
+main.js
+
+# Generated test bundle
+test/bundle.mjs
+
+# OS / editor noise
+.DS_Store
+.claude/settings.local.json

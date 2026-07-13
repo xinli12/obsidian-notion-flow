@@ -1,0 +1,364 @@
+/* ================= Notion Flow ================= */
+
+@keyframes nf-pop {
+  from { opacity: 0; transform: translateY(4px) scale(0.97); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes nf-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* ---------- Drag handle + insert button ---------- */
+.nf-drag-handle,
+.nf-plus-btn {
+  position: fixed;
+  z-index: var(--layer-popover, 30);
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  color: var(--text-faint);
+  animation: nf-fade 0.1s ease-out;
+  transition: background-color 0.1s ease, color 0.1s ease;
+}
+.nf-drag-handle {
+  cursor: grab;
+}
+.nf-plus-btn {
+  cursor: pointer;
+}
+.nf-drag-handle:hover,
+.nf-plus-btn:hover {
+  background-color: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+.nf-drag-handle.is-dragging {
+  cursor: grabbing;
+  color: var(--interactive-accent);
+}
+.nf-drag-handle svg,
+.nf-plus-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+body.nf-dragging {
+  user-select: none;
+  cursor: grabbing !important;
+}
+body.nf-dragging * {
+  cursor: grabbing !important;
+}
+
+.nf-drop-indicator {
+  position: fixed;
+  z-index: var(--layer-popover, 30);
+  height: 3px;
+  border-radius: 2px;
+  background-color: var(--interactive-accent);
+  opacity: 0.9;
+  pointer-events: none;
+  transition: top 0.09s ease, left 0.09s ease, width 0.09s ease;
+}
+.nf-drop-indicator::before {
+  content: "";
+  position: absolute;
+  left: -4px;
+  top: -2.5px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: var(--interactive-accent);
+}
+
+/* Hovered block: show exactly what the handle will drag */
+.nf-block-highlight {
+  position: fixed;
+  z-index: 1;
+  pointer-events: none;
+  border-radius: 6px;
+  background-color: var(--background-modifier-hover);
+  transition: top 0.08s ease, height 0.08s ease;
+}
+.nf-block-highlight.is-dragging {
+  background-color: transparent;
+  border: 1.5px dashed var(--interactive-accent);
+  opacity: 0.6;
+}
+
+/* Floating preview of the block being dragged */
+.nf-drag-ghost {
+  position: fixed;
+  z-index: var(--layer-menu, 40);
+  max-width: 380px;
+  max-height: 110px;
+  overflow: hidden;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background-color: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  box-shadow: var(--shadow-l), 0 8px 28px rgba(0, 0, 0, 0.22);
+  opacity: 0.82;
+  pointer-events: none;
+}
+.nf-drag-ghost-text {
+  white-space: pre-wrap;
+  font-size: var(--font-ui-small);
+  color: var(--text-muted);
+  line-height: 1.4;
+  word-break: break-word;
+}
+.nf-drag-ghost-more {
+  margin-top: 4px;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-faint);
+}
+
+/* ---------- Floating toolbar ---------- */
+.nf-toolbar {
+  position: fixed;
+  z-index: var(--layer-menu, 40);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 5px;
+  border-radius: 10px;
+  background-color: var(--background-primary);
+  background-color: color-mix(in srgb, var(--background-primary) 86%, transparent);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--background-modifier-border);
+  box-shadow: var(--shadow-s), 0 6px 24px rgba(0, 0, 0, 0.18);
+  animation: nf-pop 0.12s ease-out;
+}
+.nf-toolbar-row {
+  display: flex;
+  gap: 2px;
+  align-items: center;
+}
+.nf-toolbar-palette {
+  border-top: 1px solid var(--background-modifier-border);
+  padding-top: 4px;
+}
+.nf-swatch {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: transparent;
+  box-shadow: none;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  transition: transform 0.08s ease, border-color 0.08s ease;
+}
+.nf-swatch:hover {
+  border-color: var(--interactive-accent);
+  transform: scale(1.14);
+}
+.nf-swatch-default {
+  background: linear-gradient(135deg, transparent 46%, rgba(255, 208, 0, 0.85) 46%);
+}
+.nf-swatch-off {
+  color: var(--text-muted);
+}
+.nf-swatch-off svg {
+  width: 14px;
+  height: 14px;
+}
+.nf-toolbar-btn.is-open {
+  background-color: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+.nf-toolbar-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.nf-toolbar-btn:hover {
+  background-color: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+.nf-toolbar-btn.is-active {
+  background-color: var(--background-modifier-hover);
+  color: var(--interactive-accent);
+}
+.nf-toolbar-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* ---------- Slash menu ---------- */
+.nf-slash-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 2px;
+}
+.suggestion-item.is-selected .nf-slash-icon {
+  border-color: var(--interactive-accent);
+  color: var(--interactive-accent);
+}
+.nf-slash-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  background-color: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  color: var(--text-muted);
+  flex-shrink: 0;
+  transition: border-color 0.08s ease, color 0.08s ease;
+}
+.nf-slash-icon svg {
+  width: 15px;
+  height: 15px;
+}
+.nf-slash-name {
+  font-size: var(--font-ui-medium);
+}
+
+/* ---------- Cleaner WYSIWYG rendering ---------- */
+
+/* Bullets: let Obsidian's native Live Preview bullet render (no overlay —
+   doubling it up looks broken); just soften its color and dim numbered
+   markers to match. */
+body.nf-clean {
+  --list-marker-color: var(--text-faint);
+}
+body.nf-clean .markdown-source-view.is-live-preview .cm-formatting-list-ol {
+  color: var(--list-marker-color);
+}
+
+/* Hide ">" quote markers (the themed border remains) */
+body.nf-clean .markdown-source-view.is-live-preview .cm-formatting-quote {
+  color: transparent;
+}
+
+/* Softer, centered divider instead of raw --- */
+body.nf-clean .markdown-source-view.is-live-preview .cm-line:has(> .cm-hr) {
+  opacity: 0.9;
+}
+body.nf-clean .markdown-source-view.is-live-preview hr,
+body.nf-clean .markdown-reading-view hr {
+  border: none;
+  border-top: 1px solid var(--background-modifier-border);
+  margin: 1.5em 0;
+}
+
+/* Near-invisible inline formatting tokens on the active line — the text
+   stays editable, the syntax stops shouting */
+body.nf-clean .markdown-source-view.is-live-preview .cm-active .cm-formatting-strong,
+body.nf-clean .markdown-source-view.is-live-preview .cm-active .cm-formatting-em,
+body.nf-clean .markdown-source-view.is-live-preview .cm-active .cm-formatting-strikethrough,
+body.nf-clean .markdown-source-view.is-live-preview .cm-active .cm-formatting-highlight,
+body.nf-clean .markdown-source-view.is-live-preview .cm-active .cm-formatting-code {
+  opacity: 0.18;
+}
+
+/* Heading hashes: nearly gone on the active line too */
+body.nf-clean .markdown-source-view.is-live-preview .cm-active .cm-formatting-header {
+  opacity: 0.15;
+}
+
+/* Link/wikilink brackets and URLs: fade on the active line */
+body.nf-clean .markdown-source-view.is-live-preview .cm-active .cm-formatting-link,
+body.nf-clean .markdown-source-view.is-live-preview .cm-active .cm-formatting-link-start,
+body.nf-clean .markdown-source-view.is-live-preview .cm-active .cm-formatting-link-end,
+body.nf-clean .markdown-source-view.is-live-preview .cm-active .cm-formatting-link-string,
+body.nf-clean .markdown-source-view.is-live-preview .cm-active .cm-url {
+  opacity: 0.35;
+}
+
+/* Task checkboxes: rounder, accent-colored, slightly larger */
+body.nf-clean .markdown-source-view.is-live-preview .task-list-item-checkbox {
+  border-radius: 5px;
+  width: 1.05em;
+  height: 1.05em;
+  border: 1.5px solid var(--text-faint);
+  cursor: pointer;
+  transition: background-color 0.1s ease, transform 0.08s ease, border-color 0.1s ease;
+}
+body.nf-clean .markdown-source-view.is-live-preview .task-list-item-checkbox:hover {
+  border-color: var(--interactive-accent);
+  transform: scale(1.1);
+}
+body.nf-clean .markdown-source-view.is-live-preview .task-list-item-checkbox:checked {
+  background-color: var(--interactive-accent);
+  border-color: var(--interactive-accent);
+}
+
+/* Callout source markers ("> [!note]") fade on the active line */
+body.nf-clean .markdown-source-view.is-live-preview .cm-active .cm-formatting-quote,
+body.nf-clean .markdown-source-view.is-live-preview .cm-active .callout-title-inner ~ .cm-formatting {
+  opacity: 0.25;
+}
+
+/* Notion-like breathing room */
+body.nf-clean .markdown-source-view.is-live-preview .HyperMD-header {
+  padding-top: 0.5em;
+  padding-bottom: 0.1em;
+}
+body.nf-clean .markdown-source-view.is-live-preview .HyperMD-header-1 {
+  padding-top: 0.7em;
+}
+
+/* Completed to-dos fade out, Notion-style */
+body.nf-clean .markdown-source-view.is-live-preview .HyperMD-task-line[data-task="x"],
+body.nf-clean .markdown-source-view.is-live-preview .HyperMD-task-line[data-task="X"] {
+  color: var(--text-faint);
+  text-decoration: line-through;
+  text-decoration-color: var(--background-modifier-border-hover);
+  text-decoration-thickness: 1px;
+}
+
+/* Inline code as a soft pill */
+body.nf-clean .markdown-source-view.is-live-preview .cm-inline-code:not(.cm-formatting) {
+  background-color: var(--background-secondary);
+  border-radius: 4px;
+  padding: 0.08em 0.25em;
+}
+
+/* Blockquote: soften the border and text */
+body.nf-clean .markdown-source-view.is-live-preview .HyperMD-quote {
+  border-left: 3px solid var(--interactive-accent);
+  opacity: 0.95;
+}
+
+/* Nested code fences / callouts: shift the whole line box (background
+   included) by the block's indent so it sits under its parent item */
+.markdown-source-view.is-live-preview .cm-line.nf-nested-block {
+  margin-left: var(--nf-nest, 0px) !important;
+}
+
+/* Vertical guides for nested lists: Obsidian draws these natively on
+   .cm-indent::before (Editor → Indentation guides). Drawing our own on
+   the same pseudo-element doubled every guide and left broken segments,
+   so we don't — native guides are the single source of truth. */
+
+/* Lines shifted right by nf-nested-block (nested code fences, callouts)
+   carry their indent guides along, which paints stray lines inside the
+   shifted block's background. Hide guides on those lines only. */
+.markdown-source-view.is-live-preview .cm-line.nf-nested-block .cm-indent::before,
+.markdown-source-view.is-live-preview .cm-line.nf-nested-block .cm-indent::after {
+  display: none;
+}
