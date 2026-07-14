@@ -43,6 +43,8 @@ const ZH: Record<string, string> = {
   None: "无",
   "List marker color": "列表符号颜色",
   "Color of bullets and list numbers.": "无序圆点与有序编号的颜色。",
+  "Quote bar color": "引用条颜色",
+  "Color of the vertical bar beside quote blocks.": "引用块左侧竖条的颜色。",
   "Accent color": "强调色",
   "Striped table rows": "表格斑马纹",
   "Shade every other table row.": "表格隔行着色。",

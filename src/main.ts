@@ -60,6 +60,8 @@ interface NotionFlowSettings {
   tableStripes: boolean;
   /** "accent", "default" (theme), or a theme palette color name. */
   listMarkerColor: string;
+  /** "text" (neutral ink), "accent", "default" (theme), or a palette color. */
+  quoteBarColor: string;
 }
 
 const DEFAULT_SETTINGS: NotionFlowSettings = {
@@ -75,6 +77,7 @@ const DEFAULT_SETTINGS: NotionFlowSettings = {
   tableHeaderColor: "default",
   tableStripes: false,
   listMarkerColor: "accent",
+  quoteBarColor: "text",
 };
 
 /** Theme palette color names Obsidian defines as --color-<name>-rgb. */
@@ -6059,11 +6062,13 @@ export default class NotionFlowPlugin extends Plugin {
       "nf-table-stripes",
       "nf-thead-tint",
       "nf-list-color",
+      "nf-quote-color",
     ]) {
       document.body.classList.remove(cls);
     }
     document.body.style.removeProperty("--nf-table-header-bg");
     document.body.style.removeProperty("--nf-list-marker");
+    document.body.style.removeProperty("--nf-quote-bar");
   }
 
   /** Each appearance feature drives its own body class, so table look,
@@ -6094,6 +6099,17 @@ export default class NotionFlowPlugin extends Plugin {
       document.body.style.setProperty("--nf-list-marker", `var(--color-${lm})`);
     } else {
       document.body.style.removeProperty("--nf-list-marker");
+    }
+    const qb = this.settings.quoteBarColor;
+    document.body.classList.toggle("nf-quote-color", qb !== "default");
+    if (qb === "text") {
+      document.body.style.setProperty("--nf-quote-bar", "var(--text-normal)");
+    } else if (qb === "accent") {
+      document.body.style.setProperty("--nf-quote-bar", "var(--interactive-accent)");
+    } else if ((PALETTE_COLORS as readonly string[]).includes(qb)) {
+      document.body.style.setProperty("--nf-quote-bar", `var(--color-${qb})`);
+    } else {
+      document.body.style.removeProperty("--nf-quote-bar");
     }
   }
 
@@ -6205,7 +6221,7 @@ class NotionFlowSettingTab extends PluginSettingTab {
     parent: HTMLElement,
     name: string,
     desc: string,
-    key: "tableHeaderColor" | "listMarkerColor",
+    key: "tableHeaderColor" | "listMarkerColor" | "quoteBarColor",
     leading: [string, string][]
   ): Setting {
     return new Setting(parent)
@@ -6328,6 +6344,17 @@ class NotionFlowSettingTab extends PluginSettingTab {
       "Color of bullets and list numbers.",
       "listMarkerColor",
       [["accent", "Accent color"], ["default", "Theme default"]]
+    );
+    this.colorDropdown(
+      this.containerEl,
+      "Quote bar color",
+      "Color of the vertical bar beside quote blocks.",
+      "quoteBarColor",
+      [
+        ["text", "Text color"],
+        ["accent", "Accent color"],
+        ["default", "Theme default"],
+      ]
     );
 
     this.heading(

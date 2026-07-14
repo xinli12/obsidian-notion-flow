@@ -711,17 +711,31 @@ body.nf-clean .markdown-source-view.is-live-preview .cm-inline-code:not(.cm-form
 
 /* Blockquote: restyle Obsidian's native ::before rule (adding a real border
    to the line changes its box width and doubles some themes' quote rule).
-   Notion keeps quote bars neutral ink, not accent-colored — semantic color
-   stays reserved for Callouts, so quote, code, and Callout no longer
-   compete. Reading view uses the same variables for parity. */
+   Reading view uses the same variables for parity. */
 body.nf-clean .markdown-source-view.is-live-preview .HyperMD-quote {
-  --blockquote-border-color: var(--text-normal);
   --blockquote-border-thickness: 3px;
   opacity: 0.95;
 }
 body.nf-clean .markdown-reading-view {
-  --blockquote-border-color: var(--text-normal);
   --blockquote-border-thickness: 3px;
+}
+
+/* Bar color follows the "Quote bar color" setting: neutral ink (Notion
+   default, so semantic color stays reserved for Callouts), accent, or a
+   palette color. "Theme default" leaves the theme's own value untouched. */
+body.nf-quote-color .markdown-source-view.is-live-preview .HyperMD-quote,
+body.nf-quote-color .markdown-reading-view {
+  --blockquote-border-color: var(--nf-quote-bar);
+}
+
+/* Quote body text reads quieter than the surrounding prose. Callout title
+   rows share the quote line class while being edited and keep full color. */
+body.nf-clean .markdown-source-view.is-live-preview
+  .cm-line.HyperMD-quote:not(.HyperMD-callout) {
+  color: var(--text-muted);
+}
+body.nf-clean .markdown-reading-view {
+  --blockquote-color: var(--text-muted);
 }
 
 /* Code rows only pad their inline start natively; long lines run into the
