@@ -143,7 +143,7 @@ Block shortcuts can be changed under Obsidian's **Hotkeys** settings. The comman
 | Conceal HTML formatting tags | On | Hides plugin-generated formatting tags in Live Preview |
 | List marker color | Accent | Accent, theme default, or one of eight palette colors |
 | Quote bar color | Text color | Neutral ink, accent, theme default, or one of eight palette colors |
-| Conceal inline Markdown syntax | Off | Hides supported inline Markdown markers in Live Preview |
+| Conceal inline Markdown syntax | On | Hides supported inline Markdown markers in Live Preview |
 
 The settings page also includes **Restore defaults**.
 

@@ -73,7 +73,7 @@ const DEFAULT_SETTINGS: NotionFlowSettings = {
   tableEditing: true,
   tableStyle: true,
   concealHtml: true,
-  concealMarkdown: false,
+  concealMarkdown: true,
   tableHeaderColor: "default",
   tableStripes: false,
   listMarkerColor: "accent",

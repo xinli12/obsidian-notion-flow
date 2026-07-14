@@ -728,14 +728,15 @@ body.nf-quote-color .markdown-reading-view {
   --blockquote-border-color: var(--nf-quote-bar);
 }
 
-/* Quote body text reads quieter than the surrounding prose. Callout title
-   rows share the quote line class while being edited and keep full color. */
+/* Quote body text reads quieter than the surrounding prose — Obsidian's
+   faintest defined text tone, one rung below muted. Callout title rows
+   share the quote line class while being edited and keep full color. */
 body.nf-clean .markdown-source-view.is-live-preview
   .cm-line.HyperMD-quote:not(.HyperMD-callout) {
-  color: var(--text-muted);
+  color: var(--text-faint);
 }
 body.nf-clean .markdown-reading-view {
-  --blockquote-color: var(--text-muted);
+  --blockquote-color: var(--text-faint);
 }
 
 /* Code rows only pad their inline start natively; long lines run into the
