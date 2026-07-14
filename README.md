@@ -13,7 +13,7 @@ Notion-style block editing for Obsidian: move complete Markdown blocks, insert c
 - **Slash commands:** insert headings, lists, Callouts, toggles, code blocks, tables, dividers, embeds, and internal links with English or Chinese search terms.
 - **Formatting toolbar:** apply bold, italic, underline, strikethrough, text color, highlight, inline code, links, or clear formatting.
 - **Table tools:** add, remove, align, color, format, and move tables; use faster keyboard navigation while editing raw Markdown tables.
-- **Cleaner Live Preview:** refine tasks, quotes, dividers, inline code, list markers, nested blocks, and Markdown syntax visibility.
+- **Cleaner Live Preview:** refine tasks, quotes, dividers, inline code, nested blocks, and Markdown syntax visibility; list-marker cycles remain available independently.
 
 ## Requirements
 
@@ -109,9 +109,9 @@ The same structural operations are available in the command palette and the raw-
 
 ### Appearance
 
-- **Cleaner WYSIWYG rendering** refines headings, tasks, dividers, inline code, and quotes. Quote markers are concealed on inactive Live Preview lines and return on the active line.
-- Unordered bullet shapes cycle by depth in Live Preview; ordered markers cycle through decimal, alphabetic, and Roman styles in Reading view.
-- Nested code fences and Callouts stay visually aligned with their parent list items.
+- **Cleaner WYSIWYG rendering** is display-only: it refines headings, tasks, dividers, inline code, and quotes without rewriting Markdown. List cycles stay enabled independently. Quote markers are concealed on inactive Live Preview lines and return on the active line.
+- Both Live Preview and Reading view cycle styles across the full mixed-list depth: filled, hollow, and square bullets; decimal, lower-alpha, and lower-Roman numbers. The active Live Preview line still shows its editable Markdown number.
+- Code fences, Callouts, and quotes dragged to any valid list depth use the real content level and stay aligned in source and rendered states.
 - **Notion-style tables**, header tint, and striped rows can be configured independently.
 - Wide Markdown tables become horizontally scrollable in Reading view.
 - **Conceal inline Markdown syntax** optionally hides formatting markers until the caret enters their source. Markdown links remain visible and Source mode is unchanged.
@@ -139,7 +139,7 @@ Block shortcuts can be changed under Obsidian's **Hotkeys** settings. The comman
 | Notion-style tables | On | Rounded table appearance, focus, hover, and spacing |
 | Table header background | Theme default | Header tint, none, or one of eight palette colors |
 | Striped table rows | Off | Alternating body-row tint |
-| Cleaner WYSIWYG rendering | On | Live Preview appearance refinements |
+| Cleaner WYSIWYG rendering | On | Display-only Live Preview and Reading-view refinements; never changes Markdown |
 | Conceal HTML formatting tags | On | Hides plugin-generated formatting tags in Live Preview |
 | List marker color | Accent | Accent, theme default, or one of eight palette colors |
 | Conceal inline Markdown syntax | Off | Hides supported inline Markdown markers in Live Preview |

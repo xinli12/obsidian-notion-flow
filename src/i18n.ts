@@ -29,8 +29,8 @@ const ZH: Record<string, string> = {
   "Pasting a URL over selected text turns it into [text](url).":
     "选中文本后粘贴 URL,自动生成 [文本](链接)。",
   "Cleaner WYSIWYG rendering": "更简洁的所见即所得渲染",
-  "Polish bullets, quotes, dividers, headings, tasks, and inline code in Live Preview.":
-    "优化实时预览中的列表符号、引用、分割线、标题、任务和行内代码外观。",
+  "Apply display-only polish to quotes, dividers, headings, tasks, and inline code in Live Preview and Reading view. List cycles stay enabled independently. Your Markdown is never changed.":
+    "只优化实时预览和阅读视图中的引用、分割线、标题、任务与行内代码外观；列表循环独立保持启用，且不会修改 Markdown 内容。",
   "Table editing enhancements": "表格编辑增强",
   "In tables, Tab and Enter move between cells, and new rows are added automatically at the end.":
     "在表格中,Tab 和 Enter 在单元格间移动,到达末尾时自动新增行。",
@@ -64,6 +64,12 @@ const ZH: Record<string, string> = {
   "Example notes": "示例文档",
   "Hands-on tours you can copy into your vault.":
     "可复制到库中直接操作的上手示例。",
+  About: "关于",
+  "Plugin version, source code, and issue reporting.":
+    "插件版本、源代码与问题反馈。",
+  "Open source under the MIT license.": "基于 MIT 许可证开源。",
+  "Report an issue": "反馈问题",
+  Cancel: "取消",
   "Restore defaults": "恢复默认设置",
   "Reset every Notion Flow option to its original value.":
     "将所有 Notion Flow 选项恢复为初始值。",

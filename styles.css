@@ -10,18 +10,33 @@
 }
 
 /* ---------- Drag handle + insert button ---------- */
-.nf-drag-handle,
-.nf-plus-btn {
+.nf-block-controls {
   position: fixed;
   z-index: var(--layer-popover, 30);
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  animation: nf-fade 0.1s ease-out;
+}
+.nf-block-controls > .nf-drag-handle,
+.nf-block-controls > .nf-plus-btn {
+  box-sizing: border-box;
+  appearance: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
   width: 22px;
+  min-width: 0;
   height: 22px;
+  min-height: 0;
   display: flex;
   align-items: center;
   justify-content: center;
   border-radius: 5px;
+  background: transparent;
+  box-shadow: none;
   color: var(--text-faint);
-  animation: nf-fade 0.1s ease-out;
+  font: inherit;
   transition: background-color 0.1s ease, color 0.1s ease;
 }
 .nf-drag-handle {
@@ -33,11 +48,22 @@
 .nf-drag-handle:hover,
 .nf-plus-btn:hover {
   background-color: var(--background-modifier-hover);
+  box-shadow: none;
   color: var(--text-normal);
+}
+.nf-drag-handle:focus-visible,
+.nf-plus-btn:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 1px;
 }
 .nf-drag-handle.is-dragging {
   cursor: grabbing;
   color: var(--interactive-accent);
+}
+.nf-block-controls.is-edge .nf-drag-handle:not(.is-table-block) {
+  border: 1px solid var(--background-modifier-border);
+  background-color: var(--background-primary);
+  box-shadow: var(--shadow-s);
 }
 .nf-drag-handle svg,
 .nf-plus-btn svg {
@@ -485,7 +511,7 @@ body.nf-dragging * {
   }
 }
 
-/* ---------- Cleaner WYSIWYG rendering ---------- */
+/* ---------- List markers (always enabled) ------------------------ */
 
 /* Bullets: let Obsidian's native Live Preview bullet render (no overlay —
    doubling it up looks broken). nf-list-color is present whenever the
@@ -494,36 +520,118 @@ body.nf-dragging * {
 body.nf-list-color {
   --list-marker-color: var(--nf-list-marker);
 }
-body.nf-list-color .markdown-source-view.is-live-preview .cm-formatting-list-ol,
-body.nf-list-color .markdown-reading-view ol > li::marker {
-  color: var(--list-marker-color);
-}
 
-/* Bullet shapes cycle with nesting depth, Notion-style: ● ○ ▪ ● …
-   Obsidian draws the Live Preview bullet as a small absolutely-positioned
-   circle in .list-bullet::after — restyle shape only, keep its layout. */
-body.nf-clean .markdown-source-view.is-live-preview
-  :is(.HyperMD-list-line-2, .HyperMD-list-line-5, .HyperMD-list-line-8)
-  .list-bullet::after {
+/* Both editor and Reading view carry the same depth % 3 phase. Obsidian
+   already owns the bullet position through .list-bullet::after; repainting
+   that one pseudo-element avoids a second native marker. */
+body .markdown-source-view.is-live-preview
+  .cm-line[data-nf-list-phase="0"] .list-bullet::after,
+body .markdown-reading-view
+  ul[data-nf-list-phase="0"] > li > .list-bullet::after {
+  border: 0;
+  border-radius: 50%;
+  width: 5px;
+  height: 5px;
+  box-sizing: border-box;
+}
+body .markdown-source-view.is-live-preview
+  .cm-line[data-nf-list-phase="1"] .list-bullet::after,
+body .markdown-reading-view
+  ul[data-nf-list-phase="1"] > li > .list-bullet::after {
   background-color: transparent;
   border: 1.5px solid var(--list-marker-color);
+  border-radius: 50%;
   width: 5.5px;
   height: 5.5px;
   box-sizing: border-box;
 }
-body.nf-clean .markdown-source-view.is-live-preview
-  :is(.HyperMD-list-line-3, .HyperMD-list-line-6, .HyperMD-list-line-9)
-  .list-bullet::after {
+body .markdown-source-view.is-live-preview
+  .cm-line[data-nf-list-phase="2"] .list-bullet::after,
+body .markdown-reading-view
+  ul[data-nf-list-phase="2"] > li > .list-bullet::after {
+  border: 0;
   border-radius: 1.5px;
+  width: 5px;
+  height: 5px;
+  box-sizing: border-box;
 }
 
-/* Reading view: Obsidian owns unordered markers through .list-bullet::after.
-   Re-enabling native ul markers would paint a second bullet on top. Keep the
-   ordered-list cycle only; its marker is genuinely native. */
-body.nf-clean .markdown-reading-view ol { list-style-type: decimal; }
-body.nf-clean .markdown-reading-view ol ol { list-style-type: lower-alpha; }
-body.nf-clean .markdown-reading-view ol ol ol { list-style-type: lower-roman; }
-body.nf-clean .markdown-reading-view ol ol ol ol { list-style-type: decimal; }
+/* Keep Obsidian's fold and hover color states for the hollow phase too. */
+body .markdown-reading-view
+  ul[data-nf-list-phase="1"] > li.is-collapsed > .list-bullet::after,
+body .markdown-source-view.is-live-preview
+  .cm-line[data-nf-list-phase="1"]
+  .is-collapsed ~ .cm-formatting-list .list-bullet::after {
+  border-color: var(--list-marker-color-collapsed);
+}
+@media (hover: hover) {
+  body .markdown-reading-view
+    ul[data-nf-list-phase="1"] > li
+    > .list-collapse-indicator:hover ~ .list-bullet::after,
+  body .markdown-source-view.is-live-preview
+    .cm-line[data-nf-list-phase="1"]
+    .cm-fold-indicator:hover ~ .list-bullet::after,
+  body .markdown-source-view.is-live-preview
+    .cm-line[data-nf-list-phase="1"]
+    .cm-fold-indicator:hover ~ .cm-formatting-list .list-bullet::after {
+    border-color: var(--list-marker-color-hover);
+  }
+  body .markdown-reading-view
+    ul[data-nf-list-phase="1"] > li.is-collapsed
+    > .list-collapse-indicator:hover ~ .list-bullet::after,
+  body .markdown-source-view.is-live-preview
+    .cm-line[data-nf-list-phase="1"]
+    .cm-fold-indicator:hover.is-collapsed ~ .list-bullet::after,
+  body .markdown-source-view.is-live-preview
+    .cm-line[data-nf-list-phase="1"]
+    .cm-fold-indicator:hover.is-collapsed
+    ~ .cm-formatting-list .list-bullet::after {
+    border-color: var(--list-marker-color-collapsed);
+  }
+}
+
+/* Reading view has native OL markers, so list-style-type is sufficient. */
+body .markdown-reading-view ol[data-nf-list-phase="0"] {
+  list-style-type: decimal;
+}
+body .markdown-reading-view ol[data-nf-list-phase="1"] {
+  list-style-type: lower-alpha;
+}
+body .markdown-reading-view ol[data-nf-list-phase="2"] {
+  list-style-type: lower-roman;
+}
+
+/* Live Preview exposes the literal Markdown marker, not an <ol>. On an
+   inactive line, let the decoration's generated marker take its place in
+   normal flow (wide Roman labels therefore reserve their real width).
+   The active line remains untouched and shows editable Markdown source. */
+body .markdown-source-view.is-live-preview
+  .cm-line:not(.cm-active) .nf-ordered-list-marker {
+  display: inline-block;
+  font-size: 0;
+  white-space: nowrap;
+}
+body .markdown-source-view.is-live-preview
+  .cm-line:not(.cm-active) .nf-ordered-list-marker::after {
+  content: attr(data-nf-marker);
+  color: var(--list-marker-color);
+  font-family: inherit;
+  font-size: var(--font-text-size, 1rem);
+  font-variant-numeric: tabular-nums;
+}
+@media (hover: hover) {
+  body .markdown-source-view.is-live-preview
+    .cm-line:has(.cm-fold-indicator:hover)
+    .nf-ordered-list-marker::after {
+    color: var(--list-marker-color-hover);
+  }
+}
+body .markdown-source-view.is-live-preview
+  .cm-line:has(.is-collapsed) .nf-ordered-list-marker::after {
+  color: var(--list-marker-color-collapsed);
+}
+
+/* ---------- Cleaner WYSIWYG rendering ---------- */
 
 /* Hide ">" only while reading. Restore it on the active source line so
    nested quote/callout prefixes remain understandable and editable. */
@@ -855,40 +963,62 @@ body.nf-tables .markdown-reading-view table :is(th, td):focus-within {
 
 /* ---------- List-contained block layers ---------------------------- */
 
-/* CodeMirror paints quote/code rows as full-width lines. Their source-indent
-   spans only account for the literal Markdown whitespace, not the list's
-   visual content column, which left text, quote rules and code backgrounds
-   at different X positions. Shift the complete line exactly once by the
-   logical list depth so every layer stays together while editing. */
+/* Literal Markdown indentation already places quote/code text at its nested
+   content column. Moving the complete line adds that offset a second time.
+   Keep source text in native coordinates and move only the painted layer. */
 .markdown-source-view.is-live-preview .cm-line.nf-nested-block {
   box-sizing: border-box;
-  margin-inline-start: var(--nf-nest, 0px) !important;
-  width: calc(100% - var(--nf-nest, 0px)) !important;
+  margin-inline-start: 0 !important;
+  width: auto !important;
+}
+.markdown-source-view.is-live-preview
+  .cm-line.nf-nested-block.HyperMD-codeblock-bg {
+  isolation: isolate;
+  background: transparent !important;
+}
+.markdown-source-view.is-live-preview
+  .cm-line.nf-nested-block.HyperMD-codeblock-bg::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset-block: 0;
+  inset-inline-start: calc(var(--nf-nest, 0px) - 12px);
+  inset-inline-end: 0;
+  background: var(--code-background);
+  pointer-events: none;
+}
+/* Each painted row is its own stacking context, so Obsidian's language
+   flair / copy widget — an absolutely positioned child of the opener row
+   that overhangs into the next row — would be painted over by the next
+   row's context. Keep the opener row above its block body. */
+.markdown-source-view.is-live-preview
+  .cm-line.nf-nested-block.HyperMD-codeblock-begin-bg {
+  z-index: 1;
+}
+.markdown-source-view.is-live-preview
+  .cm-line.nf-nested-block.HyperMD-codeblock-begin-bg::before {
+  border-start-start-radius: var(--code-radius, var(--radius-s));
+  border-start-end-radius: var(--code-radius, var(--radius-s));
+}
+.markdown-source-view.is-live-preview
+  .cm-line.nf-nested-block.HyperMD-codeblock-end-bg::before {
+  border-end-start-radius: var(--code-radius, var(--radius-s));
+  border-end-end-radius: var(--code-radius, var(--radius-s));
 }
 .markdown-source-view.is-live-preview
   .cm-line.nf-nested-quote::before {
-  inset-inline-start: 0 !important;
-}
-/* Obsidian gives the first quote row a list-indent span, while continuation
-   rows only retain their literal whitespace span. Add the missing marker
-   space to continuation rows so every quote line starts at the same X. */
-.markdown-source-view.is-live-preview
-  .cm-line.nf-nested-quote:not(:has(> .cm-hmd-list-indent))
-  > .cm-hmd-indent-in-quote:first-child {
-  padding-inline-start: calc(
-    var(--list-indent-editing) + var(--list-marker-space)
-  );
+  inset-inline-start: calc(var(--nf-nest, 0px) - 12px) !important;
 }
 
 /* Callout widgets are direct children of .cm-content in Live Preview; the
-   outer widget does not inherit its source line's list layout. Apply the
-   logical offset in both rendered and source-edit (<pre>) states so the
-   block does not jump or become a full-width slab when editing begins. */
+   outer widget does not inherit its source line's list layout. Rendered and
+   repaired Callouts therefore receive one logical offset; their normalized
+   inner Markdown no longer contains a second visual indentation. */
 .markdown-source-view.is-live-preview
   .cm-embed-block.nf-nested-widget {
   box-sizing: border-box;
-  margin-inline-start: var(--nf-nest, 0px) !important;
-  width: calc(100% - var(--nf-nest, 0px)) !important;
+  margin-inline-start: calc(var(--nf-nest, 0px) - 12px) !important;
+  width: calc(100% - var(--nf-nest, 0px) + 12px) !important;
 }
 
 /* Older notes can already contain a callout immediately followed by a
@@ -923,12 +1053,22 @@ body.nf-tables .markdown-reading-view table :is(th, td):focus-within {
    the same pseudo-element doubled every guide and left broken segments,
    so we don't — native guides are the single source of truth. */
 
+/* Except through nested code blocks. Code rows resolve the guide offsets
+   against their monospace font, so the segments sit at different x than
+   the surrounding list's guides, and blank code rows have no indent spans
+   at all — the guides fragment into misaligned dashes. The painted block
+   already communicates containment; render it guide-free, exactly like
+   callout and table widgets. */
+.markdown-source-view.is-live-preview
+  .cm-line.nf-nested-block.HyperMD-codeblock .cm-indent::before {
+  display: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .nf-block-menu-anchor .menu,
   .nf-table-picker,
   .nf-toolbar,
-  .nf-drag-handle,
-  .nf-plus-btn {
+  .nf-block-controls {
     animation: none;
   }
   .nf-drag-handle,
