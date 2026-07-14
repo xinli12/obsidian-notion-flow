@@ -709,11 +709,25 @@ body.nf-clean .markdown-source-view.is-live-preview .cm-inline-code:not(.cm-form
   padding: 0.08em 0.25em;
 }
 
-/* Blockquote: tint Obsidian's native ::before rule. Adding a real border to
-   the line changes its box width and doubles some themes' quote rule. */
+/* Blockquote: restyle Obsidian's native ::before rule (adding a real border
+   to the line changes its box width and doubles some themes' quote rule).
+   Notion keeps quote bars neutral ink, not accent-colored — semantic color
+   stays reserved for Callouts, so quote, code, and Callout no longer
+   compete. Reading view uses the same variables for parity. */
 body.nf-clean .markdown-source-view.is-live-preview .HyperMD-quote {
-  --blockquote-border-color: var(--interactive-accent);
+  --blockquote-border-color: var(--text-normal);
+  --blockquote-border-thickness: 3px;
   opacity: 0.95;
+}
+body.nf-clean .markdown-reading-view {
+  --blockquote-border-color: var(--text-normal);
+  --blockquote-border-thickness: 3px;
+}
+
+/* Code rows only pad their inline start natively; long lines run into the
+   right edge of the painted block. Match the 16px start padding. */
+body.nf-clean .markdown-source-view.is-live-preview .cm-line.HyperMD-codeblock {
+  padding-inline-end: var(--size-4-4, 16px);
 }
 
 /* ---------- Tables: Notion-like clean look ---------- */
@@ -982,7 +996,7 @@ body.nf-tables .markdown-reading-view table :is(th, td):focus-within {
   position: absolute;
   z-index: -1;
   inset-block: 0;
-  inset-inline-start: calc(var(--nf-nest, 0px) - 12px);
+  inset-inline-start: calc(var(--nf-nest, 0px) - 16px);
   inset-inline-end: 0;
   background: var(--code-background);
   pointer-events: none;
@@ -1007,7 +1021,7 @@ body.nf-tables .markdown-reading-view table :is(th, td):focus-within {
 }
 .markdown-source-view.is-live-preview
   .cm-line.nf-nested-quote::before {
-  inset-inline-start: calc(var(--nf-nest, 0px) - 12px) !important;
+  inset-inline-start: calc(var(--nf-nest, 0px) - 16px) !important;
 }
 
 /* Callout widgets are direct children of .cm-content in Live Preview; the
@@ -1017,8 +1031,8 @@ body.nf-tables .markdown-reading-view table :is(th, td):focus-within {
 .markdown-source-view.is-live-preview
   .cm-embed-block.nf-nested-widget {
   box-sizing: border-box;
-  margin-inline-start: calc(var(--nf-nest, 0px) - 12px) !important;
-  width: calc(100% - var(--nf-nest, 0px) + 12px) !important;
+  margin-inline-start: calc(var(--nf-nest, 0px) - 16px) !important;
+  width: calc(100% - var(--nf-nest, 0px) + 16px) !important;
 }
 
 /* Older notes can already contain a callout immediately followed by a

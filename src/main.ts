@@ -2440,7 +2440,7 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
           ? this.structuralPaintLeft(firstLine.from)
           : undefined;
         const xOff = Math.min(this.blockVisualOffset(block), contentRect.width / 2);
-        const left = painted != null && painted >= contentRect.left - 12
+        const left = painted != null && painted >= contentRect.left - 20
           ? painted - 2
           : contentRect.left + xOff - 6;
         this.highlight.style.display = "block";
@@ -2620,7 +2620,7 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         const structuralSource = !widgetAtStart &&
           (!!fenceAt(this.fences, block.startLine) || RE_QUOTE.test(firstLine.text));
         const structuralLeft = structuralSource
-          ? this.structuralPaintLeft(startPos) ?? contentRect.left + xOff - 12
+          ? this.structuralPaintLeft(startPos) ?? contentRect.left + xOff - 16
           : undefined;
         const anchorX =
           widgetAtStart?.info.rect.left ??
