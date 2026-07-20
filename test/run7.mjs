@@ -72,6 +72,35 @@ const mk = (text, from, to) => {
   clearInlineFormatting(v);
   ok("clear preserves unrelated HTML", v.state.doc.toString() === text, v.state.doc.toString());
 }
+// A partial selection removes the WHOLE intersecting pair — no orphans.
+{
+  const text = "**bold text** tail";
+  const v = mk(text, text.indexOf("text"), text.length);
+  clearInlineFormatting(v);
+  ok(
+    "clear partial selection leaves no orphan markers",
+    v.state.doc.toString() === "bold text tail",
+    v.state.doc.toString()
+  );
+}
+// Underscore emphasis is bold/italic too.
+{
+  const v = mk("_italic_ x", 1, 7);
+  clearInlineFormatting(v);
+  ok("clear underscore italics", v.state.doc.toString() === "italic x", v.state.doc.toString());
+}
+// Comments are notes, not formatting — the anchor stays, formats inside go.
+{
+  const text = '<span class="nf-cmt" data-nf-cmt="n">**word**</span>';
+  const from = text.indexOf("word");
+  const v = mk(text, from, from + 4);
+  clearInlineFormatting(v);
+  ok(
+    "clear keeps comment anchors",
+    v.state.doc.toString() === '<span class="nf-cmt" data-nf-cmt="n">word</span>',
+    v.state.doc.toString()
+  );
+}
 ok("palette has 8 text colors", TEXT_COLORS.length === 8);
 
 console.log(fail === 0 ? "ALL PASS" : `${fail} FAILURES`);

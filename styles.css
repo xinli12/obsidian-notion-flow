@@ -117,6 +117,29 @@ body.nf-dragging * {
   background-color: var(--interactive-accent);
 }
 
+/* Vertical bar: dropping HERE puts the dragged block beside this one,
+   as a column (Notion's create-a-column gesture). */
+.nf-col-indicator {
+  position: fixed;
+  z-index: var(--layer-popover, 30);
+  width: 3px;
+  border-radius: 2px;
+  background-color: var(--interactive-accent);
+  opacity: 0.9;
+  pointer-events: none;
+  transition: top 0.09s ease, left 0.09s ease, height 0.09s ease;
+}
+.nf-col-indicator::before {
+  content: "";
+  position: absolute;
+  top: -4px;
+  left: -2.5px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: var(--interactive-accent);
+}
+
 /* Hovered block: show exactly what the handle will drag */
 .nf-block-highlight {
   position: fixed;
@@ -422,8 +445,23 @@ body.nf-dragging * {
   width: 15px;
   height: 15px;
 }
+.nf-slash-main {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
 .nf-slash-name {
   font-size: var(--font-ui-medium);
+  line-height: 1.25;
+}
+.nf-slash-desc {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-faint);
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .nf-slash-hint {
   margin-left: auto;
@@ -642,6 +680,7 @@ body.nf-clean .markdown-source-view.is-live-preview
 body.nf-clean .markdown-source-view.is-live-preview
   .cm-active .cm-formatting-quote {
   color: var(--text-faint);
+  opacity: 0.5;
 }
 
 /* Softer, centered divider instead of raw --- */
@@ -684,6 +723,607 @@ body.nf-clean .markdown-source-view.is-live-preview .cm-active .callout-title-in
   opacity: 0.45;
 }
 
+/* Rendered Callout icon opens the type menu (Callout and quote
+   enhancements), so give it a button affordance. Callouts nested inside
+   the rendered content keep native click-to-edit and no affordance. */
+body.nf-callout-menu .markdown-source-view.mod-cm6 .cm-embed-block.cm-callout .callout-icon {
+  cursor: pointer;
+  border-radius: var(--radius-s, 4px);
+  transition: background-color 0.12s ease, box-shadow 0.12s ease;
+}
+body.nf-callout-menu .markdown-source-view.mod-cm6 .cm-embed-block.cm-callout .callout-icon:hover {
+  background-color: var(--background-modifier-hover);
+  box-shadow: 0 0 0 4px var(--background-modifier-hover);
+}
+body.nf-callout-menu .markdown-source-view.mod-cm6 .cm-embed-block.cm-callout .callout .callout .callout-icon {
+  cursor: inherit;
+}
+body.nf-callout-menu .markdown-source-view.mod-cm6 .cm-embed-block.cm-callout .callout .callout .callout-icon:hover {
+  background-color: transparent;
+  box-shadow: none;
+}
+
+/* ---------- In-place Callout editing ---------- */
+/* When the caret enters a Callout, Live Preview swaps the rendered widget
+   for source lines. Re-paint the rendered box on those lines — the tint
+   lives on ::after so the quote bar's ::before stays free — and the box
+   replaces the bar, matching the rendered Callout's bar-less look. The
+   inset mirrors the nested-block layer: nest offset minus the shared
+   16px overhang, resolving to 0 for top-level Callouts. */
+body.nf-callout-menu .markdown-source-view.is-live-preview .cm-line.nf-co-edit {
+  isolation: isolate;
+  --blockquote-border-thickness: 0px;
+}
+body.nf-callout-menu .markdown-source-view.is-live-preview .cm-line.nf-co-edit::after {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset-block: 0;
+  inset-inline-start: calc(var(--nf-nest, 16px) - 16px);
+  inset-inline-end: 0;
+  background-color: rgba(var(--callout-color, var(--callout-default)), 0.08);
+  pointer-events: none;
+}
+body.nf-callout-menu .markdown-source-view.is-live-preview .cm-line.nf-co-first {
+  padding-top: var(--size-4-2, 8px);
+}
+body.nf-callout-menu .markdown-source-view.is-live-preview .cm-line.nf-co-last {
+  padding-bottom: var(--size-4-2, 8px);
+}
+body.nf-callout-menu .markdown-source-view.is-live-preview .cm-line.nf-co-first::after {
+  border-start-start-radius: var(--callout-radius, var(--radius-s, 4px));
+  border-start-end-radius: var(--callout-radius, var(--radius-s, 4px));
+}
+body.nf-callout-menu .markdown-source-view.is-live-preview .cm-line.nf-co-last::after {
+  border-end-start-radius: var(--callout-radius, var(--radius-s, 4px));
+  border-end-end-radius: var(--callout-radius, var(--radius-s, 4px));
+}
+/* Title row reads like the rendered title: type color, semibold. */
+body.nf-callout-menu .markdown-source-view.is-live-preview .cm-line.nf-co-first span.cm-quote {
+  color: rgb(var(--callout-color, var(--callout-default)));
+  font-weight: var(--callout-title-weight, 600);
+}
+/* Column scaffolding rows ("> [!nf-cols]", "> > [!nf-col]") are structure,
+   not prose — read them faint AND small while the block is open for
+   editing, so they cost little vertical room. Wins over the title-row
+   color above by carrying one more class. */
+body.nf-callout-menu .markdown-source-view.is-live-preview .cm-line.nf-co-edit.nf-co-meta,
+body.nf-callout-menu .markdown-source-view.is-live-preview .cm-line.nf-co-edit.nf-co-meta span.cm-quote {
+  color: var(--text-faint);
+  font-weight: 400;
+  opacity: 0.75;
+  font-size: 0.78em;
+}
+
+/* ---------- Columns (Notion-style side-by-side layout) ---------- */
+/* "[!nf-cols]" wrappers and their "[!nf-col]" children lose all Callout
+   chrome and become a flex row. Direct-child selectors keep real Callouts
+   nested INSIDE a column fully styled. Live Preview and Reading view share
+   this DOM shape, so one set of rules serves both. */
+body.nf-columns .callout[data-callout="nf-cols"] {
+  --nf-column-gap: clamp(20px, 3vw, 36px);
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  position: relative; /* anchors the hover ⋯ button */
+  container-name: nf-columns;
+  container-type: inline-size;
+}
+body.nf-columns .callout[data-callout="nf-cols"] > .callout-title {
+  display: none;
+}
+body.nf-columns .callout[data-callout="nf-cols"] > .callout-content {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  gap: 0; /* injected gutter items own both spacing and resizing */
+  margin: 0;
+  padding: 0;
+  width: 100%;
+}
+body.nf-columns .callout[data-callout="nf-cols"] > .callout-content > .callout[data-callout="nf-col"] {
+  flex: 1 1 0;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: none;
+  box-shadow: none;
+  position: relative;
+  transition: background-color 0.12s ease, box-shadow 0.12s ease;
+}
+body.nf-columns .callout[data-callout="nf-cols"] > .callout-content > .callout[data-callout="nf-col"] > .callout-title {
+  display: none;
+}
+body.nf-columns .callout[data-callout="nf-cols"] > .callout-content > .callout[data-callout="nf-col"] > .callout-content {
+  margin: 0;
+  padding: 0;
+}
+body.nf-columns .callout[data-callout="nf-cols"] > .callout-content > .callout[data-callout="nf-col"] > .callout-content > :first-child {
+  margin-top: 0;
+}
+body.nf-columns .callout[data-callout="nf-cols"] > .callout-content > .callout[data-callout="nf-col"] > .callout-content > :last-child {
+  margin-bottom: 0;
+}
+/* "[!nf-col|30]" pins the column's width (the post-processor validates
+   the number and writes --nf-col-w). */
+body.nf-columns .callout[data-callout="nf-cols"] > .callout-content > .callout[data-callout="nf-col"].nf-col-sized {
+  flex: 0 1 var(--nf-col-w);
+  min-width: 0;
+}
+
+/* The gutter is a real flex item, so it spans the tallest column and its
+   hit target never changes the document layout. Pointer drag writes a
+   single width transaction on release; keyboard focus uses the same rail. */
+body.nf-columns .callout[data-callout="nf-cols"] > .callout-content > .nf-col-resizer {
+  position: relative;
+  flex: 0 0 var(--nf-column-gap);
+  align-self: stretch;
+  min-height: 48px;
+  outline: none;
+  cursor: col-resize;
+  touch-action: none;
+}
+body.nf-columns .callout[data-callout="nf-cols"] > .callout-content > .nf-col-resizer::before {
+  content: "";
+  position: absolute;
+  inset-block: 4px;
+  inset-inline-start: 50%;
+  width: 2px;
+  border-radius: 999px;
+  background-color: var(--background-modifier-border-hover);
+  opacity: 0;
+  transform: translateX(-50%);
+  transition: opacity 0.12s ease, background-color 0.12s ease, width 0.12s ease;
+}
+body.nf-columns .callout[data-callout="nf-cols"]:hover > .callout-content > .nf-col-resizer::before,
+body.nf-columns .callout[data-callout="nf-cols"] > .callout-content > .nf-col-resizer:hover::before,
+body.nf-columns .callout[data-callout="nf-cols"] > .callout-content > .nf-col-resizer:focus-visible::before,
+body.nf-columns .callout[data-callout="nf-cols"] > .callout-content > .nf-col-resizer.is-resizing::before {
+  opacity: 1;
+}
+body.nf-columns .callout[data-callout="nf-cols"] > .callout-content > .nf-col-resizer:hover::before,
+body.nf-columns .callout[data-callout="nf-cols"] > .callout-content > .nf-col-resizer:focus-visible::before,
+body.nf-columns .callout[data-callout="nf-cols"] > .callout-content > .nf-col-resizer.is-resizing::before {
+  width: 3px;
+  background-color: var(--interactive-accent);
+}
+body.nf-columns .callout[data-callout="nf-cols"] > .callout-content > .nf-col-resizer::after {
+  content: attr(data-nf-column-value);
+  position: absolute;
+  z-index: 4;
+  inset-block-start: 50%;
+  inset-inline-start: 50%;
+  padding: 4px 7px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-primary);
+  box-shadow: var(--shadow-s);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.2;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+}
+body.nf-columns .callout[data-callout="nf-cols"] > .callout-content > .nf-col-resizer.is-resizing::after {
+  opacity: 1;
+}
+body.nf-resizing-columns,
+body.nf-resizing-columns * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+.markdown-reading-view .nf-col-resizer {
+  cursor: default !important;
+  pointer-events: none;
+}
+.markdown-reading-view .nf-col-resizer::before,
+.markdown-reading-view .nf-col-resizer::after {
+  display: none;
+}
+
+/* An EMPTY column would otherwise render as nothing — impossible to see
+   or click. Give it a visible, clickable slot with a "+" hint; clicking
+   it opens the row for editing like any other click on the widget. */
+body.nf-columns .callout[data-callout="nf-cols"] > .callout-content > .callout[data-callout="nf-col"]:not(:has(> .callout-content *)) {
+  position: relative;
+  min-height: 2.4em;
+  border: 1.5px dashed var(--background-modifier-border-hover);
+  border-radius: var(--radius-s, 4px);
+}
+body.nf-columns .callout[data-callout="nf-cols"] > .callout-content > .callout[data-callout="nf-col"]:not(:has(> .callout-content *))::after {
+  content: "+";
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 1.1em;
+  color: var(--text-faint);
+  pointer-events: none;
+}
+
+/* Column boundaries are invisible ink until you need them: hovering the
+   rendered row (Live Preview) washes each column with a whisper of tint.
+   The halo comes from a box-shadow, so nothing shifts on hover. */
+body.nf-columns .markdown-source-view.is-live-preview .cm-embed-block:hover .callout[data-callout="nf-cols"] > .callout-content > .callout[data-callout="nf-col"]:hover,
+body.nf-columns .callout[data-callout="nf-cols"].is-resizing > .callout-content > .callout[data-callout="nf-col"] {
+  background-color: rgba(var(--mono-rgb-100), 0.04);
+  box-shadow: 0 0 0 6px rgba(var(--mono-rgb-100), 0.04);
+  border-radius: var(--radius-s, 4px);
+}
+body.nf-columns .callout[data-callout="nf-cols"] > .callout-content > .callout[data-callout="nf-col"]:has(+ .nf-col-resizer:hover),
+body.nf-columns .callout[data-callout="nf-cols"] > .callout-content > .nf-col-resizer:hover + .callout[data-callout="nf-col"],
+body.nf-columns .callout[data-callout="nf-cols"] > .callout-content > .callout[data-callout="nf-col"]:has(+ .nf-col-resizer:focus-visible),
+body.nf-columns .callout[data-callout="nf-cols"] > .callout-content > .nf-col-resizer:focus-visible + .callout[data-callout="nf-col"] {
+  box-shadow: 0 0 0 1px var(--interactive-accent);
+  border-radius: var(--radius-s, 4px);
+}
+
+/* The hover ⋯ button on every columns row: add / resize / unwrap without
+   hunting for the block handle. Editing surface only — Reading view is
+   read-only, so it never shows the button. */
+.nf-cols-menu {
+  position: absolute;
+  top: 0;
+  /* Obsidian's own edit-block button owns the top-right corner of the
+     embed — sit just left of it so both stay clickable. */
+  inset-inline-end: 32px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  appearance: none;
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  min-height: 28px;
+  margin: 0;
+  padding: 0;
+  border-radius: 6px;
+  background-color: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  box-shadow: var(--shadow-s, 0 1px 2px rgba(0, 0, 0, 0.12));
+  color: var(--text-muted);
+  cursor: pointer;
+  /* Quietly present at all times — full strength when the row is hovered.
+     (A fully hidden button was undiscoverable and hover-timing fragile.) */
+  opacity: 0.4;
+  transition: opacity 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.nf-cols-menu svg {
+  width: 13px;
+  height: 13px;
+}
+body.nf-columns .markdown-source-view.is-live-preview .cm-embed-block:hover .callout[data-callout="nf-cols"] > .nf-cols-menu,
+.nf-cols-menu:focus-visible {
+  opacity: 1;
+}
+.nf-cols-menu:hover {
+  color: var(--interactive-accent);
+  border-color: var(--interactive-accent);
+}
+.nf-cols-menu:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
+}
+.markdown-reading-view .nf-cols-menu {
+  display: none;
+}
+
+/* Per-column actions stay local to the hovered/focused track: insert on
+   either side, reorder, or delete without opening the whole source block. */
+.nf-col-menu {
+  position: absolute;
+  z-index: 3;
+  inset-block-start: 3px;
+  inset-inline-end: 3px;
+  box-sizing: border-box;
+  appearance: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  min-height: 24px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--background-primary) 92%, transparent);
+  box-shadow: var(--shadow-s);
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.nf-col-menu svg {
+  width: 13px;
+  height: 13px;
+}
+body.nf-columns .markdown-source-view.is-live-preview .callout[data-callout="nf-col"]:hover > .nf-col-menu,
+body.nf-columns .markdown-source-view.is-live-preview .callout[data-callout="nf-col"]:focus-within > .nf-col-menu,
+.nf-col-menu:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+.nf-col-menu:hover {
+  color: var(--interactive-accent);
+  border-color: var(--interactive-accent);
+}
+.nf-col-menu:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
+}
+.markdown-reading-view .nf-col-menu {
+  display: none;
+}
+
+/* Focused column editing keeps the row's spatial context: one column is a
+   clean, history-free editor while its siblings remain rendered previews.
+   The enclosing Obsidian editor still owns the document and undo history. */
+body.nf-columns .nf-columns-editor {
+  --nf-visual-column-gap: clamp(18px, 2.8vw, 32px);
+  position: relative;
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  padding: 34px 8px 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m, 8px);
+  background: color-mix(in srgb, var(--background-primary) 96%, var(--interactive-accent));
+  box-shadow: 0 1px 0 rgba(var(--mono-rgb-100), 0.035);
+  container-name: nf-visual-columns;
+  container-type: inline-size;
+}
+body.nf-columns .nf-columns-editor-toolbar {
+  position: absolute;
+  z-index: 5;
+  inset-block-start: 5px;
+  inset-inline-end: 5px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+body.nf-columns .nf-columns-editor-action,
+body.nf-columns .nf-column-preview-action {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 26px;
+  min-width: 26px;
+  height: 26px;
+  min-height: 26px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+body.nf-columns .nf-columns-editor-action:hover,
+body.nf-columns .nf-column-preview-action:hover {
+  border-color: var(--background-modifier-border);
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+body.nf-columns .nf-columns-editor-action:focus-visible,
+body.nf-columns .nf-column-preview-action:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 1px;
+}
+body.nf-columns .nf-columns-editor-action svg,
+body.nf-columns .nf-column-preview-action svg {
+  width: 14px;
+  height: 14px;
+}
+body.nf-columns .nf-columns-editor-grid {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  gap: var(--nf-visual-column-gap);
+  width: 100%;
+  min-width: 0;
+}
+body.nf-columns .nf-column-editor {
+  position: relative;
+  box-sizing: border-box;
+  min-width: 0;
+  padding: 7px 9px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-s, 6px);
+}
+body.nf-columns .nf-column-editor.is-active {
+  border-color: color-mix(in srgb, var(--interactive-accent) 62%, transparent);
+  background: var(--background-primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--interactive-accent) 10%, transparent);
+}
+body.nf-columns .nf-column-editor.is-preview {
+  cursor: text;
+  transition: background-color 0.12s ease, border-color 0.12s ease;
+}
+body.nf-columns .nf-column-editor.is-preview:hover,
+body.nf-columns .nf-column-editor.is-preview:focus-within {
+  border-color: var(--background-modifier-border-hover);
+  background: rgba(var(--mono-rgb-100), 0.035);
+}
+body.nf-columns .nf-column-preview-action {
+  position: absolute;
+  z-index: 2;
+  inset-block-start: 4px;
+  inset-inline-end: 4px;
+  background: color-mix(in srgb, var(--background-primary) 90%, transparent);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+body.nf-columns .nf-column-editor.is-preview:hover > .nf-column-preview-action,
+body.nf-columns .nf-column-preview-action:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+body.nf-columns .nf-column-preview {
+  min-height: 2.25em;
+  overflow-wrap: anywhere;
+}
+body.nf-columns .nf-column-preview > :first-child {
+  margin-top: 0;
+}
+body.nf-columns .nf-column-preview > :last-child {
+  margin-bottom: 0;
+}
+body.nf-columns .nf-column-editor-host,
+body.nf-columns .nf-column-editor-host > .cm-editor,
+body.nf-columns .nf-column-editor-host .cm-scroller {
+  min-width: 0;
+  background: transparent;
+}
+body.nf-columns .nf-column-editor-host > .cm-editor.cm-focused {
+  outline: none;
+}
+body.nf-columns .nf-column-editor-host .cm-scroller {
+  overflow: visible;
+  font-family: inherit;
+}
+body.nf-columns .nf-column-editor-host .cm-content {
+  min-height: 2.25em;
+  padding: 1px 0;
+  caret-color: var(--text-normal);
+}
+body.nf-columns .nf-column-editor-host .cm-line {
+  padding-inline: 0;
+}
+body.nf-columns .nf-column-editor-host .cm-gutters {
+  display: none;
+}
+/* Preview rendering can itself contain a nested columns row. It has no
+   editing controls, so restore its visual gap without synthetic gutters. */
+body.nf-columns .nf-columns-editor .nf-column-preview .callout[data-callout="nf-cols"] > .callout-content {
+  gap: var(--nf-column-gap);
+}
+body.nf-columns .nf-columns-editor .nf-cols-menu,
+body.nf-columns .nf-columns-editor .nf-col-menu,
+body.nf-columns .nf-columns-editor .nf-col-resizer {
+  display: none !important;
+}
+
+@container nf-visual-columns (max-width: 560px) {
+  body.nf-columns .nf-columns-editor-grid {
+    flex-direction: column;
+    gap: 14px;
+  }
+  body.nf-columns .nf-column-editor {
+    flex: 1 1 auto !important;
+    width: 100%;
+  }
+}
+
+/* Pane-width responsiveness, not viewport-width responsiveness: split
+   workspaces can be narrow even on a large desktop. Stack the whole row
+   together, so three columns never degrade into an awkward 2 + 1 wrap. */
+@container nf-columns (max-width: 560px) {
+  body.nf-columns .callout[data-callout="nf-cols"] > .callout-content {
+    flex-direction: column;
+    gap: 16px;
+  }
+  body.nf-columns .callout[data-callout="nf-cols"] > .callout-content > .callout[data-callout="nf-col"],
+  body.nf-columns .callout[data-callout="nf-cols"] > .callout-content > .callout[data-callout="nf-col"].nf-col-sized {
+    flex: 1 1 auto;
+    width: 100%;
+    min-width: 0;
+  }
+  body.nf-columns .callout[data-callout="nf-cols"] > .callout-content > .nf-col-resizer {
+    display: none;
+  }
+}
+
+@media (pointer: coarse) {
+  .nf-cols-menu {
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+    min-height: 44px;
+  }
+  .nf-col-menu {
+    width: 36px;
+    min-width: 36px;
+    height: 36px;
+    min-height: 36px;
+    opacity: 0.72;
+    pointer-events: auto;
+  }
+  body.nf-columns .nf-columns-editor-action,
+  body.nf-columns .nf-column-preview-action {
+    width: 36px;
+    min-width: 36px;
+    height: 36px;
+    min-height: 36px;
+  }
+  body.nf-columns .nf-column-preview-action {
+    opacity: 0.78;
+    pointer-events: auto;
+  }
+}
+
+/* ---------- Comments (Notion-style annotations) ---------- */
+/* Anchored text reads like Notion's commented text: a soft yellow wash
+   with a firmer underline. Three rendering paths share the look:
+   the Live Preview ACTIVE line (decoration mark → .nf-cmt-anchor),
+   Live Preview INACTIVE lines (Obsidian's own inline-HTML widget keeps
+   the raw span.nf-cmt element), and rendered Markdown (Reading view /
+   callout content, same raw element). */
+body.nf-comments .nf-cmt-anchor,
+body.nf-comments span.nf-cmt[data-nf-cmt] {
+  background-color: rgba(var(--color-yellow-rgb), 0.14);
+  border-bottom: 2px solid rgba(var(--color-yellow-rgb), 0.55);
+  border-radius: 2px 2px 0 0;
+}
+
+/* The raw-element paths have no icon widget — paint the 💬 marker with
+   a pseudo-element so every path shows the same affordance. */
+body.nf-comments span.nf-cmt[data-nf-cmt]::after {
+  content: "💬";
+  font-size: 0.7em;
+  margin-inline-start: 3px;
+  opacity: 0.7;
+}
+
+/* The 💬 marker that replaces the closing tag on the active line. */
+.nf-cmt-icon {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: baseline;
+  padding: 0 2px;
+  font-size: 0.7em;
+  opacity: 0.7;
+  cursor: pointer;
+}
+.nf-cmt-icon:hover {
+  opacity: 1;
+}
+
+/* Comment editor modal. */
+.nf-cmt-modal .nf-cmt-input {
+  width: 100%;
+  min-height: 90px;
+  resize: vertical;
+  font-family: inherit;
+  font-size: var(--font-ui-medium, 14px);
+}
+.nf-cmt-modal .setting-item {
+  border-top: none;
+  padding-top: var(--size-4-2, 8px);
+}
+
 /* Notion-like breathing room */
 body.nf-clean .markdown-source-view.is-live-preview .HyperMD-header {
   padding-top: 0.5em;
@@ -709,6 +1349,15 @@ body.nf-clean .markdown-source-view.is-live-preview .cm-inline-code:not(.cm-form
   padding: 0.08em 0.25em;
 }
 
+/* Inline code ink follows the "Inline code color" setting (Notion inks
+   `code` red). Backtick markers keep their muted syntax color; Reading
+   view matches Live Preview. Code inside fenced blocks is untouched. */
+body.nf-code-color .markdown-source-view.is-live-preview
+  .cm-inline-code:not(.cm-formatting),
+body.nf-code-color .markdown-reading-view :not(pre) > code {
+  color: var(--nf-inline-code);
+}
+
 /* Blockquote: restyle Obsidian's native ::before rule (adding a real border
    to the line changes its box width and doubles some themes' quote rule).
    Reading view uses the same variables for parity. */
@@ -730,13 +1379,29 @@ body.nf-quote-color .markdown-reading-view {
 
 /* Quote body text reads quieter than the surrounding prose — Obsidian's
    faintest defined text tone, one rung below muted. Callout title rows
-   share the quote line class while being edited and keep full color. */
+   share the quote line class while being edited and keep full color, and
+   rows inside an in-place Callout box (nf-co-edit) keep normal ink. */
 body.nf-clean .markdown-source-view.is-live-preview
-  .cm-line.HyperMD-quote:not(.HyperMD-callout) {
+  .cm-line.HyperMD-quote:not(.HyperMD-callout):not(.nf-co-edit) {
   color: var(--text-faint);
 }
 body.nf-clean .markdown-reading-view {
   --blockquote-color: var(--text-faint);
+}
+
+/* Code fence rows read like the block's own padding: the ``` markers and
+   info string stay transparent until the caret visits their row, so an
+   idle code block shows no fence syntax — only Obsidian's language flair
+   (top right, with its own color) keeps naming the block. */
+body.nf-clean .markdown-source-view.is-live-preview
+  .cm-line.HyperMD-codeblock-begin.hmd-inactive-line,
+body.nf-clean .markdown-source-view.is-live-preview
+  .cm-line.HyperMD-codeblock-end.hmd-inactive-line,
+body.nf-clean .markdown-source-view.is-live-preview
+  .cm-line.HyperMD-codeblock-begin.hmd-inactive-line > span:not(.code-block-flair),
+body.nf-clean .markdown-source-view.is-live-preview
+  .cm-line.HyperMD-codeblock-end.hmd-inactive-line > span:not(.code-block-flair) {
+  color: transparent;
 }
 
 /* Code rows only pad their inline start natively; long lines run into the
@@ -1103,6 +1768,12 @@ body.nf-tables .markdown-reading-view table :is(th, td):focus-within {
   .nf-drag-handle,
   .nf-plus-btn,
   .nf-drop-indicator,
+  .nf-col-indicator,
+  .nf-col-resizer::before,
+  .nf-cols-menu,
+  .nf-col-menu,
+  .nf-column-editor.is-preview,
+  .nf-column-preview-action,
   .nf-block-highlight,
   .nf-table-picker-cell,
   .nf-swatch,

@@ -15,6 +15,8 @@ import {
   Setting,
   TFile,
   editorLivePreviewField,
+  htmlToMarkdown,
+  requestUrl,
   setIcon,
 } from "obsidian";
 import {
@@ -23,7 +25,9 @@ import {
   EditorView,
   ViewPlugin,
   ViewUpdate,
+  WidgetType,
   keymap,
+  runScopeHandlers,
 } from "@codemirror/view";
 import {
   EditorSelection,
@@ -31,7 +35,10 @@ import {
   Prec,
   Range,
   RangeSetBuilder,
+  StateEffect,
+  StateField,
   Text,
+  Transaction,
   findClusterBreak,
 } from "@codemirror/state";
 import { syntaxTree } from "@codemirror/language";
@@ -48,7 +55,20 @@ interface NotionFlowSettings {
   floatingToolbar: boolean;
   cleanRendering: boolean;
   pasteUrlLinks: boolean;
+  /** Pasting a bare URL fetches the page title → [Title](url). */
+  pasteUrlTitles: boolean;
   tableEditing: boolean;
+  /** Quote/Callout QoL: smart Enter/Backspace, quoted pastes, type menu. */
+  calloutEditing: boolean;
+  /** Code block QoL: indent-keeping Enter, indent-level Backspace,
+   *  fence auto-close, and Mod+Enter to exit below the block. */
+  codeBlockEditing: boolean;
+  /** Notion-style columns: [!nf-cols]/[!nf-col] callouts render side by
+   *  side; slash commands, the block menu, and right-edge drops build them. */
+  columnLayout: boolean;
+  /** Notion-style comments: selection-anchored notes stored in a span's
+   *  data attribute, shown as a yellow anchor + 💬 icon. */
+  commenting: boolean;
   /** Notion-like table chrome: rounded border, header wash, row hover. */
   tableStyle: boolean;
   /** Hide the plugin's own inline HTML color tags while editing. */
@@ -62,6 +82,9 @@ interface NotionFlowSettings {
   listMarkerColor: string;
   /** "text" (neutral ink), "accent", "default" (theme), or a palette color. */
   quoteBarColor: string;
+  /** "default" (theme) or a theme palette color name. Notion inks `code`
+   *  red, so red is the default. */
+  inlineCodeColor: string;
 }
 
 const DEFAULT_SETTINGS: NotionFlowSettings = {
@@ -70,7 +93,12 @@ const DEFAULT_SETTINGS: NotionFlowSettings = {
   floatingToolbar: true,
   cleanRendering: true,
   pasteUrlLinks: true,
+  pasteUrlTitles: true,
   tableEditing: true,
+  calloutEditing: true,
+  codeBlockEditing: true,
+  columnLayout: true,
+  commenting: true,
   tableStyle: true,
   concealHtml: true,
   concealMarkdown: true,
@@ -78,6 +106,7 @@ const DEFAULT_SETTINGS: NotionFlowSettings = {
   tableStripes: false,
   listMarkerColor: "accent",
   quoteBarColor: "text",
+  inlineCodeColor: "red",
 };
 
 /** Theme palette color names Obsidian defines as --color-<name>-rgb. */
@@ -97,6 +126,70 @@ const PALETTE_COLORS = [
 /* ------------------------------------------------------------------ */
 
 const RE_URL = /^(https?|obsidian):\/\/\S+$/i;
+
+const RE_HTTP_URL = /^https?:\/\/\S+$/i;
+
+const NAMED_ENTITIES: Record<string, string> = {
+  lt: "<",
+  gt: ">",
+  quot: '"',
+  apos: "'",
+  nbsp: " ",
+  amp: "&",
+  ndash: "–",
+  mdash: "—",
+  hellip: "…",
+  lsquo: "‘",
+  rsquo: "’",
+  ldquo: "“",
+  rdquo: "”",
+  middot: "·",
+  bull: "•",
+};
+
+/** Minimal HTML entity decoding plus whitespace normalization. A single
+ * pass, so no decoded output ("&#38;lt;" → "&lt;") is ever re-decoded. */
+function decodeHtmlText(text: string): string {
+  return text
+    .replace(
+      /&(?:#(\d+)|#x([0-9a-f]+)|(\w{1,8}));/gi,
+      (whole, dec: string | undefined, hex: string | undefined, name: string | undefined) => {
+        if (name) return NAMED_ENTITIES[name.toLowerCase()] ?? whole;
+        const code = dec ? Number(dec) : parseInt(hex!, 16);
+        return code <= 0x10ffff ? String.fromCodePoint(code) : whole;
+      }
+    )
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Best-effort page title of an HTML document, entity-decoded, or null.
+ * SPA pages (Next.js and friends) often ship an EMPTY <title> and set the
+ * real one from JavaScript — fall back to Open Graph / Twitter metadata,
+ * which such pages do render server-side. */
+export function extractHtmlTitle(html: string): string | null {
+  const title = html.match(/<title[^>]*>([^<]*)<\/title>/i)?.[1];
+  const decodedTitle = title ? decodeHtmlText(title) : "";
+  if (decodedTitle) return decodedTitle;
+  const meta = html.match(
+    /<meta[^>]*(?:property|name)=["'](?:og:title|twitter:title)["'][^>]*>/i
+  )?.[0];
+  const content = meta?.match(/content=["']([^"']*)["']/i)?.[1];
+  const decodedMeta = content ? decodeHtmlText(content) : "";
+  return decodedMeta || null;
+}
+
+/** Markdown link for a fetched page title: whitespace-collapsed,
+ *  bracket-escaped, and length-capped. Null when the title is empty. */
+export function buildTitledLink(url: string, title: string): string | null {
+  const clean = title.replace(/\s+/g, " ").trim();
+  if (!clean) return null;
+  const capped =
+    clean.length > 160 ? clean.slice(0, 159).trimEnd() + "…" : clean;
+  // Backslash included: a trailing "\" would otherwise escape the "]".
+  const safe = capped.replace(/([\\[\]])/g, "\\$1");
+  return `[${safe}](${url})`;
+}
 
 /** Returns the replacement text when pasting `clip` over `selection`,
  *  or null when the paste should proceed normally. */
@@ -238,7 +331,7 @@ function collectSourceListRendering(doc: Text): ListRenderingData {
   const lines: ListLineStyle[] = [];
   const stack: ItemContext[] = [];
   const counters: Array<CounterContext | undefined> = [];
-  const fences = scanFences(doc);
+  const fences = cachedFences(doc);
   let nextItemId = 1;
   let rootSequence = 0;
 
@@ -254,7 +347,9 @@ function collectSourceListRendering(doc: Text): ListRenderingData {
   for (let lineNo = 1; lineNo <= doc.lines; lineNo++) {
     const line = doc.line(lineNo);
     const fence = fenceAt(fences, lineNo);
-    if (fence) {
+    // A fence opening right on a list-marker line ("- ```js") still IS a
+    // list item — let it fall through to normal marker handling.
+    if (fence && !(lineNo === fence.startLine && fence.markerOpener)) {
       // Only the opener determines whether this fence is still inside the
       // current list item. Body rows may intentionally have no indentation.
       if (lineNo === fence.startLine && leaveItemsShallowerThan(fence.indent)) {
@@ -443,7 +538,7 @@ function attachedListParent(
 export function listNestingDepth(
   doc: Text,
   lineNo: number,
-  fences: FenceRange[] = scanFences(doc)
+  fences: FenceRange[] = cachedFences(doc)
 ): number {
   if (lineNo < 1 || lineNo > doc.lines) return 0;
   let depth = 0;
@@ -468,15 +563,28 @@ function effectiveBlockIndent(doc: Text, lineNo: number): number {
 export interface FenceRange {
   startLine: number;
   endLine: number;
-  indent: number; // indent of the opening marker
+  indent: number; // content indent column of the block
+  /** False only for a trailing fence that never found its closing marker. */
+  closed: boolean;
+  /** The opening ``` / ~~~ marker (used to write a matching closer). */
+  marker: string;
+  /** Leading text a body or closer line needs to sit in this block —
+   *  the opener's whitespace, plus marker-width spaces when the fence
+   *  opens directly on a list-item line ("- ```js"). */
+  bodyPrefix: string;
+  /** True when the opener shares its line with a list marker. */
+  markerOpener: boolean;
 }
 
 const RE_FENCE_OPEN = /^(\s*)(`{3,}|~{3,})(.*)$/;
+// CommonMark also allows a fence to open right on a list-marker line.
+const RE_FENCE_OPEN_ITEM = /^(\s*)((?:[-*+]|\d+[.)])[ \t]+)(`{3,}|~{3,})(.*)$/;
 
 /**
  * Scan the whole document once and return all fenced code blocks.
- * Handles indented fences (inside lists/quotes), tilde fences, marker-length
- * matching per CommonMark, and an unclosed trailing fence.
+ * Handles indented fences (inside lists/quotes), fences opening on a
+ * list-marker line, tilde fences, marker-length matching per CommonMark,
+ * and an unclosed trailing fence.
  */
 export function scanFences(doc: Text): FenceRange[] {
   const fences: FenceRange[] = [];
@@ -484,15 +592,35 @@ export function scanFences(doc: Text): FenceRange[] {
   let openChar = "";
   let openLen = 0;
   let openIndent = 0;
+  let openMarker = "";
+  let openBodyPrefix = "";
+  let openOnItem = false;
   for (let i = 1; i <= doc.lines; i++) {
-    const m = doc.line(i).text.match(RE_FENCE_OPEN);
+    const text = doc.line(i).text;
+    const m = text.match(RE_FENCE_OPEN);
     if (openLine < 0) {
+      const item = m ? null : text.match(RE_FENCE_OPEN_ITEM);
+      const ws = m?.[1] ?? item?.[1];
+      const fenceMarker = m?.[2] ?? item?.[3];
+      const info = m?.[3] ?? item?.[4];
       // Backtick info strings cannot themselves contain a backtick.
-      if (m && !(m[2][0] === "`" && m[3].includes("`"))) {
+      if (
+        ws != null &&
+        fenceMarker != null &&
+        info != null &&
+        !(fenceMarker[0] === "`" && info.includes("`"))
+      ) {
         openLine = i;
-        openChar = m[2][0];
-        openLen = m[2].length;
-        openIndent = indentWidth(m[1]);
+        openChar = fenceMarker[0];
+        openLen = fenceMarker.length;
+        openMarker = fenceMarker;
+        openOnItem = item != null;
+        openIndent = item
+          ? listContentIndent(text) ?? indentWidth(ws)
+          : indentWidth(ws);
+        openBodyPrefix = item
+          ? ws + " ".repeat(Math.max(0, openIndent - indentWidth(ws)))
+          : ws;
       }
     } else if (
       m &&
@@ -501,12 +629,43 @@ export function scanFences(doc: Text): FenceRange[] {
       /^[ \t]*$/.test(m[3]) &&
       indentWidth(m[1]) <= openIndent + 3
     ) {
-      fences.push({ startLine: openLine, endLine: i, indent: openIndent });
+      fences.push({
+        startLine: openLine,
+        endLine: i,
+        indent: openIndent,
+        closed: true,
+        marker: openMarker,
+        bodyPrefix: openBodyPrefix,
+        markerOpener: openOnItem,
+      });
       openLine = -1;
     }
   }
-  if (openLine > 0) fences.push({ startLine: openLine, endLine: doc.lines, indent: openIndent });
+  if (openLine > 0) {
+    fences.push({
+      startLine: openLine,
+      endLine: doc.lines,
+      indent: openIndent,
+      closed: false,
+      marker: openMarker,
+      bodyPrefix: openBodyPrefix,
+      markerOpener: openOnItem,
+    });
+  }
   return fences;
+}
+
+/** scanFences memoized on the (immutable) document identity. Key handlers,
+ * paste hooks, and toolbar refreshes all ask for the same doc's fences many
+ * times per keystroke — one scan serves them all. */
+let fenceCacheDoc: Text | null = null;
+let fenceCacheValue: FenceRange[] = [];
+export function cachedFences(doc: Text): FenceRange[] {
+  if (doc !== fenceCacheDoc) {
+    fenceCacheDoc = doc;
+    fenceCacheValue = scanFences(doc);
+  }
+  return fenceCacheValue;
 }
 
 function fenceAt(fences: FenceRange[], lineNo: number): FenceRange | null {
@@ -514,6 +673,25 @@ function fenceAt(fences: FenceRange[], lineNo: number): FenceRange | null {
     if (lineNo >= f.startLine && lineNo <= f.endLine) return f;
   }
   return null;
+}
+
+/**
+ * The fence whose BODY (marker lines excluded) contains both document
+ * positions, or null. Formatting switches to HTML tags there: Markdown
+ * markers inside fenced code stay literal text and never render.
+ */
+export function fenceBodyRange(
+  doc: Text,
+  from: number,
+  to: number,
+  fences: FenceRange[] = cachedFences(doc)
+): FenceRange | null {
+  const a = doc.lineAt(from).number;
+  const b = doc.lineAt(to).number;
+  const fence = fenceAt(fences, a);
+  if (!fence || fenceAt(fences, b) !== fence) return null;
+  const bodyEnd = fence.closed ? fence.endLine - 1 : fence.endLine;
+  return a > fence.startLine && b <= bodyEnd ? fence : null;
 }
 
 /** Leading characters that reach `columns` (tabs advance to 4-column stops).
@@ -548,7 +726,7 @@ export function fenceMeasureLines(doc: Text, fence: FenceRange): number[] {
 export function getBlockRange(
   doc: Text,
   lineNo: number,
-  fences: FenceRange[] = scanFences(doc)
+  fences: FenceRange[] = cachedFences(doc)
 ): BlockRange | null {
   if (lineNo < 1 || lineNo > doc.lines) return null;
 
@@ -746,7 +924,7 @@ export interface NestedCalloutRepair {
 export function nestedCalloutRepair(
   doc: Text,
   lineNo: number,
-  fences: FenceRange[] = scanFences(doc)
+  fences: FenceRange[] = cachedFences(doc)
 ): NestedCalloutRepair | null {
   if (lineNo < 1 || lineNo > doc.lines) return null;
   // The command/menu must originate on this quote itself. Otherwise a
@@ -1210,7 +1388,7 @@ export function moveBlock(
   view: EditorView,
   block: BlockRange,
   targetLine: number,
-  fences: FenceRange[] = scanFences(view.state.doc),
+  fences: FenceRange[] = cachedFences(view.state.doc),
   indentOverride?: number,
   unit: IndentUnit = DEFAULT_INDENT_UNIT
 ): number | null {
@@ -1885,6 +2063,7 @@ interface TableCtx {
   row: number; // 0-based within the table
   ch: number;
   indent: string;
+  column: ColumnProjectionAtPosition | null;
 }
 
 function makeTableKeymap(plugin: NotionFlowPlugin) {
@@ -1894,18 +2073,34 @@ function makeTableKeymap(plugin: NotionFlowPlugin) {
     if (!sel.empty) return null;
     const doc = view.state.doc;
     const line = doc.lineAt(sel.head);
-    if (!RE_TABLE.test(line.text)) return null;
-    const range = getTableRange(doc, line.number, scanFences(doc));
+    let tableDoc = doc;
+    let tableLine = line;
+    let column: ColumnProjectionAtPosition | null = null;
+    if (!RE_TABLE.test(line.text)) {
+      column = columnProjectionAtPosition(doc, sel.head);
+      if (!column) return null;
+      tableDoc = column.inner.doc;
+      tableLine = tableDoc.lineAt(column.innerPos);
+      if (!RE_TABLE.test(tableLine.text)) return null;
+    }
+    const range = getTableRange(
+      tableDoc,
+      tableLine.number,
+      cachedFences(tableDoc)
+    );
     if (!range) return null;
     const lines: string[] = [];
-    for (let n = range.startLine; n <= range.endLine; n++) lines.push(doc.line(n).text);
+    for (let n = range.startLine; n <= range.endLine; n++) {
+      lines.push(tableDoc.line(n).text);
+    }
     return {
-      doc,
+      doc: tableDoc,
       range,
       lines,
-      row: line.number - range.startLine,
-      ch: sel.head - line.from,
+      row: tableLine.number - range.startLine,
+      ch: column ? column.innerPos - tableLine.from : sel.head - line.from,
       indent: lines[0].match(/^\s*/)?.[0] ?? "",
+      column,
     };
   };
 
@@ -1919,16 +2114,40 @@ function makeTableKeymap(plugin: NotionFlowPlugin) {
       ? ""
       : "\n" + indent + "|" + Array(nCols).fill(" --- ").join("|") + "|";
     const row = emptyRow(nCols, indent);
-    view.dispatch({
-      changes: { from: end, insert: delim + "\n" + row },
-      selection: { anchor: end + delim.length + 1 + indent.length + 2 },
-      userEvent: "input",
-    });
+    const insert = delim + "\n" + row;
+    const cursor = end + delim.length + 1 + indent.length + 2;
+    if (ctx.column) {
+      applyKeyPlan(
+        view,
+        mapColumnInnerPlan(ctx.column, {
+          from: end,
+          to: end,
+          insert,
+          cursor,
+        }),
+        "input"
+      );
+    } else {
+      view.dispatch({
+        changes: { from: end, insert },
+        selection: { anchor: cursor },
+        userEvent: "input",
+      });
+    }
   };
 
   const moveTo = (view: EditorView, ctx: TableCtx, res: { row: number; ch: number }) => {
     const line = ctx.doc.line(ctx.range.startLine + res.row);
-    view.dispatch({ selection: { anchor: Math.min(line.from + res.ch, line.to) } });
+    const target = Math.min(line.from + res.ch, line.to);
+    const mapped = ctx.column
+      ? mapColumnInnerOffset(ctx.column.inner, target)
+      : target;
+    if (mapped == null) return;
+    view.dispatch({
+      selection: {
+        anchor: ctx.column ? ctx.column.blockFrom + mapped : mapped,
+      },
+    });
   };
 
   const nav = (view: EditorView, dir: 1 | -1): boolean => {
@@ -1953,11 +2172,24 @@ function makeTableKeymap(plugin: NotionFlowPlugin) {
       parseRow(lines[row]).every((c) => c === "")
     ) {
       const line = doc.line(range.startLine + row);
-      view.dispatch({
-        changes: { from: line.from, to: line.to },
-        selection: { anchor: line.from },
-        userEvent: "input",
-      });
+      if (ctx.column) {
+        applyKeyPlan(
+          view,
+          mapColumnInnerPlan(ctx.column, {
+            from: line.from,
+            to: line.to,
+            insert: "",
+            cursor: line.from,
+          }),
+          "input"
+        );
+      } else {
+        view.dispatch({
+          changes: { from: line.from, to: line.to },
+          selection: { anchor: line.from },
+          userEvent: "input",
+        });
+      }
       return true;
     }
     const res = tableRowBelow(lines, row, ch);
@@ -1971,6 +2203,2797 @@ function makeTableKeymap(plugin: NotionFlowPlugin) {
       { key: "Tab", run: (v) => nav(v, 1), shift: (v) => nav(v, -1) },
       { key: "Enter", run: enter },
     ])
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Quote / Callout editing                                             */
+/*                                                                     */
+/* Notion-style block behavior for "> " lines: Enter continues the     */
+/* marker or exits on an empty marker line, Backspace at the content   */
+/* start unwraps one marker level, multi-line pastes stay inside the   */
+/* block, and the rendered Callout icon opens a type menu.             */
+/* ------------------------------------------------------------------ */
+
+const RE_QUOTE_PREFIX = /^(?:\s*>)+[ \t]?/;
+const RE_QUOTE_ONLY = /^(?:\s*>)+[ \t]*$/;
+
+/** Full marker prefix of a quote line ("  > > "), or null. */
+export function quoteMarkerPrefix(text: string): string | null {
+  const m = text.match(RE_QUOTE_PREFIX);
+  return m ? m[0] : null;
+}
+
+/**
+ * The line with its innermost quote marker removed, plus the column where
+ * the caret should land (the reduced content start). Null on non-quote
+ * lines. A fully unwrapped, otherwise empty line collapses to "".
+ */
+export function dedentQuoteLine(
+  text: string
+): { text: string; cursor: number } | null {
+  const prefix = quoteMarkerPrefix(text);
+  if (prefix == null) return null;
+  let rest = text.slice(prefix.length);
+  if (!rest.trim()) rest = "";
+  let reduced = prefix.replace(/>[ \t]?$/, "");
+  if (!rest && !reduced.includes(">")) reduced = "";
+  return { text: reduced + rest, cursor: reduced.length };
+}
+
+/** A single-cursor document edit produced by the quote key handlers. */
+export interface QuoteKeyPlan {
+  from: number;
+  to: number;
+  insert: string;
+  cursor: number;
+}
+
+/**
+ * Enter inside a quote/Callout: continue the "> " marker on the new line,
+ * or exit one level when the line holds nothing but markers — so a second
+ * Enter at the end of a Callout leaves it, Notion-style. Null falls back
+ * to the default Enter (including list continuation inside quotes, which
+ * Obsidian already handles with the full "> - " prefix).
+ */
+export function quoteEnterPlan(
+  doc: Text,
+  pos: number,
+  fences?: FenceRange[]
+): QuoteKeyPlan | null {
+  const columnFence = columnFenceEnterPlan(doc, pos);
+  if (columnFence) return columnFence;
+  const line = doc.lineAt(pos);
+  const prefix = quoteMarkerPrefix(line.text);
+  if (prefix == null) return null;
+  if (fenceAt(fences ?? cachedFences(doc), line.number)) return null;
+  if (RE_QUOTE_ONLY.test(line.text)) {
+    const columnDepth = columnContentQuoteDepth(doc, line.number);
+    // The two quote markers of an nf-col are structure, not a quote level
+    // the user can leave with Enter. Keep a fresh empty block in the same
+    // column instead of silently turning "> >" into ">" and splitting the
+    // columns row. Deeper, user-authored nested quotes can still dedent.
+    if (columnDepth != null && quoteDepth(line.text) <= columnDepth) {
+      return {
+        from: pos,
+        to: pos,
+        insert: "\n" + prefix,
+        cursor: pos + 1 + prefix.length,
+      };
+    }
+    const d = dedentQuoteLine(line.text)!;
+    // Fully exiting drops the caret onto the line directly below the
+    // block, where anything typed would rejoin it as a lazy continuation.
+    // Leave a real blank line between the quote and the caret.
+    const sealed =
+      !d.text.includes(">") &&
+      line.number > 1 &&
+      RE_QUOTE.test(doc.line(line.number - 1).text);
+    const insert = sealed ? d.text + "\n" : d.text;
+    return {
+      from: line.from,
+      to: line.to,
+      insert,
+      cursor: line.from + (sealed ? insert.length : d.cursor),
+    };
+  }
+  if (pos - line.from < prefix.length) return null;
+  if (RE_LIST.test(line.text.slice(prefix.length))) return null;
+  return { from: pos, to: pos, insert: "\n" + prefix, cursor: pos + 1 + prefix.length };
+}
+
+/**
+ * Backspace with the caret exactly at a quote line's content start removes
+ * one whole marker level instead of eating "> " character by character.
+ */
+export function quoteBackspacePlan(
+  doc: Text,
+  pos: number,
+  fences?: FenceRange[]
+): QuoteKeyPlan | null {
+  const columnFence = columnFenceBackspacePlan(doc, pos);
+  if (columnFence) return columnFence;
+  const line = doc.lineAt(pos);
+  const prefix = quoteMarkerPrefix(line.text);
+  if (prefix == null || pos - line.from !== prefix.length) return null;
+  if (fenceAt(fences ?? cachedFences(doc), line.number)) return null;
+  const columnDepth = columnContentQuoteDepth(doc, line.number);
+  if (columnDepth != null && quoteDepth(line.text) <= columnDepth) {
+    // Consume Backspace without changing the document. Falling through to
+    // CodeMirror would delete one of the structural ">" markers.
+    return { from: pos, to: pos, insert: "", cursor: pos };
+  }
+  const d = dedentQuoteLine(line.text)!;
+  return {
+    from: line.from,
+    to: line.to,
+    insert: d.text,
+    cursor: line.from + d.cursor,
+  };
+}
+
+/**
+ * Rewrite of a multi-line paste landing inside a quote/Callout so every
+ * inserted line keeps the block's marker prefix. Null pastes unchanged.
+ */
+export function buildQuotedPaste(
+  lineText: string,
+  cursorCh: number,
+  clip: string
+): string | null {
+  if (!clip.includes("\n")) return null;
+  const prefix = quoteMarkerPrefix(lineText);
+  if (prefix == null || cursorCh < prefix.length) return null;
+  return clip
+    .replace(/\r\n?/g, "\n")
+    // Terminal/editor copies often end with a newline — pasting it would
+    // leave a dangling bare-marker line under the block.
+    .replace(/\n$/, "")
+    .split("\n")
+    .map((pasted, index) => (index === 0 ? pasted : prefix + pasted))
+    .join("\n");
+}
+
+/** A single-caret check shared by the quote and code block keymaps. */
+function soloCaret(view: EditorView): number | null {
+  if (view.composing) return null;
+  const sel = view.state.selection;
+  if (sel.ranges.length !== 1 || !sel.main.empty) return null;
+  return sel.main.head;
+}
+
+/** Apply a key plan as one editor transaction; false lets the key fall
+ * through to the next handler. */
+function applyKeyPlan(
+  view: EditorView,
+  plan: QuoteKeyPlan | null,
+  userEvent: string
+): boolean {
+  if (!plan) return false;
+  view.dispatch({
+    changes: { from: plan.from, to: plan.to, insert: plan.insert },
+    selection: { anchor: plan.cursor },
+    scrollIntoView: true,
+    userEvent,
+  });
+  return true;
+}
+
+const RE_LEADING_WS = /^[ \t]*/;
+
+/**
+ * Enter inside a fenced code block. Body lines continue their own leading
+ * indentation — essential for blocks nested in (deep) lists, where every
+ * code line must keep the list's content column. Enter at the end of an
+ * unclosed opener also writes the closing fence, so a freshly typed ```
+ * stops swallowing the rest of the note.
+ */
+export function fenceEnterPlan(
+  doc: Text,
+  pos: number,
+  fences: FenceRange[] = cachedFences(doc)
+): QuoteKeyPlan | null {
+  const line = doc.lineAt(pos);
+  const fence = fenceAt(fences, line.number);
+  if (!fence) return null;
+  const bodyWs = fence.bodyPrefix;
+  if (line.number === fence.startLine) {
+    // Only a caret at the end of the opener gets smart handling; edits
+    // inside the info string keep their default behavior.
+    if (pos !== line.to) return null;
+    const insert = fence.closed
+      ? "\n" + bodyWs
+      : "\n" + bodyWs + "\n" + bodyWs + fence.marker;
+    return { from: pos, to: pos, insert, cursor: pos + 1 + bodyWs.length };
+  }
+  if (fence.closed && line.number === fence.endLine) return null;
+  const ws = line.text.match(RE_LEADING_WS)![0];
+  // A caret inside the leading whitespace would double the indentation.
+  if (pos < line.from + ws.length) return null;
+  return { from: pos, to: pos, insert: "\n" + ws, cursor: pos + 1 + ws.length };
+}
+
+/**
+ * Backspace with the caret at a code line's content start removes one
+ * whole indent level (vault-unit aligned) instead of one character.
+ */
+export function fenceBackspacePlan(
+  doc: Text,
+  pos: number,
+  fences: FenceRange[] = cachedFences(doc),
+  unit: IndentUnit = DEFAULT_INDENT_UNIT
+): QuoteKeyPlan | null {
+  const line = doc.lineAt(pos);
+  const fence = fenceAt(fences, line.number);
+  if (!fence) return null;
+  if (
+    line.number === fence.startLine ||
+    (fence.closed && line.number === fence.endLine)
+  )
+    return null;
+  const ws = line.text.match(RE_LEADING_WS)![0];
+  if (ws.length === 0 || pos !== line.from + ws.length) return null;
+  const width = indentWidth(ws);
+  const target =
+    width % unit.width === 0
+      ? width - unit.width
+      : Math.floor(width / unit.width) * unit.width;
+  const insert = indentPrefix(Math.max(0, target), unit);
+  return {
+    from: line.from,
+    to: line.from + ws.length,
+    insert,
+    cursor: line.from + insert.length,
+  };
+}
+
+/**
+ * Mod+Enter inside a fenced code block leaves the block downward: the
+ * caret lands on a line after the closing fence (which is written first
+ * when missing), keeping the fence's own indentation so a block nested
+ * in a list item stays inside that item.
+ */
+export function fenceExitPlan(
+  doc: Text,
+  pos: number,
+  fences: FenceRange[] = cachedFences(doc)
+): QuoteKeyPlan | null {
+  const line = doc.lineAt(pos);
+  const fence = fenceAt(fences, line.number);
+  if (!fence) return null;
+  const bodyWs = fence.bodyPrefix;
+  if (fence.closed && fence.endLine < doc.lines) {
+    // A blank line already waits below the block — just move there.
+    const next = doc.line(fence.endLine + 1);
+    if (RE_BLANK.test(next.text)) {
+      return { from: next.to, to: next.to, insert: "", cursor: next.to };
+    }
+  }
+  const last = doc.line(fence.endLine);
+  let insert = "\n" + bodyWs;
+  if (!fence.closed) {
+    insert = "\n" + bodyWs + fence.marker + insert;
+  }
+  return {
+    from: last.to,
+    to: last.to,
+    insert,
+    cursor: last.to + insert.length,
+  };
+}
+
+function makeCodeBlockKeymap(plugin: NotionFlowPlugin) {
+  const caret = (view: EditorView): number | null =>
+    plugin.settings.codeBlockEditing ? soloCaret(view) : null;
+  // Obsidian's own bold/italic hotkeys write ** and * — literal text
+  // inside fenced code. Reroute them to the HTML tags the toolbar uses.
+  const htmlToggle = (view: EditorView, open: string, close: string): boolean => {
+    if (!plugin.settings.codeBlockEditing || view.composing) return false;
+    const sel = view.state.selection.main;
+    if (!fenceBodyRange(view.state.doc, sel.from, sel.to)) return false;
+    if (sel.empty) {
+      view.dispatch({
+        changes: { from: sel.from, insert: open + close },
+        selection: { anchor: sel.from + open.length },
+        userEvent: "input",
+      });
+      return true;
+    }
+    toggleWrap(view, open, close);
+    return true;
+  };
+  return Prec.high(
+    keymap.of([
+      { key: "Mod-b", run: (view) => htmlToggle(view, "<b>", "</b>") },
+      { key: "Mod-i", run: (view) => htmlToggle(view, "<i>", "</i>") },
+      {
+        key: "Enter",
+        run: (view) => {
+          const pos = caret(view);
+          if (pos == null) return false;
+          return applyKeyPlan(view, fenceEnterPlan(view.state.doc, pos), "input");
+        },
+      },
+      {
+        key: "Backspace",
+        run: (view) => {
+          const pos = caret(view);
+          if (pos == null) return false;
+          return applyKeyPlan(
+            view,
+            fenceBackspacePlan(
+              view.state.doc,
+              pos,
+              cachedFences(view.state.doc),
+              vaultIndentUnit(plugin.app)
+            ),
+            "delete.dedent"
+          );
+        },
+      },
+      {
+        key: "Mod-Enter",
+        run: (view) => {
+          const pos = caret(view);
+          if (pos == null) return false;
+          return applyKeyPlan(view, fenceExitPlan(view.state.doc, pos), "input");
+        },
+      },
+    ])
+  );
+}
+
+/**
+ * Obsidian's own bold/italic/strikethrough hotkeys bypass CodeMirror
+ * keymaps (the app's hotkey scope captures the key first) and insert a
+ * Markdown marker pair in a single transaction. Inside a fenced code
+ * block those markers are literal text, so rewrite the pair at the
+ * transaction level into the HTML tags the toolbar uses — and remove an
+ * existing tag pair when the same hotkey hits it again (toggle off).
+ */
+export const CODE_TAG_FOR_MARKER: Record<string, [string, string]> = {
+  "**": ["<b>", "</b>"],
+  "*": ["<i>", "</i>"],
+  "~~": ["<s>", "</s>"],
+};
+
+function makeCodeMarkerRewriter(plugin: NotionFlowPlugin) {
+  return EditorState.transactionFilter.of((tr) => {
+    if (!plugin.settings.codeBlockEditing || !tr.docChanged) return tr;
+    const inserts: { from: number; text: string }[] = [];
+    let pureInsert = true;
+    tr.changes.iterChanges((fromA, toA, _fromB, _toB, ins) => {
+      if (fromA !== toA) pureInsert = false;
+      inserts.push({ from: fromA, text: ins.toString() });
+    });
+    if (!pureInsert || inserts.length !== 2) return tr;
+    const [head, tail] = inserts;
+    const pair = CODE_TAG_FOR_MARKER[head.text];
+    if (!pair || tail.text !== head.text) return tr;
+    // Only the wrap-a-selection shape: both inserts anchored exactly at the
+    // single selection's ends. Two CARETS each typing "*" produce the same
+    // two-insert transaction and must stay literal keystrokes.
+    const startSel = tr.startState.selection;
+    if (
+      startSel.ranges.length !== 1 ||
+      startSel.main.empty ||
+      head.from !== startSel.main.from ||
+      tail.from !== startSel.main.to
+    ) {
+      return tr;
+    }
+    const doc = tr.startState.doc;
+    if (!fenceBodyRange(doc, head.from, tail.from, cachedFences(doc))) return tr;
+    const [open, close] = pair;
+    const before = doc.sliceString(Math.max(0, head.from - open.length), head.from);
+    const after = doc.sliceString(tail.from, tail.from + close.length);
+    if (before === open && after === close) {
+      // The selection is already wrapped — the hotkey toggles it off.
+      return [
+        {
+          changes: [
+            { from: head.from - open.length, to: head.from },
+            { from: tail.from, to: tail.from + close.length },
+          ],
+          selection: {
+            anchor: head.from - open.length,
+            head: tail.from - open.length,
+          },
+          scrollIntoView: true,
+          userEvent: "input",
+        },
+      ];
+    }
+    return [
+      {
+        changes: [
+          { from: head.from, insert: open },
+          { from: tail.from, insert: close },
+        ],
+        selection: {
+          anchor: head.from + open.length,
+          head: tail.from + open.length,
+        },
+        scrollIntoView: true,
+        userEvent: "input",
+      },
+    ];
+  });
+}
+
+function makeQuoteKeymap(plugin: NotionFlowPlugin) {
+  const caret = (view: EditorView): number | null =>
+    plugin.settings.calloutEditing ? soloCaret(view) : null;
+  const apply = applyKeyPlan;
+  return Prec.high(
+    keymap.of([
+      {
+        key: "Enter",
+        run: (view) => {
+          const pos = caret(view);
+          if (pos == null) return false;
+          return apply(view, quoteEnterPlan(view.state.doc, pos), "input");
+        },
+      },
+      {
+        key: "Backspace",
+        run: (view) => {
+          const pos = caret(view);
+          if (pos == null) return false;
+          return apply(
+            view,
+            quoteBackspacePlan(view.state.doc, pos),
+            "delete.dequote"
+          );
+        },
+      },
+    ])
+  );
+}
+
+/** Obsidian's built-in Callout types; aliases resolve to these. */
+export const CALLOUT_TYPES: { type: string; label: string; icon: string }[] = [
+  { type: "note", label: "Note", icon: "pencil" },
+  { type: "abstract", label: "Abstract", icon: "clipboard-list" },
+  { type: "info", label: "Info", icon: "info" },
+  { type: "todo", label: "To-do", icon: "check-circle-2" },
+  { type: "tip", label: "Tip", icon: "flame" },
+  { type: "success", label: "Success", icon: "check" },
+  { type: "question", label: "Question", icon: "help-circle" },
+  { type: "warning", label: "Warning", icon: "alert-triangle" },
+  { type: "failure", label: "Failure", icon: "x" },
+  { type: "danger", label: "Danger", icon: "zap" },
+  { type: "bug", label: "Bug", icon: "bug" },
+  { type: "example", label: "Example", icon: "list" },
+  { type: "quote", label: "Quote", icon: "quote" },
+];
+
+const CALLOUT_ALIASES: Record<string, string> = {
+  summary: "abstract",
+  tldr: "abstract",
+  hint: "tip",
+  important: "tip",
+  check: "success",
+  done: "success",
+  help: "question",
+  faq: "question",
+  caution: "warning",
+  attention: "warning",
+  fail: "failure",
+  missing: "failure",
+  error: "danger",
+  cite: "quote",
+};
+
+export interface CalloutHeader {
+  /** Canonical lowercase type, aliases resolved ("error" → "danger"). */
+  type: string;
+  fold: "" | "+" | "-";
+  /** Offsets of the type token inside the line ("|metadata" excluded). */
+  typeFrom: number;
+  typeTo: number;
+  /** Offset just after "]", where the fold marker sits or would go. */
+  foldAt: number;
+}
+
+const RE_CALLOUT_HEAD = /^(\s*(?:>[ \t]*)+\[!)([^\]|\r\n]+)([^\]\r\n]*\])([+-]?)/;
+
+/** Parse "> [!type]±" at the start of a line, or null. */
+export function parseCalloutHeader(text: string): CalloutHeader | null {
+  const m = text.match(RE_CALLOUT_HEAD);
+  if (!m) return null;
+  const raw = m[2].trim().toLowerCase();
+  return {
+    type: CALLOUT_ALIASES[raw] ?? raw,
+    fold: m[4] as "" | "+" | "-",
+    typeFrom: m[1].length,
+    typeTo: m[1].length + m[2].length,
+    foldAt: m[1].length + m[2].length + m[3].length,
+  };
+}
+
+/** The header line with its type token replaced ("|metadata" preserved). */
+export function setCalloutType(text: string, type: string): string | null {
+  const header = parseCalloutHeader(text);
+  if (!header) return null;
+  return text.slice(0, header.typeFrom) + type + text.slice(header.typeTo);
+}
+
+/** Add a "-" fold marker after "[!type]", or remove the existing one. */
+export function toggleCalloutFold(text: string): string | null {
+  const header = parseCalloutHeader(text);
+  if (!header) return null;
+  return header.fold
+    ? text.slice(0, header.foldAt) + text.slice(header.foldAt + 1)
+    : text.slice(0, header.foldAt) + "-" + text.slice(header.foldAt);
+}
+
+/** Promote a plain quote's first line to a Callout header. */
+export function quoteToCallout(text: string, type: string): string | null {
+  const prefix = quoteMarkerPrefix(text);
+  if (prefix == null || parseCalloutHeader(text)) return null;
+  return text.slice(0, prefix.length) + `[!${type}] ` + text.slice(prefix.length);
+}
+
+/** Strip "[!type]±" (and one following space) from a Callout header. */
+export function calloutToQuote(text: string): string | null {
+  const m = text.match(RE_CALLOUT_HEAD);
+  if (!m) return null;
+  const start = m[1].length - 2; // the "[!"
+  let end = m[1].length + m[2].length + m[3].length + m[4].length;
+  if (text[end] === " ") end++;
+  return text.slice(0, start) + text.slice(end);
+}
+
+/* ------------------------------------------------------------------ */
+/* Columns (Notion-style side-by-side layout)                          */
+/*                                                                     */
+/* A column row is a "[!nf-cols]" Callout whose direct children are    */
+/* "[!nf-col]" Callouts — plain nested quotes to any other Markdown    */
+/* reader, flex columns here. "[!nf-col|30]" pins a width in percent.  */
+/* ------------------------------------------------------------------ */
+
+export const COLS_TYPE = "nf-cols";
+export const COL_TYPE = "nf-col";
+
+/** Structural quote depth of the nf-col containing `lineNo`, or null.
+ * Content may add deeper user-authored quotes, but it must never be
+ * dedented past the direct [!nf-col] header's depth. */
+export function columnContentQuoteDepth(doc: Text, lineNo: number): number | null {
+  if (lineNo < 1 || lineNo > doc.lines) return null;
+  const currentDepth = quoteDepth(doc.line(lineNo).text);
+  if (currentDepth < 2) return null;
+
+  for (let i = lineNo; i >= 1; i--) {
+    const text = doc.line(i).text;
+    const depth = quoteDepth(text);
+    const header = parseCalloutHeader(text);
+    if (header?.type !== COL_TYPE || depth > currentDepth) {
+      if (i < lineNo && depth === 0) return null;
+      continue;
+    }
+
+    for (let outer = i - 1; outer >= 1; outer--) {
+      const outerText = doc.line(outer).text;
+      const outerDepth = quoteDepth(outerText);
+      const outerHeader = parseCalloutHeader(outerText);
+      if (outerHeader?.type === COLS_TYPE && outerDepth === depth - 1) {
+        return depth;
+      }
+      if (!RE_BLANK.test(outerText) && outerDepth < depth - 1) break;
+    }
+    return null;
+  }
+  return null;
+}
+
+/** Sanitized column width from "[!nf-col|…]" metadata: an integer
+ * percentage clamped to sane bounds, or null for anything else. */
+export function columnWidthPercent(meta: string | null): number | null {
+  if (!meta || !/^\d{1,2}$/.test(meta.trim())) return null;
+  const n = Number(meta.trim());
+  return n >= 10 && n <= 90 ? n : null;
+}
+
+export interface ColumnSourceSegment {
+  /** Zero-based line index of the direct [!nf-col] header. */
+  headerIndex: number;
+  /** Exclusive zero-based end, excluding the outer marker seam. */
+  endIndex: number;
+  /** Header plus every source row owned by this column. */
+  lines: string[];
+  width: number | null;
+}
+
+export interface ColumnsSourceLayout {
+  lines: string[];
+  outerDepth: number;
+  /** Marker-only form of the wrapper prefix ("> >", no trailing space). */
+  outerMarker: string;
+  /** Wrapper header and any source before the first direct column. */
+  head: string[];
+  columns: ColumnSourceSegment[];
+  /** Wrapper-depth source between adjacent direct columns. */
+  seams: string[][];
+  /** Wrapper-depth source after the final direct column. */
+  tail: string[];
+}
+
+export interface ColumnInnerLineOrigin {
+  /** Line index inside the full nf-cols block source. */
+  blockLineIndex: number;
+  /** Character offset where editable content begins on that source line. */
+  sourceCh: number;
+  /** Character offsets inside the joined nf-cols block source. */
+  sourceFrom: number;
+  sourceTo: number;
+}
+
+export interface ColumnInnerSource {
+  columnIndex: number;
+  lines: string[];
+  origins: ColumnInnerLineOrigin[];
+  doc: Text;
+}
+
+/** Remove exactly `levels` leading quote markers and their optional one
+ * following whitespace character. Null means the line is shallower. */
+export function stripQuoteLevels(text: string, levels: number): string | null {
+  let index = text.match(RE_LEADING_WS)?.[0].length ?? 0;
+  for (let depth = 0; depth < levels; depth++) {
+    if (text[index] !== ">") return null;
+    index++;
+    if (text[index] === " " || text[index] === "\t") index++;
+  }
+  return text.slice(index);
+}
+
+/** Remove quote markers `firstLevel…firstLevel + count - 1` (1-based)
+ * while preserving ancestor markers before them and content markers after
+ * them. Used when unwrapping nested column rows. */
+export function removeQuoteLevels(
+  text: string,
+  firstLevel: number,
+  count: number
+): string | null {
+  if (firstLevel < 1 || count < 1) return text;
+  const leading = text.match(RE_LEADING_WS)?.[0].length ?? 0;
+  const spans: Array<{ from: number; to: number }> = [];
+  let index = leading;
+  while (text[index] === ">") {
+    const from = spans.length === 0 ? leading : index;
+    index++;
+    if (text[index] === " " || text[index] === "\t") index++;
+    spans.push({ from, to: index });
+  }
+  const first = spans[firstLevel - 1];
+  const last = spans[firstLevel + count - 2];
+  if (!first || !last) return null;
+  return text.slice(0, first.from) + text.slice(last.to);
+}
+
+/** Parse the direct columns of one nf-cols source block. Nested nf-cols
+ * rows remain ordinary content of their parent segment. */
+export function parseColumnsSource(lines: string[]): ColumnsSourceLayout | null {
+  const first = lines[0] ?? "";
+  if (parseCalloutHeader(first)?.type !== COLS_TYPE) return null;
+  const outerDepth = quoteDepth(first);
+  const directDepth = outerDepth + 1;
+  const headers: number[] = [];
+  let openFenceChar = "";
+  let openFenceLength = 0;
+  for (let index = 1; index < lines.length; index++) {
+    const local = stripQuoteLevels(lines[index], directDepth);
+    const plainFence = local?.match(RE_FENCE_OPEN) ?? null;
+    if (openFenceChar) {
+      if (
+        plainFence &&
+        plainFence[2][0] === openFenceChar &&
+        plainFence[2].length >= openFenceLength &&
+        /^[ \t]*$/.test(plainFence[3])
+      ) {
+        openFenceChar = "";
+        openFenceLength = 0;
+      }
+      continue;
+    }
+    if (
+      quoteDepth(lines[index]) === directDepth &&
+      /^\[!nf-col(?:\|[^\]\r\n]*)?\](?:[+-])?(?:\s|$)/i.test(local ?? "") &&
+      parseCalloutHeader(lines[index])?.type === COL_TYPE
+    ) {
+      headers.push(index);
+      continue;
+    }
+    if (local != null) {
+      const itemFence = plainFence ? null : local.match(RE_FENCE_OPEN_ITEM);
+      const marker = plainFence?.[2] ?? itemFence?.[3];
+      const info = plainFence?.[3] ?? itemFence?.[4];
+      if (marker && info != null && !(marker[0] === "`" && info.includes("`"))) {
+        openFenceChar = marker[0];
+        openFenceLength = marker.length;
+      }
+    }
+  }
+  if (headers.length === 0) return null;
+  const outerMarker = (quoteMarkerPrefix(first) ?? ">").trimEnd();
+  const seams: string[][] = [];
+  let tail: string[] = [];
+  const columns = headers.map((headerIndex, columnIndex) => {
+    const rawEnd = headers[columnIndex + 1] ?? lines.length;
+    let endIndex = rawEnd;
+    // The canonical seam between columns belongs to the wrapper, not to
+    // either neighboring segment. Deeper marker-only rows are real blank
+    // content and must stay with the column.
+    while (
+      endIndex > headerIndex + 1 &&
+      quoteDepth(lines[endIndex - 1]) <= outerDepth
+    ) {
+      endIndex--;
+    }
+    const wrapperRows = lines.slice(endIndex, rawEnd);
+    if (columnIndex < headers.length - 1) seams.push(wrapperRows);
+    else tail = wrapperRows;
+    const header = parseCalloutHeader(lines[headerIndex]);
+    const meta =
+      lines[headerIndex].match(/\[!nf-col(?:\|([^\]\r\n]*))?\]/i)?.[1] ?? null;
+    return {
+      headerIndex,
+      endIndex,
+      lines: lines.slice(headerIndex, endIndex),
+      width: header?.type === COL_TYPE ? columnWidthPercent(meta) : null,
+    };
+  });
+  return {
+    lines,
+    outerDepth,
+    outerMarker,
+    head: lines.slice(0, headers[0]),
+    columns,
+    seams,
+    tail,
+  };
+}
+
+/** Project one column body into ordinary Markdown by hiding every ancestor
+ * and structural quote marker. Line count stays one-to-one for exact source
+ * mapping; deeper user-authored quote markers remain in the inner text. */
+export function columnInnerSource(
+  layout: ColumnsSourceLayout,
+  columnIndex: number
+): ColumnInnerSource | null {
+  const column = layout.columns[columnIndex];
+  if (!column) return null;
+  const sourceStarts: number[] = [];
+  let sourceOffset = 0;
+  for (const line of layout.lines) {
+    sourceStarts.push(sourceOffset);
+    sourceOffset += line.length + 1;
+  }
+  const lines: string[] = [];
+  const origins: ColumnInnerLineOrigin[] = [];
+  for (
+    let blockLineIndex = column.headerIndex + 1;
+    blockLineIndex < column.endIndex;
+    blockLineIndex++
+  ) {
+    const source = layout.lines[blockLineIndex];
+    const inner = stripQuoteLevels(source, layout.outerDepth + 1);
+    const text = inner ?? source;
+    const sourceCh = inner == null ? 0 : source.length - inner.length;
+    lines.push(text);
+    origins.push({
+      blockLineIndex,
+      sourceCh,
+      sourceFrom: sourceStarts[blockLineIndex] + sourceCh,
+      sourceTo: sourceStarts[blockLineIndex] + source.length,
+    });
+  }
+  if (lines.length === 0) return null;
+  return { columnIndex, lines, origins, doc: Text.of(lines) };
+}
+
+/** Relative source offset for an inner-document position. */
+export function mapColumnInnerOffset(
+  inner: ColumnInnerSource,
+  pos: number
+): number | null {
+  if (pos < 0 || pos > inner.doc.length) return null;
+  const line = inner.doc.lineAt(pos);
+  const origin = inner.origins[line.number - 1];
+  if (!origin) return null;
+  return origin.sourceFrom + Math.min(pos - line.from, line.length);
+}
+
+/** Replace one projected column body and reapply its canonical structural
+ * prefix to every line. This is the transaction primitive used by a visual
+ * column editor; the outer Markdown remains the only source of truth. */
+export function replaceColumnBody(
+  lines: string[],
+  columnIndex: number,
+  innerLines: readonly string[]
+): string[] | null {
+  const layout = parseColumnsSource(lines);
+  const column = layout?.columns[columnIndex];
+  if (!layout || !column) return null;
+  const childMarker = `${layout.outerMarker} >`;
+  const body = (innerLines.length > 0 ? innerLines : [""]).map(
+    (line) => `${childMarker} ${line}`
+  );
+  const segments = layout.columns.map((segment, index) =>
+    index === columnIndex ? [segment.lines[0], ...body] : segment.lines
+  );
+  return serializeColumnsSource(layout, segments);
+}
+
+interface ColumnProjectionAtPosition {
+  blockFrom: number;
+  lines: string[];
+  layout: ColumnsSourceLayout;
+  inner: ColumnInnerSource;
+  innerPos: number;
+  innerLineIndex: number;
+}
+
+/** Column projection containing an outer-document position. This resolves
+ * nested rows directly by quote depth rather than asking getBlockRange(),
+ * whose quote semantics intentionally return the complete outer Callout. */
+function columnProjectionAtPosition(
+  doc: Text,
+  pos: number
+): ColumnProjectionAtPosition | null {
+  const line = doc.lineAt(pos);
+  const directDepth = columnContentQuoteDepth(doc, line.number);
+  if (directDepth == null) return null;
+  let outerLine = -1;
+  for (let lineNo = line.number; lineNo >= 1; lineNo--) {
+    const source = doc.line(lineNo).text;
+    const header = parseCalloutHeader(source);
+    if (header?.type === COLS_TYPE && quoteDepth(source) === directDepth - 1) {
+      outerLine = lineNo;
+      break;
+    }
+    if (lineNo < line.number && quoteDepth(source) < directDepth - 1) return null;
+  }
+  if (outerLine < 1) return null;
+
+  let endLine = outerLine;
+  while (endLine < doc.lines) {
+    const next = doc.line(endLine + 1).text;
+    if (quoteDepth(next) < directDepth - 1) break;
+    endLine++;
+  }
+  const blockFrom = doc.line(outerLine).from;
+  const blockTo = doc.line(endLine).to;
+  const lines = doc.sliceString(blockFrom, blockTo).split("\n");
+  const layout = parseColumnsSource(lines);
+  if (!layout) return null;
+  const blockLineIndex = line.number - outerLine;
+  const columnIndex = layout.columns.findIndex(
+    (column) =>
+      blockLineIndex > column.headerIndex && blockLineIndex < column.endIndex
+  );
+  if (columnIndex < 0) return null;
+  const inner = columnInnerSource(layout, columnIndex);
+  if (!inner) return null;
+  const innerLineIndex = inner.origins.findIndex(
+    (origin) => origin.blockLineIndex === blockLineIndex
+  );
+  if (innerLineIndex < 0) return null;
+  const origin = inner.origins[innerLineIndex];
+  const ch = Math.max(0, Math.min(line.length - origin.sourceCh, pos - line.from - origin.sourceCh));
+  const innerLine = inner.doc.line(innerLineIndex + 1);
+  return {
+    blockFrom,
+    lines,
+    layout,
+    inner,
+    innerPos: innerLine.from + ch,
+    innerLineIndex,
+  };
+}
+
+function mapColumnInnerPlan(
+  projection: ColumnProjectionAtPosition,
+  plan: QuoteKeyPlan | null
+): QuoteKeyPlan | null {
+  if (!plan) return null;
+  const relativeFrom = mapColumnInnerOffset(projection.inner, plan.from);
+  const relativeTo = mapColumnInnerOffset(projection.inner, plan.to);
+  if (relativeFrom == null || relativeTo == null) return null;
+  const origin = projection.inner.origins[projection.innerLineIndex];
+  const sourceLine = projection.lines[origin.blockLineIndex];
+  const prefix = sourceLine.slice(0, origin.sourceCh);
+  const serialize = (text: string) => text.replace(/\n/g, "\n" + prefix);
+  const insert = serialize(plan.insert);
+  const cursorInInsert = Math.max(0, Math.min(plan.insert.length, plan.cursor - plan.from));
+  return {
+    from: projection.blockFrom + relativeFrom,
+    to: projection.blockFrom + relativeTo,
+    insert,
+    cursor:
+      projection.blockFrom + relativeFrom + serialize(plan.insert.slice(0, cursorInInsert)).length,
+  };
+}
+
+/** Column-aware code plans reuse the ordinary fence model on projected
+ * Markdown, then map the single edit back through structural quote prefixes. */
+export function columnFenceEnterPlan(doc: Text, pos: number): QuoteKeyPlan | null {
+  const projection = columnProjectionAtPosition(doc, pos);
+  if (!projection) return null;
+  return mapColumnInnerPlan(
+    projection,
+    fenceEnterPlan(projection.inner.doc, projection.innerPos)
+  );
+}
+
+export function columnFenceBackspacePlan(
+  doc: Text,
+  pos: number,
+  unit: IndentUnit = DEFAULT_INDENT_UNIT
+): QuoteKeyPlan | null {
+  const projection = columnProjectionAtPosition(doc, pos);
+  if (!projection) return null;
+  return mapColumnInnerPlan(
+    projection,
+    fenceBackspacePlan(
+      projection.inner.doc,
+      projection.innerPos,
+      cachedFences(projection.inner.doc),
+      unit
+    )
+  );
+}
+
+/** Rebuild a parsed row with canonical marker-only seams. Segment source
+ * itself is preserved byte-for-byte, so moving a column never rewrites its
+ * Markdown content. */
+function serializeColumnsSource(
+  layout: ColumnsSourceLayout,
+  segments: readonly string[][]
+): string[] {
+  const out = [...layout.head];
+  for (let index = 0; index < segments.length; index++) {
+    if (index > 0) {
+      const seam = layout.seams[index - 1];
+      out.push(...(seam?.length ? seam : [layout.outerMarker]));
+    }
+    out.push(...segments[index]);
+  }
+  out.push(...layout.tail);
+  return out;
+}
+
+function emptyColumnSource(layout: ColumnsSourceLayout): string[] {
+  const childMarker = `${layout.outerMarker} >`;
+  return [`${childMarker} [!${COL_TYPE}]`, `${childMarker} `];
+}
+
+/** Insert an empty column before `index` (0…length). */
+export function insertColumnAt(lines: string[], index: number): string[] | null {
+  const layout = parseColumnsSource(lines);
+  if (!layout) return null;
+  const segments = layout.columns.map((column) => column.lines);
+  const at = Math.max(0, Math.min(index, segments.length));
+  segments.splice(at, 0, emptyColumnSource(layout));
+  return serializeColumnsSource(layout, segments);
+}
+
+/** Move one direct column by one or more slots. */
+export function moveColumnTo(
+  lines: string[],
+  fromIndex: number,
+  toIndex: number
+): string[] | null {
+  const layout = parseColumnsSource(lines);
+  if (!layout || fromIndex < 0 || fromIndex >= layout.columns.length) return null;
+  const segments = layout.columns.map((column) => column.lines);
+  const [moved] = segments.splice(fromIndex, 1);
+  const at = Math.max(0, Math.min(toIndex, segments.length));
+  segments.splice(at, 0, moved);
+  return serializeColumnsSource(layout, segments);
+}
+
+/** Delete one direct column. With one survivor the structural wrappers are
+ * removed as well, leaving that content as normal stacked Markdown. */
+export function removeColumnAt(lines: string[], index: number): string[] | null {
+  const layout = parseColumnsSource(lines);
+  if (!layout || layout.columns.length < 2 || index < 0 || index >= layout.columns.length) {
+    return null;
+  }
+  const segments = layout.columns.map((column) => column.lines);
+  segments.splice(index, 1);
+  const rebuilt = serializeColumnsSource(layout, segments);
+  return segments.length === 1 ? unwrapColumnsLines(rebuilt) : rebuilt;
+}
+
+/** Remove the first line's leading whitespace from every line, so an
+ * indented block (a dragged list child) becomes top-level before it is
+ * wrapped into a column. Shallower lines lose only their own prefix. */
+export function dedentLines(lines: string[]): string[] {
+  const lead = indentWidth(lines[0]?.match(RE_LEADING_WS)?.[0] ?? "");
+  if (lead === 0) return lines;
+  return lines.map((line) => stripIndentColumns(line, lead));
+}
+
+/** The lines of one "[!nf-col]" child holding `lines` as its content. */
+function wrapAsColumn(lines: string[]): string[] {
+  return [
+    `> > [!${COL_TYPE}]`,
+    ...lines.map((line) => (RE_BLANK.test(line) ? "> >" : "> > " + line)),
+  ];
+}
+
+/** A whole columns block: `first` beside `second`. */
+export function buildColumnsWrap(first: string[], second: string[]): string[] {
+  return [
+    `> [!${COLS_TYPE}]`,
+    ...wrapAsColumn(dedentLines(first)),
+    ">",
+    ...wrapAsColumn(dedentLines(second)),
+  ];
+}
+
+/** Lines appended to an existing "[!nf-cols]" block for one new column. */
+export function appendColumnLines(lines: string[]): string[] {
+  return [">", ...wrapAsColumn(dedentLines(lines))];
+}
+
+/** Fresh n-column scaffold for the slash menu ("‸" marks the caret). */
+export function buildColumnsTemplate(n: number): string {
+  const col = (caret: boolean) => `> > [!${COL_TYPE}]\n> > ${caret ? "‸" : ""}`;
+  const cols = Array.from({ length: Math.max(2, n) }, (_, i) => col(i === 0));
+  return `> [!${COLS_TYPE}]\n` + cols.join("\n>\n");
+}
+
+/** The actions every columns row offers: grow it, retune widths, undo it.
+ * Shared by the block-handle menu and the row's hover ⋯ button. */
+function addColumnsMenuItems(menu: Menu, view: EditorView, block: BlockRange) {
+  const doc = view.state.doc;
+  const blockLines = () => {
+    const from = doc.line(block.startLine).from;
+    const to = doc.line(block.endLine).to;
+    return { from, to, lines: doc.sliceString(from, to).split("\n") };
+  };
+  const replaceBlock = (next: string[], userEvent: string) => {
+    const { from, to } = blockLines();
+    view.dispatch({
+      changes: { from, to, insert: next.join("\n") },
+      userEvent,
+    });
+  };
+  menu.addItem((item) =>
+    item
+      .setTitle(t("Add column"))
+      .setIcon("columns-3")
+      .onClick(() => {
+        const end = doc.line(block.endLine).to;
+        const insert = "\n>\n> > [!" + COL_TYPE + "]\n> > ";
+        view.dispatch({
+          changes: { from: end, to: end, insert },
+          selection: { anchor: end + insert.length },
+          scrollIntoView: true,
+          userEvent: "input.columns",
+        });
+      })
+  );
+  // Width presets for the common two-column case; more columns get the
+  // equal-split reset. Custom values stay a "[!nf-col|N]" edit.
+  menu.addItem((item) => {
+    item.setTitle(t("Column widths")).setIcon("ruler");
+    const withSub = item as unknown as { setSubmenu?: () => Menu };
+    if (typeof withSub.setSubmenu !== "function") return;
+    const sub = withSub.setSubmenu();
+    const cols = countColumns(blockLines().lines);
+    const presets: [string, (number | null)[]][] =
+      cols === 2
+        ? [
+            [t("Equal widths"), [null, null]],
+            [t("Narrow left (30%)"), [30, null]],
+            [t("Narrow right (30%)"), [null, 30]],
+          ]
+        : [[t("Equal widths"), Array<number | null>(cols).fill(null)]];
+    for (const [label, widths] of presets) {
+      sub.addItem((entry) =>
+        entry.setTitle(label).onClick(() => {
+          dispatchColumnWidths(view, block, widths, "input.columns");
+        })
+      );
+    }
+  });
+  menu.addItem((item) =>
+    item
+      .setTitle(t("Unwrap columns"))
+      .setIcon("rows-3")
+      .onClick(() => {
+        const { lines } = blockLines();
+        const flat = unwrapColumnsLines(lines);
+        if (!flat) return;
+        // The flattened content is ordinary blocks now — keep blank
+        // seams so neighbors don't absorb the first/last of them.
+        const above = block.startLine > 1 ? doc.line(block.startLine - 1).text : "";
+        const below = block.endLine < doc.lines ? doc.line(block.endLine + 1).text : "";
+        if (needsProtectedSeam(above, flat[0])) flat.unshift("");
+        if (needsProtectedSeam(flat[flat.length - 1], below)) flat.push("");
+        replaceBlock(flat, "input.columns");
+      })
+  );
+}
+
+/** Open the columns menu for the row whose injected ⋯ button was clicked.
+ * The button lives inside rendered widget DOM, so the owning editor is
+ * recovered from the DOM itself; outside an editor (Reading view, hover
+ * previews) this quietly does nothing. */
+function openColumnsMenuFromDOM(btn: HTMLElement, evt: MouseEvent) {
+  const editorEl = btn.closest(".cm-editor");
+  if (!(editorEl instanceof HTMLElement)) return;
+  const view = EditorView.findFromDOM(editorEl);
+  if (!view) return;
+  try {
+    const doc = view.state.doc;
+    const lineNo = doc.lineAt(view.posAtDOM(btn)).number;
+    const block = getBlockRange(doc, lineNo, cachedFences(doc));
+    if (!block) return;
+    if (parseCalloutHeader(doc.line(block.startLine).text)?.type !== COLS_TYPE) {
+      return;
+    }
+    const menu = new Menu().setUseNativeMenu(false);
+    addColumnsMenuItems(menu, view, block);
+    menu.showAtMouseEvent(evt);
+  } catch {
+    // The widget was detached between click and lookup — nothing to do.
+  }
+}
+
+/** Context menu for one visual column. Structural edits reuse the parsed
+ * source model and replace the complete row in one outer-editor transaction. */
+function openColumnMenuFromDOM(
+  btn: HTMLElement,
+  evt: MouseEvent,
+  plugin: NotionFlowPlugin
+) {
+  const ctx = renderedColumnsContext(btn);
+  const index = Number(btn.dataset.nfColumnIndex);
+  if (!ctx || !Number.isInteger(index) || index < 0 || index >= ctx.columns.length) {
+    return;
+  }
+  const sourceLines = ctx.text.split("\n");
+  const replace = (next: string[] | null, userEvent: string) => {
+    if (!next) return;
+    const insert = next.join("\n");
+    if (insert === ctx.text) return;
+    ctx.view.dispatch({
+      changes: { from: ctx.from, to: ctx.to, insert },
+      userEvent,
+    });
+  };
+  const menu = new Menu().setUseNativeMenu(false);
+  menu.addItem((item) =>
+    item
+      .setTitle(t("Add column left"))
+      .setIcon("panel-left-open")
+      .onClick(() => replace(insertColumnAt(sourceLines, index), "input.columns"))
+  );
+  menu.addItem((item) =>
+    item
+      .setTitle(t("Add column right"))
+      .setIcon("panel-right-open")
+      .onClick(() => replace(insertColumnAt(sourceLines, index + 1), "input.columns"))
+  );
+  menu.addSeparator();
+  menu.addItem((item) => {
+    item
+      .setTitle(t("Move column left"))
+      .setIcon("arrow-left")
+      .setDisabled(index === 0);
+    if (index > 0) {
+      item.onClick(() =>
+        replace(moveColumnTo(sourceLines, index, index - 1), "move.columns")
+      );
+    }
+  });
+  menu.addItem((item) => {
+    item
+      .setTitle(t("Move column right"))
+      .setIcon("arrow-right")
+      .setDisabled(index === ctx.columns.length - 1);
+    if (index < ctx.columns.length - 1) {
+      item.onClick(() =>
+        replace(moveColumnTo(sourceLines, index, index + 1), "move.columns")
+      );
+    }
+  });
+  menu.addSeparator();
+  menu.addItem((item) =>
+    item
+      .setTitle(t("Delete this column"))
+      .setIcon("trash-2")
+      .setWarning(true)
+      .onClick(() => {
+        const layout = parseColumnsSource(sourceLines);
+        const segment = layout?.columns[index];
+        const hasContent = !!segment?.lines
+          .slice(1)
+          .some((line) => /[^>\s]/.test(line));
+        const remove = () =>
+          replace(removeColumnAt(sourceLines, index), "delete.columns");
+        if (!hasContent) {
+          remove();
+          return;
+        }
+        new ConfirmModal(
+          plugin.app,
+          t("Delete this column and all of its content?"),
+          t("Delete this column"),
+          remove
+        ).open();
+      })
+  );
+  menu.showAtMouseEvent(evt);
+}
+
+/** Quote-marker depth of a line ("> > x" → 2). */
+function quoteDepth(text: string): number {
+  return (quoteMarkerPrefix(text) ?? "").split(">").length - 1;
+}
+
+/** Direct (depth-2) "[!nf-col]" header line count of a columns block. */
+export function countColumns(lines: string[]): number {
+  return parseColumnsSource(lines)?.columns.length ?? 0;
+}
+
+/**
+ * A columns block flattened back into ordinary stacked blocks: each
+ * column's content in source order, blank lines between columns. Content
+ * nested deeper than the two structural marker levels keeps its own
+ * markers. Null when the lines are not an nf-cols block or hold nothing.
+ */
+export function unwrapColumnsLines(lines: string[]): string[] | null {
+  const layout = parseColumnsSource(lines);
+  if (!layout) return null;
+  const out: string[] = [];
+  for (let columnIndex = 0; columnIndex < layout.columns.length; columnIndex++) {
+    if (columnIndex > 0 && out.length > 0 && out[out.length - 1] !== "") {
+      out.push("");
+    }
+    for (const line of layout.columns[columnIndex].lines.slice(1)) {
+      // Shed exactly the two structural levels: the nf-cols wrapper and
+      // its nf-col child. Any deeper quote markers belong to real content.
+      const stripped =
+        removeQuoteLevels(line, layout.outerDepth, 2) ??
+        removeQuoteLevels(line, layout.outerDepth, 1) ??
+        line;
+      if (!stripped.trim() && !RE_QUOTE.test(stripped)) {
+        if (out.length > 0 && out[out.length - 1] !== "") out.push("");
+        continue;
+      }
+      out.push(stripped);
+    }
+  }
+  while (out.length > 0 && out[out.length - 1] === "") out.pop();
+  return out.length > 0 ? out : null;
+}
+
+/** Rewrite the "[!nf-col|…]" width metadata of a block's direct columns:
+ * widths[i] is a percentage or null (flexible). Nested column rows and
+ * columns beyond the array keep whatever they had. */
+export function setColumnWidths(
+  lines: string[],
+  widths: (number | null)[]
+): string[] {
+  const layout = parseColumnsSource(lines);
+  if (!layout) return lines;
+  const byLine = new Map(
+    layout.columns.map((column, index) => [column.headerIndex, index] as const)
+  );
+  return lines.map((line, lineIndex) => {
+    const col = byLine.get(lineIndex);
+    if (col == null || col >= widths.length) return line;
+    return columnHeaderWithWidth(line, widths[col]);
+  });
+}
+
+function columnHeaderWithWidth(line: string, width: number | null): string {
+  return line.replace(
+    /\[!nf-col(?:\|[^\]\r\n]*)?\]/i,
+    width == null ? `[!${COL_TYPE}]` : `[!${COL_TYPE}|${width}]`
+  );
+}
+
+/** Width-only edits touch only direct nf-col header tokens. Keeping the
+ * rest of the row outside the change set preserves rendered widget identity
+ * and selection much better than replacing the complete callout block. */
+function dispatchColumnWidths(
+  view: EditorView,
+  block: BlockRange,
+  widths: (number | null)[],
+  userEvent = "input.columns"
+): boolean {
+  const doc = view.state.doc;
+  const from = doc.line(block.startLine).from;
+  const to = doc.line(block.endLine).to;
+  const lines = doc.sliceString(from, to).split("\n");
+  const layout = parseColumnsSource(lines);
+  if (!layout) return false;
+  const starts: number[] = [];
+  let offset = 0;
+  for (const line of lines) {
+    starts.push(offset);
+    offset += line.length + 1;
+  }
+  const changes = layout.columns.flatMap((column, index) => {
+    if (index >= widths.length) return [];
+    const oldHeader = lines[column.headerIndex];
+    const nextHeader = columnHeaderWithWidth(oldHeader, widths[index]);
+    if (nextHeader === oldHeader) return [];
+    const headerFrom = from + starts[column.headerIndex];
+    return [{ from: headerFrom, to: headerFrom + oldHeader.length, insert: nextHeader }];
+  });
+  if (changes.length === 0) return true;
+  view.dispatch({ changes, userEvent });
+  return true;
+}
+
+/** Convert measured column widths to stable integer percentages. Values
+ * always total 100; for layouts of up to ten columns each track stays in
+ * the same 10–90 range accepted by columnWidthPercent(). */
+export function columnPercentsFromWidths(widths: readonly number[]): number[] {
+  const n = widths.length;
+  if (n === 0) return [];
+  let weights: number[] = widths.map((value) =>
+    Number.isFinite(value) && value > 0 ? value : 0
+  );
+  if (weights.every((value) => value === 0)) {
+    weights = Array<number>(n).fill(1);
+  }
+
+  const min = n <= 10 ? 10 : 0;
+  const max = n === 1 ? 100 : 90;
+  const values = Array<number>(n).fill(0);
+  const free = new Set(Array.from({ length: n }, (_, index) => index));
+  let remaining = 100;
+
+  while (free.size > 0) {
+    const totalWeight = Array.from(free).reduce(
+      (sum, index) => sum + weights[index],
+      0
+    );
+    const unit = totalWeight > 0 ? remaining / totalWeight : remaining / free.size;
+    const low: number[] = [];
+    const high: number[] = [];
+    for (const index of free) {
+      const candidate = totalWeight > 0 ? weights[index] * unit : unit;
+      if (candidate < min) low.push(index);
+      else if (candidate > max) high.push(index);
+    }
+    if (low.length === 0 && high.length === 0) {
+      for (const index of free) {
+        values[index] = totalWeight > 0 ? weights[index] * unit : unit;
+      }
+      break;
+    }
+    for (const index of low) {
+      values[index] = min;
+      remaining -= min;
+      free.delete(index);
+    }
+    for (const index of high) {
+      values[index] = max;
+      remaining -= max;
+      free.delete(index);
+    }
+  }
+
+  const rounded = values.map((value) => Math.floor(value));
+  let left = 100 - rounded.reduce((sum, value) => sum + value, 0);
+  const order = values
+    .map((value, index) => ({ index, fraction: value - Math.floor(value) }))
+    .sort((a, b) => b.fraction - a.fraction || a.index - b.index);
+  for (const { index } of order) {
+    if (left <= 0) break;
+    if (rounded[index] >= max) continue;
+    rounded[index]++;
+    left--;
+  }
+  return rounded;
+}
+
+interface RenderedColumnsContext {
+  view: EditorView;
+  block: BlockRange;
+  from: number;
+  to: number;
+  text: string;
+  row: HTMLElement;
+  content: HTMLElement;
+  columns: HTMLElement[];
+}
+
+/** Resolve an injected column control back to its one source block. */
+function renderedColumnsContext(
+  el: HTMLElement,
+  knownView?: EditorView
+): RenderedColumnsContext | null {
+  const row = el.closest<HTMLElement>(`.callout[data-callout="${COLS_TYPE}"]`);
+  const editorEl = row?.closest<HTMLElement>(".cm-editor");
+  if (!row || !editorEl) return null;
+  // Resolve from the outer rendered Callout widget, not from a descendant
+  // nf-col element. posAtDOM(childColumn) may map to that child's header,
+  // which makes getBlockRange return nf-col instead of the nf-cols row and
+  // lets Obsidian's native whole-widget selection win on click.
+  const widget = row.closest<HTMLElement>(".cm-embed-block.cm-callout");
+  if (!widget) return null;
+  const view = knownView ?? EditorView.findFromDOM(editorEl);
+  if (!view) return null;
+  const content = Array.from(row.children).find(
+    (child) => child.classList.contains("callout-content")
+  ) as HTMLElement | undefined;
+  if (!content) return null;
+  const columns = Array.from(content.children).filter(
+    (child) => (child as HTMLElement).dataset.callout === COL_TYPE
+  ) as HTMLElement[];
+  if (columns.length < 2) return null;
+  try {
+    const doc = view.state.doc;
+    const lineNo = doc.lineAt(view.posAtDOM(widget, 0)).number;
+    const block = getBlockRange(doc, lineNo, cachedFences(doc));
+    if (!block) return null;
+    if (parseCalloutHeader(doc.line(block.startLine).text)?.type !== COLS_TYPE) {
+      return null;
+    }
+    const from = doc.line(block.startLine).from;
+    const to = doc.line(block.endLine).to;
+    return {
+      view,
+      block,
+      from,
+      to,
+      text: doc.sliceString(from, to),
+      row,
+      content,
+      columns,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function replaceRenderedColumnWidths(
+  el: HTMLElement,
+  widths: (number | null)[],
+  userEvent = "input.columns"
+): boolean {
+  const ctx = renderedColumnsContext(el);
+  if (!ctx) return false;
+  return dispatchColumnWidths(ctx.view, ctx.block, widths, userEvent);
+}
+
+/** Pixel widths after moving one gutter, with a readable minimum track. */
+function resizedColumnPixels(
+  widths: readonly number[],
+  divider: number,
+  delta: number
+): number[] {
+  const next = [...widths];
+  if (divider < 0 || divider + 1 >= next.length) return next;
+  const pair = next[divider] + next[divider + 1];
+  const total = next.reduce((sum, width) => sum + width, 0);
+  const min = Math.min(pair / 2, Math.max(72, total * 0.1));
+  const left = Math.max(min, Math.min(pair - min, next[divider] + delta));
+  next[divider] = left;
+  next[divider + 1] = pair - left;
+  return next;
+}
+
+/** Pointer-driven gutter resize. DOM receives a live pixel preview; the
+ * Markdown width metadata changes once on pointerup, so one undo restores
+ * the previous layout. */
+function startColumnResizeFromDOM(handle: HTMLElement, evt: PointerEvent): boolean {
+  if (evt.button !== 0) return false;
+  const ctx = renderedColumnsContext(handle);
+  const divider = Number(handle.dataset.nfColumnDivider);
+  if (!ctx || !Number.isInteger(divider) || divider < 0) return false;
+  const widths = ctx.columns.map((column) => column.getBoundingClientRect().width);
+  if (widths.some((width) => width <= 0)) return false;
+
+  evt.preventDefault();
+  evt.stopPropagation();
+  const ownerDocument = handle.ownerDocument;
+  const ownerWindow = ownerDocument.defaultView ?? window;
+  const startX = evt.clientX;
+  const rtl = ownerWindow.getComputedStyle(ctx.content).direction === "rtl";
+  let next = [...widths];
+  let frame = 0;
+  let pendingX = startX;
+  let finished = false;
+
+  const paint = () => {
+    frame = 0;
+    const delta = (pendingX - startX) * (rtl ? -1 : 1);
+    next = resizedColumnPixels(widths, divider, delta);
+    for (let i = 0; i < ctx.columns.length; i++) {
+      ctx.columns[i].style.flex = `0 0 ${next[i]}px`;
+    }
+    const percents = columnPercentsFromWidths(next);
+    handle.dataset.nfColumnValue =
+      `${percents[divider]}% · ${percents[divider + 1]}%`;
+    handle.setAttribute("aria-valuenow", String(percents[divider]));
+  };
+  const onMove = (move: PointerEvent) => {
+    if (move.pointerId !== evt.pointerId) return;
+    move.preventDefault();
+    pendingX = move.clientX;
+    if (!frame) frame = ownerWindow.requestAnimationFrame(paint);
+  };
+  const cleanup = (commit: boolean) => {
+    if (finished) return;
+    finished = true;
+    if (frame) ownerWindow.cancelAnimationFrame(frame);
+    if (commit) paint();
+    ownerDocument.removeEventListener("pointermove", onMove, true);
+    ownerDocument.removeEventListener("pointerup", onUp, true);
+    ownerDocument.removeEventListener("pointercancel", onCancel, true);
+    ownerDocument.removeEventListener("keydown", onKey, true);
+    ownerDocument.body.classList.remove("nf-resizing-columns");
+    ctx.row.classList.remove("is-resizing");
+    handle.classList.remove("is-resizing");
+    handle.removeAttribute("data-nf-column-value");
+    for (const column of ctx.columns) column.style.removeProperty("flex");
+    try {
+      if (handle.hasPointerCapture(evt.pointerId)) {
+        handle.releasePointerCapture(evt.pointerId);
+      }
+    } catch {
+      // Detached between pointerdown and pointerup.
+    }
+    if (
+      commit &&
+      ctx.view.state.doc.sliceString(ctx.from, ctx.to) === ctx.text
+    ) {
+      const percents = columnPercentsFromWidths(next);
+      dispatchColumnWidths(
+        ctx.view,
+        ctx.block,
+        percents,
+        "input.columns.resize"
+      );
+    }
+  };
+  const onUp = (up: PointerEvent) => {
+    if (up.pointerId === evt.pointerId) cleanup(true);
+  };
+  const onCancel = (cancel: PointerEvent) => {
+    if (cancel.pointerId === evt.pointerId) cleanup(false);
+  };
+  const onKey = (key: KeyboardEvent) => {
+    if (key.key !== "Escape") return;
+    key.preventDefault();
+    key.stopPropagation();
+    cleanup(false);
+  };
+
+  ctx.row.classList.add("is-resizing");
+  handle.classList.add("is-resizing");
+  ownerDocument.body.classList.add("nf-resizing-columns");
+  ownerDocument.addEventListener("pointermove", onMove, true);
+  ownerDocument.addEventListener("pointerup", onUp, true);
+  ownerDocument.addEventListener("pointercancel", onCancel, true);
+  ownerDocument.addEventListener("keydown", onKey, true);
+  try {
+    handle.setPointerCapture(evt.pointerId);
+  } catch {
+    // Pointer capture is optional; document listeners are the fallback.
+  }
+  paint();
+  return true;
+}
+
+function resizeColumnsFromKeyboard(handle: HTMLElement, evt: KeyboardEvent): boolean {
+  if (evt.key !== "ArrowLeft" && evt.key !== "ArrowRight") return false;
+  const ctx = renderedColumnsContext(handle);
+  const divider = Number(handle.dataset.nfColumnDivider);
+  if (!ctx || !Number.isInteger(divider)) return false;
+  const widths = ctx.columns.map((column) => column.getBoundingClientRect().width);
+  if (widths.some((width) => width <= 0)) return false;
+  const rtl = (handle.ownerDocument.defaultView ?? window)
+    .getComputedStyle(ctx.content).direction === "rtl";
+  const total = widths.reduce((sum, width) => sum + width, 0);
+  const step = total * (evt.shiftKey ? 0.05 : 0.01);
+  const visual = evt.key === "ArrowRight" ? 1 : -1;
+  const next = resizedColumnPixels(widths, divider, step * visual * (rtl ? -1 : 1));
+  evt.preventDefault();
+  evt.stopPropagation();
+  return replaceRenderedColumnWidths(
+    handle,
+    columnPercentsFromWidths(next),
+    "input.columns.resize"
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Visual column editing                                               */
+/*                                                                     */
+/* The outer Obsidian EditorView remains the only document and history. */
+/* One active nf-cols row is replaced by a stable flex widget: the      */
+/* selected column gets a lightweight, history-free child EditorView;   */
+/* siblings stay rendered Markdown. Child edits are projected back as   */
+/* minimal outer changes, and outer undo/redo remains authoritative.     */
+/* ------------------------------------------------------------------ */
+
+interface ActiveVisualColumn {
+  from: number;
+  to: number;
+  column: number;
+}
+
+const setVisualColumnEffect = StateEffect.define<ActiveVisualColumn | null>();
+
+interface VisualColumnFieldValue {
+  active: ActiveVisualColumn | null;
+  decorations: DecorationSet;
+}
+
+interface ColumnPreviewRuntime {
+  text: string;
+  container: HTMLElement;
+  component: Component;
+}
+
+interface VisualColumnRuntime {
+  root: HTMLElement;
+  model: VisualColumnWidget;
+  outerView: EditorView;
+  activeEditor: EditorView | null;
+  activeColumn: number;
+  previews: Map<number, ColumnPreviewRuntime>;
+  syncing: boolean;
+  observer: ResizeObserver | null;
+  animationFrame: number | null;
+  disposed: boolean;
+}
+
+const visualColumnRuntimes = new WeakMap<HTMLElement, VisualColumnRuntime>();
+
+function diffText(oldText: string, newText: string): {
+  from: number;
+  to: number;
+  insert: string;
+} | null {
+  if (oldText === newText) return null;
+  let from = 0;
+  const min = Math.min(oldText.length, newText.length);
+  while (from < min && oldText.charCodeAt(from) === newText.charCodeAt(from)) from++;
+  let oldTo = oldText.length;
+  let newTo = newText.length;
+  while (
+    oldTo > from &&
+    newTo > from &&
+    oldText.charCodeAt(oldTo - 1) === newText.charCodeAt(newTo - 1)
+  ) {
+    oldTo--;
+    newTo--;
+  }
+  return { from, to: oldTo, insert: newText.slice(from, newTo) };
+}
+
+/** Map one clean projected-column edit back into the preserved nf-cols
+ * source. The result is relative to the start of `blockText`; callers can
+ * add the outer document offset and keep the main EditorView authoritative. */
+export function projectColumnTextChange(
+  blockText: string,
+  columnIndex: number,
+  oldText: string,
+  newText: string
+): { from: number; to: number; insert: string } | null {
+  const diff = diffText(oldText, newText);
+  if (!diff) return null;
+  const layout = parseColumnsSource(blockText.split("\n"));
+  const projection = layout ? columnInnerSource(layout, columnIndex) : null;
+  if (!layout || !projection || projection.doc.toString() !== oldText) return null;
+  const from = mapColumnInnerOffset(projection, diff.from);
+  const to = mapColumnInnerOffset(projection, diff.to);
+  if (from == null || to == null) return null;
+  const innerLine = projection.doc.lineAt(diff.from);
+  const origin = projection.origins[innerLine.number - 1];
+  if (!origin) return null;
+  const sourceLine = layout.lines[origin.blockLineIndex];
+  const prefix = sourceLine.slice(0, origin.sourceCh);
+  return { from, to, insert: diff.insert.replace(/\n/g, "\n" + prefix) };
+}
+
+function cleanupVisualColumnRuntime(root: HTMLElement) {
+  const runtime = visualColumnRuntimes.get(root);
+  if (!runtime) return;
+  runtime.disposed = true;
+  const ownerWindow = root.ownerDocument.defaultView;
+  if (runtime.animationFrame != null) {
+    ownerWindow?.cancelAnimationFrame(runtime.animationFrame);
+    runtime.animationFrame = null;
+  }
+  runtime.observer?.disconnect();
+  runtime.activeEditor?.destroy();
+  for (const preview of runtime.previews.values()) preview.component.unload();
+  runtime.previews.clear();
+  visualColumnRuntimes.delete(root);
+}
+
+function visualColumnRuntimeIsCurrent(runtime: VisualColumnRuntime): boolean {
+  return (
+    !runtime.disposed &&
+    visualColumnRuntimes.get(runtime.root) === runtime
+  );
+}
+
+function syncVisualColumnChild(
+  runtime: VisualColumnRuntime,
+  target: EditorView,
+  text: string
+) {
+  if (
+    !visualColumnRuntimeIsCurrent(runtime) ||
+    runtime.activeEditor !== target ||
+    target.state.doc.toString() === text
+  ) return;
+  runtime.syncing = true;
+  try {
+    target.dispatch({
+      changes: { from: 0, to: target.state.doc.length, insert: text },
+    });
+  } finally {
+    runtime.syncing = false;
+  }
+}
+
+function authoritativeVisualColumnText(
+  runtime: VisualColumnRuntime,
+  columnIndex: number
+): string | null {
+  if (!visualColumnRuntimeIsCurrent(runtime)) return null;
+  const model = runtime.model;
+  const outer = runtime.outerView.state.doc;
+  if (model.from < 0 || model.to > outer.length || model.from >= model.to) return null;
+  const blockText = outer.sliceString(model.from, model.to);
+  const layout = parseColumnsSource(blockText.split("\n"));
+  return layout ? columnInnerSource(layout, columnIndex)?.doc.toString() ?? null : null;
+}
+
+function renderVisualColumnPreview(
+  runtime: VisualColumnRuntime,
+  index: number,
+  text: string,
+  container: HTMLElement,
+  plugin: NotionFlowPlugin
+) {
+  const current = runtime.previews.get(index);
+  if (current?.text === text && current.container === container) return;
+  current?.component.unload();
+  container.setAttribute("aria-busy", "true");
+  const component = new Component();
+  component.load();
+  runtime.previews.set(index, { text, container, component });
+  const sourcePath = plugin.app.workspace.getActiveFile()?.path ?? "";
+  const staging = container.ownerDocument.createElement("div");
+  staging.className = "nf-columns-editor-preview-stage";
+  void MarkdownRenderer.render(
+    plugin.app,
+    text || " ",
+    staging,
+    sourcePath,
+    component
+  )
+    .then(() => {
+      if (
+        !visualColumnRuntimeIsCurrent(runtime) ||
+        runtime.previews.get(index)?.component !== component
+      ) {
+        component.unload();
+        return;
+      }
+      container.replaceChildren(...Array.from(staging.childNodes));
+      container.removeAttribute("aria-busy");
+      runtime.outerView.requestMeasure();
+    })
+    .catch(() => {
+      if (
+        visualColumnRuntimeIsCurrent(runtime) &&
+        runtime.previews.get(index)?.component === component
+      ) {
+        container.setText(text);
+        container.removeAttribute("aria-busy");
+        runtime.outerView.requestMeasure();
+      }
+    });
+}
+
+class VisualColumnWidget extends WidgetType {
+  constructor(
+    readonly plugin: NotionFlowPlugin,
+    readonly from: number,
+    readonly to: number,
+    readonly column: number,
+    readonly text: string
+  ) {
+    super();
+  }
+
+  eq(other: WidgetType): boolean {
+    return (
+      other instanceof VisualColumnWidget &&
+      other.from === this.from &&
+      other.to === this.to &&
+      other.column === this.column &&
+      other.text === this.text
+    );
+  }
+
+  toDOM(view: EditorView): HTMLElement {
+    const root = view.dom.ownerDocument.createElement("div");
+    root.className = "nf-columns-editor";
+    this.mount(root, view, true);
+    return root;
+  }
+
+  updateDOM(root: HTMLElement, view: EditorView): boolean {
+    return this.mount(root, view, false);
+  }
+
+  destroy(root: HTMLElement) {
+    cleanupVisualColumnRuntime(root);
+  }
+
+  ignoreEvent(): boolean {
+    return true;
+  }
+
+  private mount(root: HTMLElement, outerView: EditorView, focus: boolean): boolean {
+    const lines = this.text.split("\n");
+    const layout = parseColumnsSource(lines);
+    if (!layout || layout.columns.length < 2 || this.column >= layout.columns.length) {
+      return false;
+    }
+    const existing = visualColumnRuntimes.get(root);
+    const rebuild =
+      !existing ||
+      existing.activeColumn !== this.column ||
+      root.querySelectorAll(":scope > .nf-columns-editor-grid > .nf-column-editor").length !==
+        layout.columns.length;
+    if (rebuild) {
+      cleanupVisualColumnRuntime(root);
+      root.replaceChildren();
+      root.className = "nf-columns-editor";
+      const runtime: VisualColumnRuntime = {
+        root,
+        model: this,
+        outerView,
+        activeEditor: null,
+        activeColumn: this.column,
+        previews: new Map(),
+        syncing: false,
+        observer: null,
+        animationFrame: null,
+        disposed: false,
+      };
+      visualColumnRuntimes.set(root, runtime);
+      this.buildDOM(root, layout, runtime);
+      const ownerWindow = root.ownerDocument.defaultView ?? window;
+      const Observer = ownerWindow.ResizeObserver;
+      if (Observer) {
+        runtime.observer = new Observer(() => {
+          if (visualColumnRuntimeIsCurrent(runtime)) outerView.requestMeasure();
+        });
+        runtime.observer.observe(root);
+      }
+      runtime.animationFrame = ownerWindow.requestAnimationFrame(() => {
+        runtime.animationFrame = null;
+        if (!visualColumnRuntimeIsCurrent(runtime)) return;
+        outerView.requestMeasure();
+        if (focus || this.column !== existing?.activeColumn) {
+          runtime.activeEditor?.focus();
+        }
+      });
+      return true;
+    }
+
+    existing.model = this;
+    existing.outerView = outerView;
+    const inner = columnInnerSource(layout, this.column);
+    if (!inner || !existing.activeEditor) return false;
+    const authoritative = inner.doc.toString();
+    syncVisualColumnChild(existing, existing.activeEditor, authoritative);
+    for (let index = 0; index < layout.columns.length; index++) {
+      const shell = root.querySelector<HTMLElement>(
+        `:scope > .nf-columns-editor-grid > .nf-column-editor[data-nf-column-index="${index}"]`
+      );
+      if (!shell) return false;
+      this.applyColumnWidth(shell, layout.columns[index].width);
+      if (index === this.column) continue;
+      const projected = columnInnerSource(layout, index);
+      const container = shell.querySelector<HTMLElement>(":scope > .nf-column-preview");
+      if (projected && container) {
+        renderVisualColumnPreview(
+          existing,
+          index,
+          projected.doc.toString(),
+          container,
+          this.plugin
+        );
+      }
+    }
+    outerView.requestMeasure();
+    return true;
+  }
+
+  private buildDOM(
+    root: HTMLElement,
+    layout: ColumnsSourceLayout,
+    runtime: VisualColumnRuntime
+  ) {
+    const ownerDocument = root.ownerDocument;
+    const toolbar = ownerDocument.createElement("div");
+    toolbar.className = "nf-columns-editor-toolbar";
+    const sourceButton = ownerDocument.createElement("button");
+    sourceButton.type = "button";
+    sourceButton.className = "clickable-icon nf-columns-editor-action";
+    sourceButton.setAttribute("aria-label", t("Edit column source"));
+    sourceButton.title = t("Edit column source");
+    setIcon(sourceButton, "code-2");
+    sourceButton.addEventListener("click", (evt) => {
+      evt.preventDefault();
+      evt.stopPropagation();
+      runtime.outerView.dispatch({
+        effects: setVisualColumnEffect.of(null),
+        selection: { anchor: Math.min(runtime.model.to, runtime.model.from + 1) },
+        scrollIntoView: true,
+      });
+      runtime.outerView.focus();
+    });
+    const doneButton = ownerDocument.createElement("button");
+    doneButton.type = "button";
+    doneButton.className = "clickable-icon nf-columns-editor-action";
+    doneButton.setAttribute("aria-label", t("Finish column editing"));
+    doneButton.title = t("Finish column editing");
+    setIcon(doneButton, "check");
+    doneButton.addEventListener("click", (evt) => {
+      evt.preventDefault();
+      evt.stopPropagation();
+      runtime.outerView.dispatch({
+        effects: setVisualColumnEffect.of(null),
+      });
+    });
+    toolbar.append(sourceButton, doneButton);
+    root.appendChild(toolbar);
+
+    const grid = ownerDocument.createElement("div");
+    grid.className = "nf-columns-editor-grid";
+    root.appendChild(grid);
+    for (let index = 0; index < layout.columns.length; index++) {
+      const shell = ownerDocument.createElement("section");
+      shell.className = "nf-column-editor";
+      shell.dataset.nfColumnIndex = String(index);
+      this.applyColumnWidth(shell, layout.columns[index].width);
+      const inner = columnInnerSource(layout, index);
+      if (!inner) continue;
+      if (index === this.column) {
+        shell.classList.add("is-active");
+        shell.setAttribute("aria-label", t("Editing column"));
+        const host = ownerDocument.createElement("div");
+        host.className = "nf-column-editor-host";
+        shell.appendChild(host);
+        this.createInnerEditor(host, inner.doc.toString(), runtime, index);
+      } else {
+        shell.classList.add("is-preview");
+        const activate = () =>
+          runtime.outerView.dispatch({
+            effects: setVisualColumnEffect.of({
+              from: runtime.model.from,
+              to: runtime.model.to,
+              column: index,
+            }),
+            selection: { anchor: runtime.model.from },
+          });
+        const editButton = ownerDocument.createElement("button");
+        editButton.type = "button";
+        editButton.className = "clickable-icon nf-column-preview-action";
+        editButton.setAttribute("aria-label", t("Edit this column"));
+        editButton.title = t("Edit this column");
+        setIcon(editButton, "pencil");
+        editButton.addEventListener("mousedown", (evt) => {
+          evt.preventDefault();
+          evt.stopPropagation();
+        });
+        editButton.addEventListener("click", (evt) => {
+          evt.preventDefault();
+          evt.stopPropagation();
+          activate();
+        });
+        shell.appendChild(editButton);
+        const preview = ownerDocument.createElement("div");
+        preview.className = "nf-column-preview markdown-rendered";
+        shell.appendChild(preview);
+        shell.addEventListener("mousedown", (evt) => {
+          const target = evt.target as Element | null;
+          if (target?.closest?.("a, button, input, textarea, select")) return;
+          evt.preventDefault();
+          evt.stopPropagation();
+        });
+        shell.addEventListener("click", (evt) => {
+          const target = evt.target as Element | null;
+          if (target?.closest?.("a, button, input, textarea, select")) return;
+          evt.preventDefault();
+          evt.stopPropagation();
+          activate();
+        });
+        renderVisualColumnPreview(
+          runtime,
+          index,
+          inner.doc.toString(),
+          preview,
+          this.plugin
+        );
+      }
+      grid.appendChild(shell);
+    }
+  }
+
+  private applyColumnWidth(shell: HTMLElement, width: number | null) {
+    shell.style.flex = width == null ? "1 1 0" : `0 1 ${width}%`;
+  }
+
+  private createInnerEditor(
+    host: HTMLElement,
+    text: string,
+    runtime: VisualColumnRuntime,
+    columnIndex: number
+  ) {
+    const plugin = this.plugin;
+    let innerView: EditorView;
+    const visualInlineKeymap = keymap.of([
+      {
+        key: "Mod-b",
+        preventDefault: true,
+        stopPropagation: true,
+        run: (view) => this.toggleVisualMarkdown(view, "**", "<b>", "</b>"),
+      },
+      {
+        key: "Mod-i",
+        preventDefault: true,
+        stopPropagation: true,
+        run: (view) => this.toggleVisualMarkdown(view, "*", "<i>", "</i>"),
+      },
+      {
+        key: "Mod-k",
+        preventDefault: true,
+        stopPropagation: true,
+        run: (view) => {
+          if (inFenceBody(view.state)) return true;
+          const sel = view.state.selection.main;
+          if (sel.empty) {
+            view.dispatch({
+              changes: { from: sel.from, insert: "[]()" },
+              selection: { anchor: sel.from + 1 },
+              userEvent: "input",
+            });
+          } else {
+            insertLink(view);
+          }
+          return true;
+        },
+      },
+      {
+        key: "Mod-\\",
+        preventDefault: true,
+        stopPropagation: true,
+        run: (view) => {
+          if (!view.state.selection.main.empty) clearInlineFormatting(view);
+          return true;
+        },
+      },
+    ]);
+    const domHandlers = EditorView.domEventHandlers({
+      keydown: (evt) => {
+        if (evt.key === "Escape") {
+          evt.preventDefault();
+          evt.stopPropagation();
+          runtime.outerView.dispatch({
+            effects: setVisualColumnEffect.of(null),
+          });
+          return true;
+        }
+        const mod = evt.metaKey || evt.ctrlKey;
+        if (mod && !evt.altKey && (evt.key.toLowerCase() === "z" || evt.key.toLowerCase() === "y")) {
+          runScopeHandlers(runtime.outerView, evt, "editor");
+          evt.preventDefault();
+          evt.stopPropagation();
+          return true;
+        }
+        return false;
+      },
+    });
+    const state = EditorState.create({
+      doc: text,
+      extensions: [
+        EditorView.lineWrapping,
+        domHandlers,
+        visualInlineKeymap,
+        makeTableKeymap(plugin),
+        makeQuoteKeymap(plugin),
+        makeCodeBlockKeymap(plugin),
+      ],
+    });
+    innerView = new EditorView({
+      state,
+      parent: host,
+      dispatchTransactions: (transactions, target) => {
+        const oldText = target.state.doc.toString();
+        target.update(transactions);
+        if (runtime.syncing || !transactions.some((tr) => tr.docChanged)) return;
+        const newText = target.state.doc.toString();
+        const diff = diffText(oldText, newText);
+        if (!diff) return;
+        const restoreChild = () => {
+          syncVisualColumnChild(runtime, target, oldText);
+        };
+        const model = runtime.model;
+        const outerDoc = runtime.outerView.state.doc;
+        if (outerDoc.sliceString(model.from, model.to) !== model.text) {
+          restoreChild();
+          return;
+        }
+        const projected = projectColumnTextChange(
+          model.text,
+          columnIndex,
+          oldText,
+          newText
+        );
+        if (!projected) {
+          restoreChild();
+          return;
+        }
+        const userEvent =
+          transactions
+            .map((tr) => tr.annotation(Transaction.userEvent))
+            .find((value): value is string => typeof value === "string") ?? "input";
+        runtime.outerView.dispatch({
+          changes: {
+            from: model.from + projected.from,
+            to: model.from + projected.to,
+            insert: projected.insert,
+          },
+          userEvent,
+        });
+        // Transaction filters may reject or rewrite an outer change. Never
+        // leave a plausible-looking child draft detached from the note:
+        // immediately reconcile it with the source that actually committed.
+        const authoritative = authoritativeVisualColumnText(runtime, columnIndex);
+        if (authoritative != null) {
+          syncVisualColumnChild(runtime, target, authoritative);
+        }
+      },
+    });
+    runtime.activeEditor = innerView;
+  }
+
+  private toggleVisualMarkdown(
+    view: EditorView,
+    marker: string,
+    codeOpen: string,
+    codeClose: string
+  ): boolean {
+    if (view.composing) return false;
+    const inCode = inFenceBody(view.state);
+    const open = inCode ? codeOpen : marker;
+    const close = inCode ? codeClose : marker;
+    const sel = view.state.selection.main;
+    if (sel.empty) {
+      view.dispatch({
+        changes: { from: sel.from, insert: open + close },
+        selection: { anchor: sel.from + open.length },
+        userEvent: "input",
+      });
+    } else {
+      toggleWrap(view, open, close);
+    }
+    return true;
+  }
+}
+
+function makeVisualColumnEditor(plugin: NotionFlowPlugin) {
+  const empty = Decoration.none;
+  const buildDecorations = (
+    state: EditorState,
+    active: ActiveVisualColumn | null
+  ): DecorationSet => {
+    if (!active || active.from < 0 || active.to > state.doc.length || active.from >= active.to) {
+      return empty;
+    }
+    const text = state.doc.sliceString(active.from, active.to);
+    const layout = parseColumnsSource(text.split("\n"));
+    if (
+      !layout ||
+      layout.columns.length < 2 ||
+      active.column >= layout.columns.length ||
+      layout.columns.some((_column, index) => !columnInnerSource(layout, index))
+    ) {
+      return empty;
+    }
+    return Decoration.set([
+      Decoration.replace({
+        block: true,
+        widget: new VisualColumnWidget(
+          plugin,
+          active.from,
+          active.to,
+          active.column,
+          text
+        ),
+      }).range(active.from, active.to),
+    ]);
+  };
+  const field = StateField.define<VisualColumnFieldValue>({
+    create: () => ({ active: null, decorations: empty }),
+    update: (value, transaction) => {
+      let active = value.active;
+      if (active && transaction.docChanged) {
+        active = {
+          ...active,
+          from: transaction.changes.mapPos(active.from, -1),
+          to: transaction.changes.mapPos(active.to, 1),
+        };
+      }
+      let explicit = false;
+      for (const effect of transaction.effects) {
+        if (!effect.is(setVisualColumnEffect)) continue;
+        active = effect.value;
+        explicit = true;
+      }
+      if (!explicit && active && transaction.selection) {
+        const head = transaction.newSelection.main.head;
+        if (head < active.from || head > active.to) active = null;
+      }
+      const decorations = buildDecorations(transaction.state, active);
+      if (active && decorations.size === 0) active = null;
+      return { active, decorations };
+    },
+    provide: (source) => [
+      Prec.highest(
+        EditorView.decorations.from(source, (value) => value.decorations)
+      ),
+      EditorView.atomicRanges.of((view) => view.state.field(source).decorations),
+    ],
+  });
+  return [
+    field,
+    EditorView.domEventHandlers({
+      mousedown: (evt, view) => {
+        const active = view.state.field(field).active;
+        if (!active) return false;
+        const target = evt.target as Element | null;
+        if (target?.closest?.(".nf-columns-editor")) return false;
+        view.dispatch({ effects: setVisualColumnEffect.of(null) });
+        return false;
+      },
+    }),
+  ];
+}
+
+function renderedColumnIndex(
+  target: Element | null,
+  knownView?: EditorView,
+  point?: { x: number; y: number }
+): {
+  context: RenderedColumnsContext;
+  index: number;
+} | null {
+  const column = target?.closest<HTMLElement>(`.callout[data-callout="${COL_TYPE}"]`);
+  const row = target?.closest<HTMLElement>(`.callout[data-callout="${COLS_TYPE}"]`);
+  const source = column ?? row ?? (target instanceof HTMLElement ? target : null);
+  if (!source) return null;
+  const context = renderedColumnsContext(source, knownView);
+  if (!context) return null;
+  const layout = parseColumnsSource(context.text.split("\n"));
+  if (
+    !layout ||
+    layout.columns.length !== context.columns.length ||
+    layout.columns.some((_segment, index) => !columnInnerSource(layout, index))
+  ) return null;
+  let index = column?.parentElement === context.content
+    ? context.columns.indexOf(column)
+    : -1;
+  // Obsidian can retarget a click on rendered callout text to the outer
+  // embed block. Fall back to the actual pointer position so a column is
+  // still independently addressable instead of selecting the whole row.
+  if (index < 0 && point) {
+    index = context.columns.findIndex((candidate) => {
+      const rect = candidate.getBoundingClientRect();
+      return (
+        point.x >= rect.left &&
+        point.x <= rect.right &&
+        point.y >= rect.top &&
+        point.y <= rect.bottom
+      );
+    });
+  }
+  return index >= 0 ? { context, index } : null;
+}
+
+function activateRenderedColumn(
+  target: Element | null,
+  knownView?: EditorView,
+  point?: { x: number; y: number }
+): boolean {
+  const hit = renderedColumnIndex(target, knownView, point);
+  if (!hit) return false;
+  hit.context.view.dispatch({
+    effects: setVisualColumnEffect.of({
+      from: hit.context.from,
+      to: hit.context.to,
+      column: hit.index,
+    }),
+    selection: { anchor: hit.context.from },
+  });
+  return true;
+}
+
+/** Execute a right-edge drop: remove `dragged` from where it was and put
+ * it beside `target` — a new columns row, or one more column when the
+ * target already is one. One transaction, so a single undo restores both. */
+function dropAsColumn(view: EditorView, dragged: BlockRange, target: BlockRange) {
+  const doc = view.state.doc;
+  const removal = protectedBlockRemovalRange(doc, dragged);
+  const draggedLines = doc
+    .sliceString(doc.line(dragged.startLine).from, doc.line(dragged.endLine).to)
+    .split("\n");
+  const tFrom = doc.line(target.startLine).from;
+  const tTo = doc.line(target.endLine).to;
+  const targetLines = doc.sliceString(tFrom, tTo).split("\n");
+  const wrapped =
+    parseCalloutHeader(targetLines[0])?.type === COLS_TYPE
+      ? [...targetLines, ...appendColumnLines(draggedLines)]
+      : buildColumnsWrap(targetLines, draggedLines);
+
+  // Seam lines are read PAST the dragged block when it is the direct
+  // neighbor — that neighbor is being removed by this same transaction.
+  let prevNo = target.startLine - 1;
+  if (prevNo >= dragged.startLine && prevNo <= dragged.endLine) {
+    prevNo = dragged.startLine - 1;
+  }
+  let nextNo = target.endLine + 1;
+  if (nextNo >= dragged.startLine && nextNo <= dragged.endLine) {
+    nextNo = dragged.endLine + 1;
+  }
+  const above = prevNo >= 1 ? doc.line(prevNo).text : "";
+  const below = nextNo <= doc.lines ? doc.line(nextNo).text : "";
+  let text = wrapped.join("\n");
+  if (needsProtectedSeam(above, wrapped[0])) text = "\n" + text;
+  if (needsProtectedSeam(wrapped[wrapped.length - 1], below)) text += "\n";
+
+  view.dispatch({
+    changes: [
+      { from: removal.from, to: removal.to },
+      { from: tFrom, to: tTo, insert: text },
+    ],
+    userEvent: "move.block",
+  });
+}
+
+/** Items that set (or assign) the Callout type of `lineNo`. */
+function addCalloutTypeItems(menu: Menu, view: EditorView, lineNo: number) {
+  const current = parseCalloutHeader(view.state.doc.line(lineNo).text)?.type;
+  for (const entry of CALLOUT_TYPES) {
+    menu.addItem((item) =>
+      item
+        .setTitle(t(entry.label))
+        .setIcon(entry.icon)
+        .setChecked(current === entry.type)
+        .onClick(() => {
+          const line = view.state.doc.line(lineNo);
+          const next = parseCalloutHeader(line.text)
+            ? setCalloutType(line.text, entry.type)
+            : quoteToCallout(line.text, entry.type);
+          if (next == null || next === line.text) return;
+          view.dispatch({
+            changes: { from: line.from, to: line.to, insert: next },
+            userEvent: "input.callout-type",
+          });
+        })
+    );
+  }
+}
+
+function addCalloutFoldItem(menu: Menu, view: EditorView, lineNo: number) {
+  const header = parseCalloutHeader(view.state.doc.line(lineNo).text);
+  if (!header) return;
+  menu.addItem((item) =>
+    item
+      .setTitle(t("Foldable"))
+      .setIcon("chevron-down")
+      .setChecked(header.fold !== "")
+      .onClick(() => {
+        const line = view.state.doc.line(lineNo);
+        const next = toggleCalloutFold(line.text);
+        if (next == null) return;
+        view.dispatch({
+          changes: { from: line.from, to: line.to, insert: next },
+          userEvent: "input.callout-fold",
+        });
+      })
+  );
+}
+
+function addCalloutToQuoteItem(menu: Menu, view: EditorView, lineNo: number) {
+  if (!parseCalloutHeader(view.state.doc.line(lineNo).text)) return;
+  menu.addItem((item) =>
+    item
+      .setTitle(t("Turn into quote"))
+      .setIcon("quote")
+      .onClick(() => {
+        const doc = view.state.doc;
+        const line = doc.line(lineNo);
+        const next = calloutToQuote(line.text);
+        if (next == null) return;
+        // A header reduced to bare markers is dropped entirely when body
+        // lines follow, so the quote doesn't begin with a blank row.
+        const dropLine =
+          RE_QUOTE_ONLY.test(next) &&
+          lineNo < doc.lines &&
+          RE_QUOTE.test(doc.line(lineNo + 1).text);
+        view.dispatch({
+          changes: dropLine
+            ? { from: line.from, to: line.to + 1 }
+            : { from: line.from, to: line.to, insert: next },
+          userEvent: "input.callout-type",
+        });
+      })
+  );
+}
+
+function openCalloutTypeMenu(view: EditorView, lineNo: number, evt: MouseEvent) {
+  const menu = new Menu().setUseNativeMenu(false);
+  addCalloutTypeItems(menu, view, lineNo);
+  menu.addSeparator();
+  addCalloutFoldItem(menu, view, lineNo);
+  addCalloutToQuoteItem(menu, view, lineNo);
+  menu.showAtMouseEvent(evt);
+}
+
+/** Live Preview mouse behavior for rendered Callout widgets:
+ *  - clicking the icon opens the type menu instead of expanding the block;
+ *  - clicking anywhere else converts Obsidian's native "select the whole
+ *    embed" into a caret at the click point, so one click starts editing,
+ *    Notion-style (a drag keeps the native block selection).
+ *  The widget handles mouse events itself before they bubble to the
+ *  editor, so every listener must run in the capture phase. */
+function makeCalloutIconMenu(plugin: NotionFlowPlugin) {
+  return ViewPlugin.fromClass(
+    class CalloutIconMenuView {
+      view: EditorView;
+      /** Click-to-caret candidate remembered from mousedown. */
+      pendingCaret: { x: number; y: number; from: number; to: number } | null =
+        null;
+
+      constructor(view: EditorView) {
+        this.view = view;
+        view.dom.addEventListener("mousedown", this.onMouseDown, true);
+        view.dom.addEventListener("click", this.onClick, true);
+      }
+
+      headerLineForIcon = (evt: Event): number | null => {
+        if (!plugin.settings.calloutEditing) return null;
+        const target = evt.target as Element | null;
+        const icon = target?.closest?.(".callout-icon");
+        if (!icon) return null;
+        const widget = icon.closest<HTMLElement>(".cm-embed-block.cm-callout");
+        if (!widget || !this.view.contentDOM.contains(widget)) return null;
+        // Only the widget's own icon: a Callout nested inside the rendered
+        // content keeps the native click-to-edit behavior.
+        if (icon.closest(".callout") !== widget.querySelector(".callout")) {
+          return null;
+        }
+        try {
+          const doc = this.view.state.doc;
+          const lineNo = doc.lineAt(this.view.posAtDOM(widget, 0)).number;
+          return parseCalloutHeader(doc.line(lineNo).text) ? lineNo : null;
+        } catch {
+          return null;
+        }
+      };
+
+      /** The columns row whose hover ⋯ button this event hit, or null. */
+      colsButtonBlock = (evt: Event): BlockRange | null => {
+        if (!plugin.settings.columnLayout) return null;
+        const target = evt.target as Element | null;
+        const btn = target?.closest?.(".nf-cols-menu");
+        if (!btn || !this.view.contentDOM.contains(btn)) return null;
+        const widget = btn.closest<HTMLElement>(".cm-embed-block.cm-callout");
+        if (!widget) return null;
+        try {
+          const doc = this.view.state.doc;
+          const lineNo = doc.lineAt(this.view.posAtDOM(widget, 0)).number;
+          const block = getBlockRange(doc, lineNo, cachedFences(doc));
+          if (!block) return null;
+          const header = parseCalloutHeader(doc.line(block.startLine).text);
+          return header?.type === COLS_TYPE ? block : null;
+        } catch {
+          return null;
+        }
+      };
+
+      onMouseDown = (evt: MouseEvent) => {
+        if (evt.button !== 0) return;
+        const eventTarget = evt.target as Element | null;
+        if (eventTarget?.closest?.(".nf-columns-editor")) {
+          this.pendingCaret = null;
+          return;
+        }
+        // Pointerdown on a gutter already started the resize. Consume the
+        // compatibility mousedown so Obsidian does not expand the widget.
+        if (eventTarget?.closest?.(".nf-col-resizer")) {
+          evt.preventDefault();
+          evt.stopPropagation();
+          return;
+        }
+        // Icon / columns button: swallow mousedown so the widget never
+        // expands or selects itself; the row stays rendered under the menu.
+        if (this.headerLineForIcon(evt) != null || this.colsButtonBlock(evt)) {
+          evt.preventDefault();
+          evt.stopPropagation();
+          return;
+        }
+        if (
+          plugin.settings.columnLayout &&
+          !eventTarget?.closest?.(
+            "a, button, input, textarea, select, .callout-fold, .nf-col-resizer"
+          ) &&
+          renderedColumnIndex(eventTarget, this.view, {
+            x: evt.clientX,
+            y: evt.clientY,
+          })
+        ) {
+          // Keep Obsidian from expanding the whole Callout into linear
+          // source. The click phase activates the one-column visual editor.
+          evt.preventDefault();
+          evt.stopPropagation();
+          return;
+        }
+        // Elsewhere on the widget: let the native handling run, but
+        // remember the press so a same-spot click can rewrite the block
+        // selection into a caret. Fold chevrons, links, and embedded
+        // controls keep their own click behavior.
+        this.pendingCaret = null;
+        if (!plugin.settings.calloutEditing || evt.detail > 1) return;
+        const target = eventTarget;
+        if (typeof target?.closest !== "function") return;
+        if (
+          target.closest(
+            ".callout-fold, a, input, button, .nf-cols-menu, .nf-col-resizer"
+          )
+        ) return;
+        const widget = target.closest<HTMLElement>(
+          ".cm-embed-block.cm-callout"
+        );
+        if (!widget || !this.view.contentDOM.contains(widget)) return;
+        try {
+          const layout = this.view.lineBlockAt(this.view.posAtDOM(widget, 0));
+          this.pendingCaret = {
+            x: evt.clientX,
+            y: evt.clientY,
+            from: layout.from,
+            to: layout.to,
+          };
+        } catch {
+          this.pendingCaret = null;
+        }
+      };
+
+      /** If the press left Obsidian's whole-block selection in place,
+       *  replace it with a caret at the click point. */
+      resolvePendingCaret = (pending: {
+        x: number;
+        y: number;
+        from: number;
+        to: number;
+      }): boolean => {
+        const sel = this.view.state.selection.main;
+        if (sel.empty || sel.from !== pending.from || sel.to !== pending.to) {
+          return false;
+        }
+        const pos = this.view.posAtCoords({ x: pending.x, y: pending.y });
+        if (pos == null || pos < pending.from || pos > pending.to) return false;
+        this.view.dispatch({
+          selection: { anchor: pos },
+          scrollIntoView: true,
+        });
+        return true;
+      };
+
+      onClick = (evt: MouseEvent) => {
+        if (evt.button !== 0) return;
+        const eventTarget = evt.target as Element | null;
+        if (eventTarget?.closest?.(".nf-columns-editor")) {
+          this.pendingCaret = null;
+          return;
+        }
+        const lineNo = this.headerLineForIcon(evt);
+        if (lineNo != null) {
+          evt.preventDefault();
+          evt.stopPropagation();
+          openCalloutTypeMenu(this.view, lineNo, evt);
+          return;
+        }
+        const colsBlock = this.colsButtonBlock(evt);
+        if (colsBlock) {
+          evt.preventDefault();
+          evt.stopPropagation();
+          const menu = new Menu().setUseNativeMenu(false);
+          addColumnsMenuItems(menu, this.view, colsBlock);
+          menu.showAtMouseEvent(evt);
+          return;
+        }
+        const clickTarget = eventTarget;
+        if (
+          plugin.settings.columnLayout &&
+          !clickTarget?.closest?.(
+            "a, button, input, textarea, select, .callout-fold, .nf-col-resizer"
+          ) &&
+          activateRenderedColumn(clickTarget, this.view, {
+            x: evt.clientX,
+            y: evt.clientY,
+          })
+        ) {
+          evt.preventDefault();
+          evt.stopPropagation();
+          this.pendingCaret = null;
+          return;
+        }
+        const pending = this.pendingCaret;
+        this.pendingCaret = null;
+        if (!pending) return;
+        // A real drag keeps the native block selection.
+        if (
+          Math.abs(evt.clientX - pending.x) > 4 ||
+          Math.abs(evt.clientY - pending.y) > 4
+        ) {
+          return;
+        }
+        // The block selection (and the widget → source swap) can land
+        // before or just after this click event; retry briefly.
+        if (this.resolvePendingCaret(pending)) return;
+        const win = this.view.dom.ownerDocument.defaultView ?? window;
+        win.requestAnimationFrame(() => {
+          if (!this.resolvePendingCaret(pending)) {
+            win.setTimeout(() => this.resolvePendingCaret(pending), 80);
+          }
+        });
+      };
+
+      destroy() {
+        this.view.dom.removeEventListener("mousedown", this.onMouseDown, true);
+        this.view.dom.removeEventListener("click", this.onClick, true);
+      }
+    }
+  );
+}
+
+/** Canonical Callout type → Obsidian theme color variable (rgb triplet). */
+const CALLOUT_COLOR_VARS: Record<string, string> = {
+  note: "--callout-default",
+  abstract: "--callout-summary",
+  info: "--callout-info",
+  todo: "--callout-todo",
+  tip: "--callout-tip",
+  success: "--callout-success",
+  question: "--callout-question",
+  warning: "--callout-warning",
+  failure: "--callout-fail",
+  danger: "--callout-error",
+  bug: "--callout-bug",
+  example: "--callout-example",
+  quote: "--callout-quote",
+  // Column structure paints neutral, not "unknown Callout" blue.
+  [COLS_TYPE]: "--callout-quote",
+  [COL_TYPE]: "--callout-quote",
+};
+
+export interface CalloutEditBlock {
+  startLine: number;
+  endLine: number;
+  colorVar: string;
+}
+
+/**
+ * Callout blocks whose quote lines intersect [fromLine, toLine]. When the
+ * caret is inside a Callout, Live Preview swaps the rendered widget for
+ * these source lines; the edit plugin re-paints the rendered box on them
+ * so entering a Callout doesn't visually collapse it into bare source.
+ */
+export function calloutEditBlocks(
+  doc: Text,
+  fromLine: number,
+  toLine: number,
+  fences: FenceRange[] = cachedFences(doc)
+): CalloutEditBlock[] {
+  const blocks: CalloutEditBlock[] = [];
+  let n = fromLine;
+  while (n <= toLine) {
+    const text = doc.line(n).text;
+    if (!RE_QUOTE.test(text) || fenceAt(fences, n)) {
+      n++;
+      continue;
+    }
+    // The quote branch of getBlockRange also carries lazy continuation
+    // lines, which Obsidian renders inside the Callout.
+    const range = getBlockRange(doc, n, fences) ?? { startLine: n, endLine: n };
+    const header = parseCalloutHeader(doc.line(range.startLine).text);
+    if (header) {
+      blocks.push({
+        startLine: range.startLine,
+        endLine: range.endLine,
+        colorVar: CALLOUT_COLOR_VARS[header.type] ?? "--callout-default",
+      });
+    }
+    n = range.endLine + 1;
+  }
+  return blocks;
+}
+
+/** Line decorations that keep an expanded (source-mode) Callout looking
+ *  like its rendered box: type-colored background, rounded first/last
+ *  rows, and a colored title line. Display-only. */
+function makeCalloutEditPlugin(plugin: NotionFlowPlugin) {
+  return ViewPlugin.fromClass(
+    class CalloutEditView {
+      decorations: DecorationSet;
+
+      constructor(view: EditorView) {
+        this.decorations = this.build(view);
+      }
+
+      update(update: ViewUpdate) {
+        if (update.docChanged || update.viewportChanged) {
+          this.decorations = this.build(update.view);
+        }
+      }
+
+      build(view: EditorView): DecorationSet {
+        if (!plugin.settings.calloutEditing || !isLivePreviewEditor(view)) {
+          return Decoration.none;
+        }
+        const doc = view.state.doc;
+        const fences = cachedFences(doc);
+        const builder = new RangeSetBuilder<Decoration>();
+        let emitted = 0; // guard against re-walking a block across ranges
+        for (const range of view.visibleRanges) {
+          const fromLine = doc.lineAt(range.from).number;
+          const toLine = doc.lineAt(range.to).number;
+          for (const block of calloutEditBlocks(doc, fromLine, toLine, fences)) {
+            for (let n = Math.max(block.startLine, emitted + 1); n <= block.endLine; n++) {
+              // Column scaffolding rows ("> [!nf-cols]", "> > [!nf-col]")
+              // are structure, not prose — fade them while editing.
+              const headType = parseCalloutHeader(doc.line(n).text)?.type;
+              const meta = headType === COLS_TYPE || headType === COL_TYPE;
+              const cls =
+                "nf-co-edit" +
+                (n === block.startLine ? " nf-co-first" : "") +
+                (n === block.endLine ? " nf-co-last" : "") +
+                (meta ? " nf-co-meta" : "");
+              builder.add(
+                doc.line(n).from,
+                doc.line(n).from,
+                Decoration.line({
+                  attributes: {
+                    class: cls,
+                    style: `--callout-color:var(${block.colorVar});`,
+                  },
+                })
+              );
+              emitted = n;
+            }
+          }
+        }
+        return builder.finish();
+      }
+    },
+    { decorations: (v) => v.decorations }
   );
 }
 
@@ -2116,12 +5139,15 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
       handle: HTMLElement;
       plus: HTMLElement;
       indicator: HTMLElement;
+      /** Vertical bar marking a "drop beside this block as a column" target. */
+      colIndicator: HTMLElement;
       highlight: HTMLElement;
       ghost: HTMLElement;
       hoverBlock: BlockRange | null = null;
       pendingDrag: { x: number; y: number; block: BlockRange } | null = null;
       dragging = false;
       dragBlock: BlockRange | null = null;
+      dropColumnsTarget: BlockRange | null = null;
       dropLine = -1;
       dropIndent: number | undefined = undefined;
       dropCandidatesLine = -1;
@@ -2167,7 +5193,7 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         this.ownerDocument = view.dom.ownerDocument;
         this.ownerWindow = this.ownerDocument.defaultView ?? window;
         this.nested = !!view.dom.parentElement?.closest(".cm-editor");
-        this.fences = scanFences(view.state.doc);
+        this.fences = cachedFences(view.state.doc);
 
         this.controls = this.ownerDocument.body.createDiv({
           cls: "nf-block-controls",
@@ -2211,7 +5237,8 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
               clientX: rect.left + rect.width / 2,
               clientY: rect.bottom,
             }),
-            plugin.settings.slashCommands
+            plugin.settings.slashCommands,
+            plugin.settings.columnLayout
           );
         });
 
@@ -2225,6 +5252,9 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
 
         this.indicator = this.ownerDocument.body.createDiv({ cls: "nf-drop-indicator" });
         this.indicator.style.display = "none";
+
+        this.colIndicator = this.ownerDocument.body.createDiv({ cls: "nf-col-indicator" });
+        this.colIndicator.style.display = "none";
 
         this.highlight = this.ownerDocument.body.createDiv({ cls: "nf-block-highlight" });
         this.highlight.style.display = "none";
@@ -2530,6 +5560,11 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
 
       handleMouseMove(e: MouseEvent) {
         if (this.dragging || this.pendingDrag) return;
+        const eventTarget = e.target as Element | null;
+        if (eventTarget?.closest?.(".nf-columns-editor")) {
+          this.hideHover();
+          return;
+        }
         if (!plugin.settings.dragHandles) {
           this.hideHover();
           return;
@@ -2765,8 +5800,48 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         this.scrollSpeed = 0;
       }
 
+      /** Notion's create-a-column gesture: the pointer parked at the right
+       * edge of a top-level block targets "beside it", not "between rows". */
+      columnDropTarget(x: number, y: number): BlockRange | null {
+        const drag = this.dragBlock;
+        if (!drag || !plugin.settings.columnLayout) return null;
+        const contentRect = this.view.contentDOM.getBoundingClientRect();
+        const zone = Math.min(96, contentRect.width * 0.15);
+        if (x < contentRect.right - zone) return null;
+        const pos = this.posAt(x, y);
+        if (pos == null) return null;
+        const doc = this.view.state.doc;
+        const target = getBlockRange(doc, doc.lineAt(pos).number, this.fences);
+        if (!target) return null;
+        // Never beside itself; only top-level, non-blank targets.
+        if (target.startLine <= drag.endLine && target.endLine >= drag.startLine) {
+          return null;
+        }
+        const first = doc.line(target.startLine).text;
+        if (RE_BLANK.test(first) || indentWidth(first) !== 0) return null;
+        return target;
+      }
+
       updateDropTarget(x: number, y: number) {
         if (!this.dragBlock) return;
+
+        const colTarget = this.columnDropTarget(x, y);
+        const colRect = colTarget ? this.blockRect(colTarget) : null;
+        // Only a target the bar can actually mark counts — state and
+        // visuals must never disagree about what a drop will do.
+        this.dropColumnsTarget = colRect ? colTarget : null;
+        if (colTarget && colRect) {
+          const contentRect = this.view.contentDOM.getBoundingClientRect();
+          this.indicator.style.display = "none";
+          this.colIndicator.style.display = "block";
+          this.colIndicator.style.left = `${contentRect.right - 10}px`;
+          this.colIndicator.style.top = `${colRect.top}px`;
+          this.colIndicator.style.height = `${colRect.bottom - colRect.top}px`;
+          this.showHighlight(this.dragBlock);
+          return;
+        }
+        this.colIndicator.style.display = "none";
+
         const pos = this.posAt(x, y);
         const doc = this.view.state.doc;
         let target: number;
@@ -2835,6 +5910,7 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         this.pendingDrag = null;
         this.dragging = false;
         this.dragBlock = null;
+        this.dropColumnsTarget = null;
         this.dropLine = -1;
         this.dropIndent = undefined;
         this.dropCandidatesLine = -1;
@@ -2845,6 +5921,7 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         this.handle.classList.remove("is-dragging");
         this.highlight.classList.remove("is-dragging");
         this.indicator.style.display = "none";
+        this.colIndicator.style.display = "none";
         this.ghost.style.display = "none";
         this.controls.style.display = "none";
         this.highlight.style.display = "none";
@@ -2857,6 +5934,7 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         const block = this.dragBlock;
         const dropLine = this.dropLine;
         const dropIndent = this.dropIndent;
+        const colTarget = this.dropColumnsTarget;
         this.endDrag();
         if (pending) {
           // Click without drag → block menu.
@@ -2865,8 +5943,11 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
             pending.block,
             this.fences,
             e,
-            plugin.settings.slashCommands
+            plugin.settings.slashCommands,
+            plugin.settings.columnLayout
           );
+        } else if (wasDragging && block && colTarget) {
+          dropAsColumn(this.view, block, colTarget);
         } else if (wasDragging && block && dropLine > 0) {
           moveBlock(
             this.view,
@@ -2883,7 +5964,7 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         if (update.geometryChanged) this.listIndentCache = null;
         if (update.geometryChanged || update.viewportChanged) this.hideHover();
         if (update.docChanged) {
-          this.fences = scanFences(update.state.doc);
+          this.fences = cachedFences(update.state.doc);
           this.dropCandidatesLine = -1;
           this.dropCandidates = [];
           // Hover geometry is stale after an edit; next mousemove re-shows.
@@ -2902,6 +5983,7 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         if (this.dragging) this.ownerDocument.body.classList.remove("nf-dragging");
         this.controls.remove();
         this.indicator.remove();
+        this.colIndicator.remove();
         this.highlight.remove();
         this.ghost.remove();
       }
@@ -2987,13 +6069,13 @@ function makeNestedIndentPlugin(plugin: NotionFlowPlugin) {
 
       constructor(view: EditorView) {
         this.view = view;
-        this.fences = scanFences(view.state.doc);
+        this.fences = cachedFences(view.state.doc);
         this.decorations = this.build(view);
         this.scheduleWidgetSync();
       }
 
       update(update: ViewUpdate) {
-        if (update.docChanged) this.fences = scanFences(update.state.doc);
+        if (update.docChanged) this.fences = cachedFences(update.state.doc);
         if (update.docChanged || update.viewportChanged || update.geometryChanged) {
           this.decorations = this.build(update.view);
         }
@@ -3336,15 +6418,30 @@ function makeNestedIndentPlugin(plugin: NotionFlowPlugin) {
 
 /* Only the plugin's own exact shapes are matched, and style values are
  * restricted to a charset that cannot smuggle URLs or extra CSS
- * properties into the decoration (no ':', ';', '/' or quotes). */
+ * properties into the decoration (no ':', ';', '/' or quotes). The bare
+ * <b>/<i>/<s> tags are what the toolbar writes inside fenced code blocks,
+ * where Markdown markers would stay literal text. Comment anchors carry
+ * their note in data-nf-cmt — the value is display-only text (tooltip,
+ * modal, title attribute), never style or markup, so its charset only
+ * excludes what would break the attribute itself. */
 const RE_NF_TAG =
-  /<span style="color:([-\w(),.%# ]{1,64})">|<mark style="background:([-\w(),.%# ]{1,64});color:inherit">|<span class="nf-(?:cell|tbl)-[a-z]{1,12}">|<u>|<\/(?:span|mark|u)>/g;
+  /<span style="color:([-\w(),.%# ]{1,64})">|<mark style="background:([-\w(),.%# ]{1,64});color:inherit">|<span class="nf-cmt" data-nf-cmt="([^"<>]*)">|<span class="nf-(?:cell|tbl)-[a-z]{1,12}">|<[ubis]>|<\/(?:span|mark|u|b|i|s)>/g;
+
+/** Rendered style for each bare formatting tag the plugin understands. */
+const BARE_TAG_STYLES: Record<string, string> = {
+  u: "text-decoration:underline",
+  b: "font-weight:bold",
+  i: "font-style:italic",
+  s: "text-decoration:line-through",
+};
 
 export interface TagPair {
   open: { from: number; to: number };
   close: { from: number; to: number };
   /** Inline style re-applied to the inner text, or null (cell markers). */
   style: string | null;
+  /** Raw (still attribute-encoded) comment text of an nf-cmt anchor. */
+  comment: string | null;
 }
 
 /** Convert an offset measured in rendered/visible text back to its source
@@ -3382,8 +6479,9 @@ export function findColorTagPairs(text: string): TagPair[] {
   type Open = {
     from: number;
     to: number;
-    el: "span" | "mark" | "u";
+    el: "span" | "mark" | "u" | "b" | "i" | "s";
     style: string | null;
+    comment: string | null;
   };
   const stack: Open[] = [];
   RE_NF_TAG.lastIndex = 0;
@@ -3400,26 +6498,352 @@ export function findColorTagPairs(text: string): TagPair[] {
           open: { from: open.from, to: open.to },
           close: { from, to },
           style: open.style,
+          comment: open.comment,
         });
         break;
       }
     } else {
+      const bare = /^<([ubis])>$/.exec(m[0])?.[1];
       stack.push({
         from,
         to,
-        el: m[0] === "<u>" ? "u" : m[0].startsWith("<mark") ? "mark" : "span",
-        style:
-          m[0] === "<u>"
-            ? "text-decoration:underline"
-            : m[1]
-              ? `color:${m[1]}`
-              : m[2]
-                ? `background:${m[2]}`
-                : null,
+        el: bare
+          ? (bare as Open["el"])
+          : m[0].startsWith("<mark")
+            ? "mark"
+            : "span",
+        style: bare
+          ? BARE_TAG_STYLES[bare]
+          : m[1]
+            ? `color:${m[1]}`
+            : m[2]
+              ? `background:${m[2]}`
+              : null,
+        comment: m[3] ?? null,
       });
     }
   }
   return pairs;
+}
+
+/* ------------------------------------------------------------------ */
+/* Comments (Notion-style annotations)                                 */
+/*                                                                     */
+/* A comment lives entirely inside the note: the anchored text is       */
+/* wrapped in <span class="nf-cmt" data-nf-cmt="…">…</span>, with the   */
+/* note text attribute-encoded in data-nf-cmt. Live Preview shows a     */
+/* yellow anchor plus a 💬 icon that opens the editor; Reading view     */
+/* shows the anchor with a hover tooltip. Without the plugin the span   */
+/* is inert HTML — the anchored text reads normally, the note stays     */
+/* invisible.                                                           */
+/* ------------------------------------------------------------------ */
+
+/** Comment text → attribute-safe form. Only what would break the
+ * attribute or the tag shape is escaped, so CJK text stays readable in
+ * source. Newlines become &#10; to keep the tag on one line. */
+export function encodeCommentAttr(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/\r?\n/g, "&#10;");
+}
+
+/** Inverse of encodeCommentAttr. `&amp;` is decoded LAST, so encoded
+ * literals ("&amp;#10;") can never double-decode. */
+export function decodeCommentAttr(value: string): string {
+  return value
+    .replace(/&#10;/g, "\n")
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
+/** The full anchor markup for a comment on `selected`, or null when the
+ * selection cannot carry one (empty, or spanning lines). */
+export function buildCommentWrap(selected: string, comment: string): string | null {
+  if (!selected || selected.includes("\n")) return null;
+  const body = comment.trim();
+  if (!body) return null;
+  return `<span class="nf-cmt" data-nf-cmt="${encodeCommentAttr(body)}">${selected}</span>`;
+}
+
+/** Modal editor for one comment: write, save, or resolve (remove). */
+class CommentModal extends Modal {
+  private value: string;
+
+  constructor(
+    app: App,
+    initial: string | null,
+    private onSave: (text: string) => void,
+    private onResolve: (() => void) | null
+  ) {
+    super(app);
+    this.value = initial ?? "";
+  }
+
+  onOpen() {
+    this.titleEl.setText(t("Comment"));
+    this.modalEl.addClass("nf-cmt-modal");
+    const input = this.contentEl.createEl("textarea", {
+      cls: "nf-cmt-input",
+      attr: { placeholder: t("Write a comment…"), rows: "4" },
+    });
+    input.value = this.value;
+    input.addEventListener("input", () => {
+      this.value = input.value;
+    });
+    input.addEventListener("keydown", (evt) => {
+      if ((evt.metaKey || evt.ctrlKey) && evt.key === "Enter") {
+        evt.preventDefault();
+        this.submit();
+      }
+    });
+    const buttons = new Setting(this.contentEl);
+    if (this.onResolve) {
+      const resolve = this.onResolve;
+      buttons.addButton((btn) =>
+        btn
+          .setButtonText(t("Resolve"))
+          .setWarning()
+          .onClick(() => {
+            this.close();
+            resolve();
+          })
+      );
+    }
+    buttons.addButton((btn) =>
+      btn.setButtonText(t("Save")).setCta().onClick(() => this.submit())
+    );
+    window.setTimeout(() => input.focus(), 0);
+  }
+
+  private submit() {
+    const text = this.value.trim();
+    this.close();
+    if (text) this.onSave(text);
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+}
+
+/** Open the editor for the comment whose anchor contains `pos`. Saving
+ * rewrites the open tag's attribute; resolving deletes both tags and
+ * leaves the anchored text as plain prose. Both re-verify that the tags
+ * still sit untouched before dispatching. */
+function openCommentAt(plugin: NotionFlowPlugin, view: EditorView, pos: number) {
+  const doc = view.state.doc;
+  const line = doc.lineAt(pos);
+  const rel = pos - line.from;
+  const pair = findColorTagPairs(line.text).find(
+    (p) => p.comment != null && rel >= p.open.from && rel <= p.close.to
+  );
+  if (!pair) return;
+  const openText = line.text.slice(pair.open.from, pair.open.to);
+  const closeText = line.text.slice(pair.close.from, pair.close.to);
+  const open = { from: line.from + pair.open.from, to: line.from + pair.open.to };
+  const close = { from: line.from + pair.close.from, to: line.from + pair.close.to };
+  const intact = () =>
+    view.state.doc.sliceString(open.from, Math.min(open.to, view.state.doc.length)) ===
+      openText &&
+    view.state.doc.sliceString(close.from, Math.min(close.to, view.state.doc.length)) ===
+      closeText;
+  new CommentModal(
+    plugin.app,
+    decodeCommentAttr(pair.comment ?? ""),
+    (text) => {
+      if (!intact()) return;
+      view.dispatch({
+        changes: {
+          from: open.from,
+          to: open.to,
+          insert: `<span class="nf-cmt" data-nf-cmt="${encodeCommentAttr(text)}">`,
+        },
+        userEvent: "input.comment",
+      });
+    },
+    () => {
+      if (!intact()) return;
+      view.dispatch({
+        changes: [
+          { from: open.from, to: open.to },
+          { from: close.from, to: close.to },
+        ],
+        userEvent: "delete.comment",
+      });
+    }
+  ).open();
+}
+
+/** Comment on the current selection: validate it, ask for the text, wrap. */
+function startAddComment(plugin: NotionFlowPlugin, view: EditorView) {
+  if (!plugin.settings.commenting) return;
+  const sel = view.state.selection.main;
+  const selected = view.state.sliceDoc(sel.from, sel.to);
+  if (!selected) {
+    new Notice(t("Select some text to comment on."));
+    return;
+  }
+  if (selected.includes("\n")) {
+    new Notice(t("Comments cover a single line of text."));
+    return;
+  }
+  const { from, to } = sel;
+  new CommentModal(
+    plugin.app,
+    null,
+    (text) => {
+      if (view.state.doc.sliceString(from, to) !== selected) return;
+      const wrap = buildCommentWrap(selected, text);
+      if (!wrap) return;
+      view.dispatch({
+        changes: { from, to, insert: wrap },
+        selection: { anchor: from + wrap.length },
+        userEvent: "input.comment",
+      });
+      view.focus();
+    },
+    null
+  ).open();
+}
+
+/** The 💬 marker rendered in place of a comment's closing tag. */
+class CommentIconWidget extends WidgetType {
+  constructor(
+    readonly plugin: NotionFlowPlugin,
+    readonly tooltip: string
+  ) {
+    super();
+  }
+
+  eq(other: CommentIconWidget) {
+    return other.tooltip === this.tooltip;
+  }
+
+  toDOM(view: EditorView): HTMLElement {
+    const el = view.dom.ownerDocument.createElement("span");
+    el.className = "nf-cmt-icon";
+    el.setAttribute("title", this.tooltip);
+    el.setAttribute("role", "button");
+    // The same 💬 the raw-element paths draw via CSS ::after, so the
+    // marker never changes shape when a line enters or leaves editing.
+    el.textContent = "💬";
+    el.addEventListener("mousedown", (evt) => {
+      evt.preventDefault();
+      evt.stopPropagation();
+    });
+    el.addEventListener("click", (evt) => {
+      evt.preventDefault();
+      evt.stopPropagation();
+      try {
+        openCommentAt(this.plugin, view, view.posAtDOM(el));
+      } catch {
+        // The widget may already be detached from the editor.
+      }
+    });
+    return el;
+  }
+}
+
+/**
+ * Reading view shows fenced code as literal text, so the HTML formatting
+ * tags the toolbar writes inside code blocks would appear verbatim there.
+ * Restyle a rendered <code> element in place: wrap each formatted stretch
+ * of text in a real styled span, then delete the tag text itself. Only
+ * text nodes are split, wrapped, or trimmed, so any structure the syntax
+ * highlighter created stays intact.
+ */
+/** Text nodes of `el` with their global text offsets, in document order. */
+function collectCodeTextNodes(el: HTMLElement) {
+  const walker = el.ownerDocument.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  const nodes: { node: CharacterData; start: number }[] = [];
+  let offset = 0;
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    const node = n as CharacterData;
+    nodes.push({ node, start: offset });
+    offset += node.data.length;
+  }
+  return nodes;
+}
+
+/** Wrap each text-node slice covered by a span in a styled <span>. Only
+ * text nodes are split, so highlighter structure survives. */
+function applyCodeSpans(
+  codeEl: HTMLElement,
+  spans: { from: number; to: number; style: string }[]
+) {
+  const doc = codeEl.ownerDocument;
+  for (const span of spans) {
+    for (const { node, start } of collectCodeTextNodes(codeEl)) {
+      const from = Math.max(span.from, start);
+      const to = Math.min(span.to, start + node.data.length);
+      if (from >= to) continue;
+      const range = doc.createRange();
+      range.setStart(node, from - start);
+      range.setEnd(node, to - start);
+      const el = doc.createElement("span");
+      el.setAttribute("style", span.style);
+      el.setAttribute("data-nf-code", "");
+      range.surroundContents(el);
+    }
+  }
+}
+
+export function renderCodeFormattingTags(codeEl: HTMLElement) {
+  const full = codeEl.textContent ?? "";
+  if (!/<\/(?:span|mark|u|b|i|s)>/.test(full)) return;
+  const pairs = findColorTagPairs(full).filter((pair) => pair.style != null);
+  if (pairs.length === 0) return;
+  const tags = pairs
+    .flatMap((pair) => [pair.open, pair.close])
+    .sort((a, b) => a.from - b.from);
+  // Styled ranges expressed in post-deletion coordinates, so they can be
+  // re-applied after any later re-render that keeps the clean text.
+  const shiftAt = (pos: number) => {
+    let shift = 0;
+    for (const tag of tags) {
+      if (tag.to > pos) break;
+      shift += tag.to - tag.from;
+    }
+    return shift;
+  };
+  const spans = pairs
+    .filter((pair) => pair.open.to < pair.close.from)
+    .map((pair) => ({
+      from: pair.open.to - shiftAt(pair.open.to),
+      to: pair.close.from - shiftAt(pair.close.from),
+      style: pair.style!,
+    }));
+  const expectedLength =
+    full.length - tags.reduce((sum, tag) => sum + (tag.to - tag.from), 0);
+  // Remove the tag text, back to front so earlier offsets stay valid
+  // across tags. Within one tag the snapshot keeps node-local offsets
+  // correct even when the tag spans several highlighter text nodes.
+  for (const tag of [...tags].reverse()) {
+    for (const { node, start } of collectCodeTextNodes(codeEl)) {
+      const from = Math.max(tag.from, start);
+      const to = Math.min(tag.to, start + node.data.length);
+      if (from >= to) continue;
+      node.deleteData(from - start, to - from);
+    }
+  }
+  applyCodeSpans(codeEl, spans);
+  // Obsidian's syntax highlighter may re-render the block later from its
+  // (now clean) text, wiping the styled wrappers. Re-apply them once.
+  const observer = new MutationObserver(() => {
+    observer.disconnect();
+    if (
+      (codeEl.textContent ?? "").length === expectedLength &&
+      !codeEl.querySelector("[data-nf-code]")
+    ) {
+      applyCodeSpans(codeEl, spans);
+    }
+  });
+  observer.observe(codeEl, { childList: true, subtree: true });
 }
 
 function makeConcealPlugin(plugin: NotionFlowPlugin) {
@@ -3541,6 +6965,7 @@ function makeConcealPlugin(plugin: NotionFlowPlugin) {
       constructor(view: EditorView) {
         this.view = view;
         this.build(view);
+        this.scheduleCommentTitles(view);
         view.dom.addEventListener("mousedown", this.onMouseDown, true);
         view.dom.addEventListener("click", this.onClick, true);
         document.addEventListener("mouseup", this.onMouseUp, true);
@@ -3549,6 +6974,30 @@ function makeConcealPlugin(plugin: NotionFlowPlugin) {
 
       update(update: ViewUpdate) {
         if (update.docChanged || update.viewportChanged) this.build(update.view);
+        // Inactive lines render comment spans as Obsidian's own inline-HTML
+        // widgets, which carry no tooltip. Widgets (re)mount after this
+        // update — including when the caret merely leaves the line — so
+        // top up the title attributes a frame later.
+        if (update.docChanged || update.viewportChanged || update.selectionSet) {
+          this.scheduleCommentTitles(update.view);
+        }
+      }
+
+      scheduleCommentTitles(view: EditorView) {
+        if (!plugin.settings.commenting) return;
+        const win = view.dom.ownerDocument.defaultView ?? window;
+        win.requestAnimationFrame(() => {
+          for (const el of Array.from(
+            view.contentDOM.querySelectorAll<HTMLElement>(
+              'span.nf-cmt[data-nf-cmt]:not([title])'
+            )
+          )) {
+            el.setAttribute(
+              "title",
+              decodeCommentAttr(el.getAttribute("data-nf-cmt") ?? "")
+            );
+          }
+        });
       }
 
       destroy() {
@@ -3562,7 +7011,9 @@ function makeConcealPlugin(plugin: NotionFlowPlugin) {
         this.decorations = Decoration.none;
         this.hidden = Decoration.none;
         this.pairs = [];
-        if (!plugin.settings.concealHtml) return;
+        // Comment anchors render under their own setting, independent of
+        // the generic HTML-tag concealment.
+        if (!plugin.settings.concealHtml && !plugin.settings.commenting) return;
         // Source mode shows source; conceal only in Live Preview (this
         // also covers editors embedded in Live Preview table cells).
         const mode = view.dom.closest(".markdown-source-view");
@@ -3572,14 +7023,37 @@ function makeConcealPlugin(plugin: NotionFlowPlugin) {
         for (const range of view.visibleRanges) {
           const text = view.state.doc.sliceString(range.from, range.to);
           for (const pair of findColorTagPairs(text)) {
+            const isComment = pair.comment != null;
+            if (isComment ? !plugin.settings.commenting : !plugin.settings.concealHtml) {
+              continue;
+            }
             const open = { from: range.from + pair.open.from, to: range.from + pair.open.to };
             const close = { from: range.from + pair.close.from, to: range.from + pair.close.to };
             hide.push(Decoration.replace({}).range(open.from, open.to));
-            hide.push(Decoration.replace({}).range(close.from, close.to));
-            if (pair.style && open.to < close.from) {
-              marks.push(
-                Decoration.mark({ attributes: { style: pair.style } }).range(open.to, close.from)
+            if (isComment) {
+              // The closing tag becomes the 💬 marker; the anchored text
+              // itself gets the Notion-style highlight and a tooltip.
+              const note = decodeCommentAttr(pair.comment ?? "");
+              hide.push(
+                Decoration.replace({
+                  widget: new CommentIconWidget(plugin, note),
+                }).range(close.from, close.to)
               );
+              if (open.to < close.from) {
+                marks.push(
+                  Decoration.mark({
+                    class: "nf-cmt-anchor",
+                    attributes: { title: note },
+                  }).range(open.to, close.from)
+                );
+              }
+            } else {
+              hide.push(Decoration.replace({}).range(close.from, close.to));
+              if (pair.style && open.to < close.from) {
+                marks.push(
+                  Decoration.mark({ attributes: { style: pair.style } }).range(open.to, close.from)
+                );
+              }
             }
             this.pairs.push({
               openFrom: open.from,
@@ -3959,7 +7433,8 @@ function openBlockMenu(
   block: BlockRange,
   fences: FenceRange[],
   evt: MouseEvent,
-  slashCommandsEnabled: boolean
+  slashCommandsEnabled: boolean,
+  columnsEnabled = false
 ) {
   const doc = view.state.doc;
   const blockText = doc.sliceString(
@@ -4103,6 +7578,75 @@ function openBlockMenu(
     menu.addSeparator();
   }
 
+  // Quote/Callout controls: pick (or assign) the Callout type, toggle the
+  // fold marker, and downgrade a Callout to a plain quote. Column
+  // scaffolding is structure, not a Callout — retyping it would shatter
+  // the layout, so nf-cols/nf-col blocks get the Columns section instead.
+  const headerType = parseCalloutHeader(doc.line(block.startLine).text)?.type;
+  const isColumns = headerType === COLS_TYPE || headerType === COL_TYPE;
+  if (!isFence && !isColumns && RE_QUOTE.test(doc.line(block.startLine).text)) {
+    addLabel("Callout");
+    menu.addItem((item) => {
+      item.setTitle(t("Callout type")).setIcon("megaphone");
+      const withSub = item as unknown as { setSubmenu?: () => Menu };
+      if (typeof withSub.setSubmenu === "function") {
+        addCalloutTypeItems(withSub.setSubmenu(), view, block.startLine);
+      }
+    });
+    addCalloutFoldItem(menu, view, block.startLine);
+    addCalloutToQuoteItem(menu, view, block.startLine);
+    menu.addSeparator();
+  }
+
+  // Columns: wrap a top-level block into a two-column row, or grow an
+  // existing row by one column. (Notion's drag-to-the-right-edge gesture
+  // does the same; the menu is the discoverable path.)
+  const blockIsBlank = RE_BLANK.test(doc.line(block.startLine).text);
+  if (
+    columnsEnabled &&
+    !blockIsBlank &&
+    indentWidth(doc.line(block.startLine).text) === 0
+  ) {
+    addLabel("Columns");
+    if (headerType === COLS_TYPE) {
+      addColumnsMenuItems(menu, view, block);
+    } else {
+      menu.addItem((item) =>
+        item
+          .setTitle(t("Turn into columns"))
+          .setIcon("columns-2")
+          .onClick(() => {
+            const from = doc.line(block.startLine).from;
+            const to = doc.line(block.endLine).to;
+            const lines = doc.sliceString(from, to).split("\n");
+            const wrapped = [
+              `> [!${COLS_TYPE}]`,
+              ...wrapAsColumn(dedentLines(lines)),
+              ">",
+              `> > [!${COL_TYPE}]`,
+              "> > ",
+            ];
+            const above = block.startLine > 1 ? doc.line(block.startLine - 1).text : "";
+            const below = block.endLine < doc.lines ? doc.line(block.endLine + 1).text : "";
+            let text = wrapped.join("\n");
+            let caret = from + text.length;
+            if (needsProtectedSeam(above, wrapped[0])) {
+              text = "\n" + text;
+              caret += 1;
+            }
+            if (needsProtectedSeam(wrapped[wrapped.length - 1], below)) text += "\n";
+            view.dispatch({
+              changes: { from, to, insert: text },
+              selection: { anchor: caret },
+              scrollIntoView: true,
+              userEvent: "input.columns",
+            });
+          })
+      );
+    }
+    menu.addSeparator();
+  }
+
   // Applying a one-line prefix to a multi-line quote/callout leaves all
   // remaining ">" lines behind and silently splits the block. Keep the
   // unsafe conversion out of that block's menu until it can be expressed
@@ -4192,6 +7736,16 @@ interface ToolbarAction {
   endMarker?: string;
   /** Custom active-state detection for formats that can wrap other markup. */
   isActive?: (state: EditorState) => boolean;
+  /** Grayed out while the selection sits inside a fenced code block. */
+  disabledInCode?: boolean;
+  /** Hidden while the Comments setting is off. */
+  requiresCommenting?: boolean;
+}
+
+/** Whether the main selection lies inside a fenced code block's body. */
+function inFenceBody(state: EditorState): boolean {
+  const sel = state.selection.main;
+  return fenceBodyRange(state.doc, sel.from, sel.to) != null;
 }
 
 interface TableToolbarTarget {
@@ -4437,47 +7991,100 @@ export function applyHighlightColor(view: EditorView, color: string | null) {
 }
 
 /** Strip every inline format from the selection: markdown tokens,
- *  surrounding wrappers, and color span/mark tags. */
-export function clearInlineFormatting(view: EditorView) {
-  const markdownWrappers = [
-    ["**", "**"],
-    ["~~", "~~"],
-    ["==", "=="],
-    ["`", "`"],
-    ["*", "*"],
-  ] as const;
+ *  surrounding wrappers, and color span/mark tags. Inside a fenced code
+ *  block only the plugin's HTML tags are removed — `*`, `` ` `` and the
+ *  rest are literal code there, never formatting. */
+/** Marker ranges of the plugin's HTML tag pairs that intersect
+ * [selFrom, selTo] in one line's text (offsets line-local). A pair that
+ * merely TOUCHES the selection loses both tags — never one orphaned half.
+ * Comment anchors are content, not formatting, and stay untouched. */
+export function intersectingTagRanges(
+  text: string,
+  selFrom: number,
+  selTo: number
+): { from: number; to: number }[] {
+  const out: { from: number; to: number }[] = [];
+  for (const pair of findColorTagPairs(text)) {
+    if (pair.comment != null) continue;
+    if (pair.open.from < selTo && pair.close.to > selFrom) {
+      out.push({ from: pair.open.from, to: pair.open.to });
+      out.push({ from: pair.close.from, to: pair.close.to });
+    }
+  }
+  return out;
+}
 
-  // Different formats can surround each other in either order. Re-run the
-  // peel in bounded passes so removing an inner wrapper exposes and removes
-  // the next outer wrapper as well.
-  const MAX_PEEL_PASSES = 32;
-  for (let pass = 0; pass < MAX_PEEL_PASSES; pass++) {
-    const beforeLength = view.state.doc.length;
-    applyTextColor(view, null);
-    applyHighlightColor(view, null);
-    for (const [open, close] of markdownWrappers) {
-      if (getWrapState(view.state, open, close) !== "none") {
-        toggleWrap(view, open, close);
+/**
+ * Strip every inline format that INTERSECTS the selection — even when its
+ * markers sit entirely outside it, which is the normal case in Live
+ * Preview where concealed `<span>` tags and Markdown markers cannot be
+ * selected. Whole marker pairs are removed via the parse tree (Markdown)
+ * and the plugin's tag pairing (HTML), so a partial selection never
+ * leaves an orphaned `**` or `</span>` behind. Inside a fenced code
+ * block only the plugin's HTML tags are formatting — `*` and `` ` `` are
+ * literal code there. Comments survive: they are notes, not formatting.
+ */
+export function clearInlineFormatting(view: EditorView) {
+  const state = view.state;
+  const doc = state.doc;
+  const seen = new Set<string>();
+  const ranges: { from: number; to: number }[] = [];
+  const push = (from: number, to: number) => {
+    if (to <= from) return;
+    const key = `${from}:${to}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    ranges.push({ from, to });
+  };
+
+  // Whatever the tree calls a marker, only genuine marker TEXT may be
+  // deleted — Obsidian's HyperMD tree shapes nodes differently from the
+  // reference Markdown tree, and a mis-shaped group must never take a
+  // fragment of real content (or an HTML tag) with it.
+  const MARKER_TEXT = /^(?:\*{1,3}|_{1,3}|~~|==|`+)$/;
+
+  for (const sel of state.selection.ranges) {
+    if (sel.empty) continue;
+    // Markdown markers via the parse tree: bold/italic (both * and _),
+    // strikethrough, highlight, and inline code backticks.
+    if (!fenceBodyRange(doc, sel.from, sel.to)) {
+      for (const group of collectInlineSyntaxGroups(
+        syntaxTree(state),
+        doc,
+        sel.from,
+        sel.to
+      )) {
+        if (group.from < sel.to && group.to > sel.from) {
+          for (const marker of group.markers) {
+            if (MARKER_TEXT.test(doc.sliceString(marker.from, marker.to))) {
+              push(marker.from, marker.to);
+            }
+          }
+        }
       }
     }
-    if (isUnderlineActive(view.state)) toggleUnderline(view);
-    if (view.state.doc.length === beforeLength) break;
+    // The plugin's own HTML tags: colors, highlight, underline, and the
+    // <b>/<i>/<s> pairs written inside code fences.
+    const fromLine = doc.lineAt(sel.from).number;
+    const toLine = doc.lineAt(sel.to).number;
+    for (let n = fromLine; n <= toLine; n++) {
+      const line = doc.line(n);
+      for (const range of intersectingTagRanges(
+        line.text,
+        Math.max(0, sel.from - line.from),
+        Math.min(line.length, sel.to - line.from)
+      )) {
+        push(line.from + range.from, line.from + range.to);
+      }
+    }
   }
 
-  const sel = view.state.selection.main;
-  if (sel.empty) return;
-  const selected = view.state.doc.sliceString(sel.from, sel.to);
-  const stripped = selected
-    // Require the complete tag name. In particular, `<u>` must never make
-    // clear-formatting consume unrelated `<ul>` or `<unknown>` elements.
-    .replace(/<\/?(?:span|mark|u)(?:\s[^<>]*)?>/gi, "")
-    .replace(/(\*\*|~~|==|`|\*)/g, "");
-  if (stripped !== selected) {
-    view.dispatch({
-      changes: { from: sel.from, to: sel.to, insert: stripped },
-      selection: { anchor: sel.from, head: sel.from + stripped.length },
-    });
-  }
+  if (ranges.length === 0) return;
+  view.dispatch({
+    changes: ranges,
+    scrollIntoView: true,
+    userEvent: "delete.format",
+  });
 }
 
 export function insertLink(view: EditorView) {
@@ -4492,9 +8099,31 @@ export function insertLink(view: EditorView) {
   view.focus();
 }
 
+/** Markdown markers everywhere; the equivalent HTML tag pair inside a
+ * fenced code block, where Markdown markers stay literal code. */
+const dualFormatAction = (
+  icon: string,
+  tooltip: string,
+  marker: string,
+  codeOpen: string,
+  codeClose: string
+): ToolbarAction => ({
+  icon,
+  tooltip,
+  marker,
+  isActive: (state) =>
+    inFenceBody(state)
+      ? getWrapState(state, codeOpen, codeClose) !== "none"
+      : getWrapState(state, marker) !== "none",
+  run: (v) =>
+    inFenceBody(v.state)
+      ? toggleWrap(v, codeOpen, codeClose)
+      : toggleWrap(v, marker),
+});
+
 const PRIMARY_TOOLBAR_ACTIONS: ToolbarAction[] = [
-  { icon: "bold", tooltip: t("Bold"), marker: "**", run: (v) => toggleWrap(v, "**") },
-  { icon: "italic", tooltip: t("Italic"), marker: "*", run: (v) => toggleWrap(v, "*") },
+  dualFormatAction("bold", t("Bold"), "**", "<b>", "</b>"),
+  dualFormatAction("italic", t("Italic"), "*", "<i>", "</i>"),
   {
     icon: "underline",
     tooltip: t("Underline"),
@@ -4503,12 +8132,18 @@ const PRIMARY_TOOLBAR_ACTIONS: ToolbarAction[] = [
     isActive: isUnderlineActive,
     run: toggleUnderline,
   },
-  { icon: "strikethrough", tooltip: t("Strikethrough"), marker: "~~", run: (v) => toggleWrap(v, "~~") },
+  dualFormatAction("strikethrough", t("Strikethrough"), "~~", "<s>", "</s>"),
 ];
 
 const SECONDARY_TOOLBAR_ACTIONS: ToolbarAction[] = [
-  { icon: "code", tooltip: t("Inline code"), marker: "`", run: (v) => toggleWrap(v, "`") },
-  { icon: "link", tooltip: t("Link"), run: insertLink },
+  {
+    icon: "code",
+    tooltip: t("Inline code"),
+    marker: "`",
+    run: (v) => toggleWrap(v, "`"),
+    disabledInCode: true,
+  },
+  { icon: "link", tooltip: t("Link"), run: insertLink, disabledInCode: true },
 ];
 
 function makeToolbarPlugin(plugin: NotionFlowPlugin) {
@@ -4692,6 +8327,19 @@ function makeToolbarPlugin(plugin: NotionFlowPlugin) {
           this.buttons.push({ el: btn, action });
         }
 
+        // Comment on the selection — plugin-bound (the modal needs App),
+        // so it lives outside the module-level action tables.
+        const commentAction: ToolbarAction = {
+          icon: "message-square-plus",
+          tooltip: t("Add comment"),
+          run: (v) => startAddComment(plugin, v),
+          disabledInCode: true,
+          requiresCommenting: true,
+        };
+        const commentBtn = mkBtn(this.mainRow, commentAction.icon, commentAction.tooltip);
+        onPress(commentBtn, () => commentAction.run(this.view));
+        this.buttons.push({ el: commentBtn, action: commentAction });
+
         const clearBtn = mkBtn(this.mainRow, "remove-formatting", t("Clear formatting"));
         onPress(clearBtn, () => {
           clearInlineFormatting(this.view);
@@ -4816,7 +8464,7 @@ function makeToolbarPlugin(plugin: NotionFlowPlugin) {
             return null;
           }
           const doc = outer.state.doc;
-          const range = getTableRange(doc, doc.lineAt(pos).number, scanFences(doc));
+          const range = getTableRange(doc, doc.lineAt(pos).number, cachedFences(doc));
           if (!range) return null;
           const from = doc.line(range.startLine).from;
           const to = doc.line(range.endLine).to;
@@ -4844,7 +8492,7 @@ function makeToolbarPlugin(plugin: NotionFlowPlugin) {
         const doc = state.doc;
         const line = doc.lineAt(sel.head);
         if (!RE_TABLE.test(line.text)) return null;
-        const range = getTableRange(doc, line.number, scanFences(doc));
+        const range = getTableRange(doc, line.number, cachedFences(doc));
         if (!range) return null;
         const from = doc.line(range.startLine).from;
         const to = doc.line(range.endLine).to;
@@ -5123,12 +8771,20 @@ function makeToolbarPlugin(plugin: NotionFlowPlugin) {
         if (!this.selRect()) return this.hide();
         this.mainRow.style.display = sel.empty ? "none" : "flex";
         this.tableRow.style.display = target ? "flex" : "none";
-        // Light up buttons whose format is already applied.
+        // Light up buttons whose format is already applied. Inline code and
+        // links make no sense inside a fenced code block — gray them out.
+        const inCode = inFenceBody(this.view.state);
         for (const { el, action } of this.buttons) {
+          if (action.requiresCommenting) {
+            el.style.display = plugin.settings.commenting ? "" : "none";
+          }
+          (el as HTMLButtonElement).disabled = Boolean(action.disabledInCode) && inCode;
           if (!action.marker && !action.isActive) continue;
-          const active = action.isActive
-            ? action.isActive(this.view.state)
-            : getWrapState(this.view.state, action.marker!, action.endMarker) !== "none";
+          const active =
+            !(el as HTMLButtonElement).disabled &&
+            (action.isActive
+              ? action.isActive(this.view.state)
+              : getWrapState(this.view.state, action.marker!, action.endMarker) !== "none");
           el.classList.toggle("is-active", active);
           el.setAttribute("aria-pressed", String(active));
         }
@@ -5209,6 +8865,8 @@ interface SlashCommand {
   name: string;
   icon: string;
   keywords: string;
+  /** One-line description under the name, Notion-style. */
+  desc?: string;
   /** Syntax hint shown faintly on the right of the menu row. */
   hint?: string;
   /** Prefix applied to the current line (mutually exclusive with insert). */
@@ -5228,20 +8886,22 @@ interface SlashCommand {
 // Keywords mix English and Chinese so either language filters the menu,
 // whatever UI language is active.
 export const SLASH_COMMANDS: SlashCommand[] = [
-  { id: "h1", name: t("Heading 1"), icon: "heading-1", keywords: "h1 title 标题 一级标题", hint: "#", linePrefix: "# " },
-  { id: "h2", name: t("Heading 2"), icon: "heading-2", keywords: "h2 subtitle 标题 二级标题", hint: "##", linePrefix: "## " },
-  { id: "h3", name: t("Heading 3"), icon: "heading-3", keywords: "h3 标题 三级标题", hint: "###", linePrefix: "### " },
-  { id: "bullet", name: t("Bulleted list"), icon: "list", keywords: "ul unordered 列表 无序列表", hint: "-", linePrefix: "- " },
-  { id: "number", name: t("Numbered list"), icon: "list-ordered", keywords: "ol ordered 列表 有序列表 编号", hint: "1.", linePrefix: "1. " },
-  { id: "todo", name: t("To-do list"), icon: "check-square", keywords: "task checkbox 待办 任务 复选框", hint: "- [ ]", linePrefix: "- [ ] " },
-  { id: "quote", name: t("Quote"), icon: "quote", keywords: "blockquote 引用", hint: ">", linePrefix: "> " },
-  { id: "callout", name: t("Callout"), icon: "megaphone", keywords: "note info admonition 标注 提示", hint: "> [!note]", insert: "> [!note] ‸\n> ", block: true, sealBelow: true },
-  { id: "toggle", name: t("Toggle (foldable callout)"), icon: "chevron-right", keywords: "fold collapse 折叠", hint: "> [!note]-", insert: "> [!note]- ‸\n> ", block: true, sealBelow: true },
-  { id: "code", name: t("Code block"), icon: "code-2", keywords: "fence snippet 代码 代码块", hint: "```", insert: "```‸\n\n```", block: true },
-  { id: "table", name: t("Table"), icon: "table", keywords: "grid 表格", hint: "3×3", insert: buildTableTemplate(3, 3), block: true, needsBlank: true },
-  { id: "divider", name: t("Divider"), icon: "minus", keywords: "hr rule separator 分割线 分隔线", hint: "---", insert: "---\n‸", block: true, needsBlank: true },
-  { id: "image", name: t("Image / embed"), icon: "image", keywords: "picture attach embed 图片 附件 嵌入", hint: "![[ ]]", insert: "![[‸]]" },
-  { id: "wikilink", name: t("Internal link"), icon: "link-2", keywords: "link internal note wiki 链接 内链 双链", hint: "[[ ]]", insert: "[[‸]]" },
+  { id: "h1", name: t("Heading 1"), desc: t("Big section heading"), icon: "heading-1", keywords: "h1 title 标题 一级标题", hint: "#", linePrefix: "# " },
+  { id: "h2", name: t("Heading 2"), desc: t("Medium section heading"), icon: "heading-2", keywords: "h2 subtitle 标题 二级标题", hint: "##", linePrefix: "## " },
+  { id: "h3", name: t("Heading 3"), desc: t("Small section heading"), icon: "heading-3", keywords: "h3 标题 三级标题", hint: "###", linePrefix: "### " },
+  { id: "bullet", name: t("Bulleted list"), desc: t("Plain list with bullets"), icon: "list", keywords: "ul unordered 列表 无序列表", hint: "-", linePrefix: "- " },
+  { id: "number", name: t("Numbered list"), desc: t("List with numbering"), icon: "list-ordered", keywords: "ol ordered 列表 有序列表 编号", hint: "1.", linePrefix: "1. " },
+  { id: "todo", name: t("To-do list"), desc: t("Tasks with checkboxes"), icon: "check-square", keywords: "task checkbox 待办 任务 复选框", hint: "- [ ]", linePrefix: "- [ ] " },
+  { id: "quote", name: t("Quote"), desc: t("Quoted text with a bar"), icon: "quote", keywords: "blockquote 引用", hint: ">", linePrefix: "> " },
+  { id: "callout", name: t("Callout"), desc: t("Colored info box"), icon: "megaphone", keywords: "note info admonition 标注 提示", hint: "> [!note]", insert: "> [!note] ‸\n> ", block: true, sealBelow: true },
+  { id: "toggle", name: t("Toggle (foldable callout)"), desc: t("Collapsible content"), icon: "chevron-right", keywords: "fold collapse 折叠", hint: "> [!note]-", insert: "> [!note]- ‸\n> ", block: true, sealBelow: true },
+  { id: "cols2", name: t("Two columns"), desc: t("Blocks side by side"), icon: "columns-2", keywords: "columns cols layout 分栏 两栏 栏 布局 并排", hint: "[!nf-cols]", insert: buildColumnsTemplate(2), block: true, sealBelow: true },
+  { id: "cols3", name: t("Three columns"), desc: t("Blocks side by side"), icon: "columns-3", keywords: "columns cols layout 分栏 三栏 栏 布局 并排", hint: "[!nf-cols]", insert: buildColumnsTemplate(3), block: true, sealBelow: true },
+  { id: "code", name: t("Code block"), desc: t("Fenced code with highlighting"), icon: "code-2", keywords: "fence snippet 代码 代码块", hint: "```", insert: "```‸\n\n```", block: true },
+  { id: "table", name: t("Table"), desc: t("Rows and columns"), icon: "table", keywords: "grid 表格", hint: "3×3", insert: buildTableTemplate(3, 3), block: true, needsBlank: true },
+  { id: "divider", name: t("Divider"), desc: t("Horizontal rule"), icon: "minus", keywords: "hr rule separator 分割线 分隔线", hint: "---", insert: "---\n‸", block: true, needsBlank: true },
+  { id: "image", name: t("Image / embed"), desc: t("Embed an image or file"), icon: "image", keywords: "picture attach embed 图片 附件 嵌入", hint: "![[ ]]", insert: "![[‸]]" },
+  { id: "wikilink", name: t("Internal link"), desc: t("Link to another note"), icon: "link-2", keywords: "link internal note wiki 链接 内链 双链", hint: "[[ ]]", insert: "[[‸]]" },
 ];
 
 export class SlashSuggest extends EditorSuggest<SlashCommand> {
@@ -5267,15 +8927,16 @@ export class SlashSuggest extends EditorSuggest<SlashCommand> {
     const before = editor.getLine(cursor.line).slice(0, cursor.ch);
     // "/" opens the menu at line start, after whitespace/">", or after CJK
     // text/punctuation — CJK prose has no spaces before the slash. The
-    // query also accepts CJK so Chinese keywords ("/表格") are typable.
+    // fullwidth "／" (what a CJK keyboard layout produces) triggers too.
+    // The query also accepts CJK so Chinese keywords ("/表格") are typable.
     // Ranges: CJK punctuation+kana, unified ideographs, fullwidth forms.
     const m = before.match(
-      /(?:^|[\s>]|[　-ヿ一-鿿＀-￯])\/([\w　-ヿ一-鿿＀-￯-]*)$/
+      /(?:^|[\s>]|[　-ヿ一-鿿＀-￯])[/／]([\w　-ヿ一-鿿＀-￯-]*)$/
     );
     if (!m) return null;
     // Inside a code fence "/" is code, not a command.
     const view = (editor as unknown as { cm?: EditorView }).cm;
-    if (view && fenceAt(scanFences(view.state.doc), cursor.line + 1)) return null;
+    if (view && fenceAt(cachedFences(view.state.doc), cursor.line + 1)) return null;
     const start = before.length - m[1].length - 1; // include the "/"
     return {
       start: { line: cursor.line, ch: start },
@@ -5284,15 +8945,28 @@ export class SlashSuggest extends EditorSuggest<SlashCommand> {
     };
   }
 
+  /** Session-scoped recently-used ids, most recent first. */
+  recent: string[] = [];
+
   getSuggestions(ctx: EditorSuggestContext): SlashCommand[] {
+    const all = this.plugin.settings.columnLayout
+      ? SLASH_COMMANDS
+      : SLASH_COMMANDS.filter((c) => !c.id.startsWith("cols"));
     const q = ctx.query.toLowerCase();
-    if (!q) return SLASH_COMMANDS;
+    if (!q) {
+      // Notion-style: what you used last sits on top of the full menu.
+      if (this.recent.length === 0) return all;
+      const boosted = this.recent
+        .map((id) => all.find((c) => c.id === id))
+        .filter((c): c is SlashCommand => c != null);
+      return [...boosted, ...all.filter((c) => !this.recent.includes(c.id))];
+    }
     // Prefix matches (id, name, or any keyword) rank above substring hits.
     const prefix = (c: SlashCommand) =>
       c.id.startsWith(q) ||
       c.name.toLowerCase().startsWith(q) ||
       c.keywords.split(" ").some((k) => k.startsWith(q));
-    return SLASH_COMMANDS.filter(
+    return all.filter(
       (c) =>
         c.name.toLowerCase().includes(q) ||
         c.keywords.includes(q) ||
@@ -5304,7 +8978,9 @@ export class SlashSuggest extends EditorSuggest<SlashCommand> {
     el.addClass("nf-slash-item");
     const iconEl = el.createDiv({ cls: "nf-slash-icon" });
     setIcon(iconEl, cmd.icon);
-    el.createDiv({ cls: "nf-slash-name", text: cmd.name });
+    const main = el.createDiv({ cls: "nf-slash-main" });
+    main.createDiv({ cls: "nf-slash-name", text: cmd.name });
+    if (cmd.desc) main.createDiv({ cls: "nf-slash-desc", text: cmd.desc });
     if (cmd.hint) el.createDiv({ cls: "nf-slash-hint", text: cmd.hint });
   }
 
@@ -5337,6 +9013,37 @@ export class SlashSuggest extends EditorSuggest<SlashCommand> {
           .map((line) => (line.length > 0 ? prefix + line : ""))
           .join("\n");
       };
+      const qp = quoteMarkerPrefix(lineText);
+      if (qp) {
+        // Triggered inside a quote/Callout/column: the block must stay in
+        // the block. Every template line keeps the "> " marker prefix, and
+        // seams use marker-only lines — a truly blank line would split
+        // the surrounding quote (and a column row) in two.
+        const sep = qp.replace(/[ \t]+$/, "");
+        const beyond = before.slice(Math.min(qp.length, before.length));
+        const body = template.split("\n").join("\n" + qp);
+        if (/\S/.test(beyond)) {
+          insert = (cmd.needsBlank ? "\n" + sep : "") + "\n" + qp + body;
+        } else {
+          insert = body;
+          if (
+            cmd.needsBlank &&
+            start.line > 0 &&
+            /\S/.test(lineAt(start.line - 1).replace(RE_QUOTE_PREFIX, ""))
+          ) {
+            replaceStart = { line: start.line, ch: 0 };
+            insert = sep + "\n" + qp + body;
+          }
+        }
+        if (
+          (cmd.sealBelow || cmd.needsBlank) &&
+          /\S/.test(lineAt(start.line + 1).replace(RE_QUOTE_PREFIX, ""))
+        ) {
+          insert += "\n" + sep;
+        }
+        this.commitSnippet(editor, insert, replaceStart, end);
+        return;
+      }
       const listIndent = listContentIndent(before);
       if (listIndent != null) {
         // "/callout" or "/code" typed in a list item becomes a child
@@ -5370,6 +9077,16 @@ export class SlashSuggest extends EditorSuggest<SlashCommand> {
     if (cmd.sealBelow && lineAt(start.line + 1).trim() !== "") {
       insert += "\n";
     }
+    this.commitSnippet(editor, insert, replaceStart, end);
+  }
+
+  /** Write the final snippet text and land the caret on its "‸" marker. */
+  private commitSnippet(
+    editor: Editor,
+    insert: string,
+    replaceStart: EditorPosition,
+    end: EditorPosition
+  ) {
     const cursorIdx = insert.indexOf("‸");
     const text = insert.replace("‸", "");
     editor.replaceRange(text, replaceStart, end);
@@ -5561,6 +9278,7 @@ export class SlashSuggest extends EditorSuggest<SlashCommand> {
     const ctx = this.context;
     if (!ctx) return;
     const { editor, start, end } = ctx;
+    this.recent = [cmd.id, ...this.recent.filter((id) => id !== cmd.id)].slice(0, 3);
 
     const pointer = _evt as MouseEvent;
     if (cmd.id === "table" && typeof pointer.clientX === "number") {
@@ -5571,7 +9289,17 @@ export class SlashSuggest extends EditorSuggest<SlashCommand> {
     if (cmd.linePrefix !== undefined) {
       // Remove the trigger text, then swap the line's block prefix.
       editor.replaceRange("", start, end);
-      const newLine = applyLinePrefix(editor.getLine(start.line), cmd.linePrefix);
+      const lineText = editor.getLine(start.line);
+      // Inside a quote/Callout/column, the "> " markers are the block's
+      // structure — a heading or list prefix applies to the CONTENT and
+      // must not strip the markers (which would rip the line out of the
+      // block). "/quote" itself keeps whole-line semantics (nesting).
+      const qp = cmd.linePrefix.startsWith(">")
+        ? null
+        : quoteMarkerPrefix(lineText);
+      const newLine = qp
+        ? qp + applyLinePrefix(lineText.slice(qp.length), cmd.linePrefix)
+        : applyLinePrefix(lineText, cmd.linePrefix);
       editor.setLine(start.line, newLine);
       editor.setCursor({ line: start.line, ch: newLine.length });
       return;
@@ -5602,6 +9330,12 @@ export default class NotionFlowPlugin extends Plugin {
     this.registerEditorExtension(makeConcealPlugin(this));
     this.registerEditorExtension(makeMarkdownConcealPlugin(this));
     this.registerEditorExtension(makeTableKeymap(this));
+    this.registerEditorExtension(makeQuoteKeymap(this));
+    this.registerEditorExtension(makeCodeBlockKeymap(this));
+    this.registerEditorExtension(makeCodeMarkerRewriter(this));
+    this.registerEditorExtension(makeVisualColumnEditor(this));
+    this.registerEditorExtension(makeCalloutIconMenu(this));
+    this.registerEditorExtension(makeCalloutEditPlugin(this));
 
     // Reading View does not consistently provide the horizontal table
     // wrapper used by Live Preview. Add a narrowly scoped, focusable scroll
@@ -5612,6 +9346,165 @@ export default class NotionFlowPlugin extends Plugin {
       // attribute gives UL bullets and OL numbers the same unlimited cycle,
       // including mixed unordered/ordered ancestry.
       annotateReadingListPhases(el);
+
+      // Formatting tags written inside fenced code blocks render as
+      // styled text instead of literal markup, matching Live Preview.
+      if (this.settings.concealHtml) {
+        for (const code of Array.from(
+          el.querySelectorAll<HTMLElement>("pre:not(.frontmatter) > code")
+        )) {
+          renderCodeFormattingTags(code);
+        }
+      }
+
+      // Comment anchors in rendered Markdown (Reading view and Live
+      // Preview callout content): Notion-style highlight + hover tooltip.
+      // The note text only ever becomes a title attribute — inert.
+      if (this.settings.commenting) {
+        for (const cmt of Array.from(
+          el.querySelectorAll<HTMLElement>('span.nf-cmt[data-nf-cmt]')
+        )) {
+          cmt.classList.add("nf-cmt-anchor");
+          cmt.setAttribute(
+            "title",
+            decodeCommentAttr(cmt.getAttribute("data-nf-cmt") ?? "")
+          );
+        }
+      }
+
+      // Pinned column widths: "[!nf-col|30]" → flex-basis 30%. The value
+      // is validated to a bare integer percentage before it touches CSS.
+      if (this.settings.columnLayout) {
+        for (const col of Array.from(
+          el.querySelectorAll<HTMLElement>('.callout[data-callout="nf-col"]')
+        )) {
+          const width = columnWidthPercent(col.getAttribute("data-callout-metadata"));
+          if (width != null) {
+            col.classList.add("nf-col-sized");
+            col.style.setProperty("--nf-col-w", `${width}%`);
+          }
+        }
+        // Every rendered columns row carries a ⋯ button — the discoverable
+        // entry to add/resize/unwrap. Its own listeners run in the target
+        // phase, ahead of anything the surrounding widget does; Reading
+        // view hides the button via CSS and the handler no-ops there.
+        for (const cols of Array.from(
+          el.querySelectorAll<HTMLElement>('.callout[data-callout="nf-cols"]')
+        )) {
+          // Visual-column sibling previews are deliberately inert. Adding
+          // row menus or resize handles there would create nested editing
+          // controls inside a button-like preview and duplicate listeners
+          // every time MarkdownRenderer refreshes it.
+          if (
+            cols.closest(
+              ".nf-columns-editor, .nf-columns-editor-preview-stage"
+            )
+          ) continue;
+          const content = Array.from(cols.children).find(
+            (child) => child.classList.contains("callout-content")
+          ) as HTMLElement | undefined;
+          const columns = content
+            ? Array.from(content.children).filter(
+                (child) => (child as HTMLElement).dataset.callout === COL_TYPE
+              ) as HTMLElement[]
+            : [];
+          const interactive = !!cols.closest(".markdown-source-view.is-live-preview");
+
+          for (let index = 0; index < columns.length; index++) {
+            const column = columns[index];
+            if (column.querySelector(":scope > .nf-col-menu")) continue;
+            const columnButton = column.createEl("button", {
+              cls: "nf-col-menu",
+              attr: {
+                type: "button",
+                tabindex: interactive ? "0" : "-1",
+                "aria-label": t("Column actions"),
+                title: t("Column actions"),
+              },
+            });
+            columnButton.dataset.nfColumnIndex = String(index);
+            setIcon(columnButton, "more-horizontal");
+            columnButton.addEventListener("mousedown", (evt) => {
+              evt.preventDefault();
+              evt.stopPropagation();
+            });
+            columnButton.addEventListener("click", (evt) => {
+              evt.preventDefault();
+              evt.stopPropagation();
+              openColumnMenuFromDOM(columnButton, evt, this);
+            });
+          }
+
+          // A real gutter between each direct child column: pointer drag
+          // previews widths live and commits once; arrows adjust by 1%
+          // (Shift = 5%), while double-click restores equal tracks.
+          if (content && columns.length >= 2 && columns.length <= 10) {
+            const currentPercents = columnPercentsFromWidths(
+              columns.map(
+                (column) =>
+                  columnWidthPercent(
+                    column.getAttribute("data-callout-metadata")
+                  ) ?? 100 / columns.length
+              )
+            );
+            for (const old of Array.from(
+              content.querySelectorAll<HTMLElement>(":scope > .nf-col-resizer")
+            )) old.remove();
+            for (let index = 0; index < columns.length - 1; index++) {
+              const handle = content.createDiv({
+                cls: "nf-col-resizer",
+                attr: {
+                  role: "separator",
+                  tabindex: interactive ? "0" : "-1",
+                  "aria-orientation": "vertical",
+                  "aria-label": t("Resize columns"),
+                  "aria-valuemin": "10",
+                  "aria-valuemax": "90",
+                  "aria-valuenow": String(currentPercents[index]),
+                  title: t("Drag to resize; double-click to distribute evenly"),
+                },
+              });
+              handle.dataset.nfColumnDivider = String(index);
+              content.insertBefore(handle, columns[index + 1]);
+              handle.addEventListener("pointerdown", (evt) => {
+                startColumnResizeFromDOM(handle, evt);
+              });
+              handle.addEventListener("dblclick", (evt) => {
+                evt.preventDefault();
+                evt.stopPropagation();
+                replaceRenderedColumnWidths(
+                  handle,
+                  Array<number | null>(columns.length).fill(null)
+                );
+              });
+              handle.addEventListener("keydown", (evt) => {
+                resizeColumnsFromKeyboard(handle, evt);
+              });
+            }
+          }
+
+          if (cols.querySelector(":scope > .nf-cols-menu")) continue;
+          const btn = cols.createEl("button", {
+            cls: "nf-cols-menu",
+            attr: {
+              type: "button",
+              tabindex: interactive ? "0" : "-1",
+              "aria-label": t("Column options"),
+              title: t("Column options"),
+            },
+          });
+          setIcon(btn, "columns-2");
+          btn.addEventListener("mousedown", (evt) => {
+            evt.preventDefault();
+            evt.stopPropagation();
+          });
+          btn.addEventListener("click", (evt) => {
+            evt.preventDefault();
+            evt.stopPropagation();
+            openColumnsMenuFromDOM(btn, evt);
+          });
+        }
+      }
 
       const tables = [
         ...(el.matches("table") ? [el as HTMLTableElement] : []),
@@ -5695,6 +9588,37 @@ export default class NotionFlowPlugin extends Plugin {
       editorCallback: (editor) => this.duplicateBlock(editor),
     });
     this.addCommand({
+      id: "exit-code-block",
+      name: t("Exit code block"),
+      // Mod+Enter alone is taken by Obsidian's toggle-checkbox hotkey.
+      hotkeys: [{ modifiers: ["Mod", "Shift"], key: "Enter" }],
+      editorCallback: (editor) => {
+        const view = this.editorView(editor);
+        if (!view) return;
+        const sel = view.state.selection.main;
+        applyKeyPlan(view, fenceExitPlan(view.state.doc, sel.head), "input");
+      },
+    });
+    this.addCommand({
+      id: "clear-formatting",
+      name: t("Clear formatting"),
+      // Notion's own clear-formatting chord.
+      hotkeys: [{ modifiers: ["Mod"], key: "\\" }],
+      editorCallback: (editor) => {
+        const view = this.editorView(editor);
+        if (view) clearInlineFormatting(view);
+      },
+    });
+    this.addCommand({
+      id: "add-comment",
+      name: t("Add comment"),
+      hotkeys: [{ modifiers: ["Mod", "Shift"], key: "M" }],
+      editorCallback: (editor) => {
+        const view = this.editorView(editor);
+        if (view) startAddComment(this, view);
+      },
+    });
+    this.addCommand({
       id: "repair-nested-callout",
       name: t("Repair nested Callout"),
       editorCallback: (editor) => {
@@ -5703,7 +9627,7 @@ export default class NotionFlowPlugin extends Plugin {
         const repair = nestedCalloutRepair(
           view.state.doc,
           editor.getCursor().line + 1,
-          scanFences(view.state.doc)
+          cachedFences(view.state.doc)
         );
         if (!repair) return;
         view.dispatch({
@@ -5785,11 +9709,99 @@ export default class NotionFlowPlugin extends Plugin {
       })
     );
 
+    // Paste a bare URL with nothing selected → insert it immediately, then
+    // fetch the page title in the background and upgrade the raw URL to
+    // [Title](url), like Notion. Code contexts and link destinations keep
+    // the plain URL; so does any page that cannot be reached in time.
+    this.registerEvent(
+      this.app.workspace.on("editor-paste", (evt, editor) => {
+        if (!this.settings.pasteUrlTitles || evt.defaultPrevented) return;
+        const clip = (evt.clipboardData?.getData("text/plain") ?? "").trim();
+        if (!RE_HTTP_URL.test(clip) || editor.getSelection()) return;
+        const cur = editor.getCursor();
+        const view = this.editorView(editor);
+        if (view && fenceAt(cachedFences(view.state.doc), cur.line + 1)) return;
+        const before = editor.getLine(cur.line).slice(0, cur.ch);
+        // Inside inline code (odd backtick count) a URL is data, and right
+        // after "](", it is already a link destination.
+        if (((before.match(/`/g) ?? []).length % 2) === 1) return;
+        if (/\]\([^)\s]*$/.test(before)) return;
+        evt.preventDefault();
+        editor.replaceSelection(clip);
+        void this.linkifyPastedUrl(editor, clip, cur);
+      })
+    );
+
+    // Multi-line pastes inside a quote/Callout keep every line in the block.
+    // Rich text goes through Obsidian's own HTML → Markdown conversion first,
+    // so browser/Word content still pastes as Markdown, just prefixed. File
+    // pastes (images, attachments) keep Obsidian's pipeline untouched.
+    this.registerEvent(
+      this.app.workspace.on("editor-paste", (evt, editor) => {
+        if (!this.settings.calloutEditing || evt.defaultPrevented) return;
+        const data = evt.clipboardData;
+        if (!data || data.files.length > 0) return;
+        const html = data.getData("text/html");
+        const clip = html ? htmlToMarkdown(html) : data.getData("text/plain");
+        const from = editor.getCursor("from");
+        const replacement = buildQuotedPaste(
+          editor.getLine(from.line),
+          from.ch,
+          clip
+        );
+        if (replacement == null) return;
+        const view = this.editorView(editor);
+        if (view && fenceAt(cachedFences(view.state.doc), from.line + 1)) return;
+        evt.preventDefault();
+        editor.replaceSelection(replacement);
+      })
+    );
+
     this.applyCleanClass();
   }
 
   private editorView(editor: Editor): EditorView | null {
     return ((editor as unknown as { cm?: EditorView }).cm as EditorView) ?? null;
+  }
+
+  /** Upgrade a just-pasted bare URL to [Title](url) once the page title
+   * arrives. The raw URL must still sit untouched at the paste position;
+   * if any edit moved or changed it, the plain URL simply stays. */
+  private async linkifyPastedUrl(
+    editor: Editor,
+    url: string,
+    at: EditorPosition
+  ) {
+    let title: string | null = null;
+    let timer = 0;
+    try {
+      const res = await Promise.race([
+        requestUrl({ url, throw: false }),
+        new Promise<null>((resolve) => {
+          timer = window.setTimeout(() => resolve(null), 8000);
+        }),
+      ]);
+      if (res && res.status >= 200 && res.status < 300) {
+        const type = String(res.headers?.["content-type"] ?? "");
+        if (!type || type.includes("html")) {
+          title = extractHtmlTitle(res.text ?? "");
+        }
+      }
+    } catch {
+      // Offline, blocked, or a non-text body — keep the plain URL.
+    } finally {
+      window.clearTimeout(timer);
+    }
+    if (!title) return;
+    const link = buildTitledLink(url, title);
+    if (!link) return;
+    try {
+      const line = editor.getLine(at.line) ?? "";
+      if (line.slice(at.ch, at.ch + url.length) !== url) return;
+      editor.replaceRange(link, at, { line: at.line, ch: at.ch + url.length });
+    } catch {
+      // The editor may have been detached while the title loaded.
+    }
   }
 
   /** Rewrite the table under the cursor with `fn`; no-op elsewhere. */
@@ -5814,7 +9826,7 @@ export default class NotionFlowPlugin extends Plugin {
     if (!view) return null;
     const doc = view.state.doc;
     const cur = editor.getCursor();
-    const range = getTableRange(doc, cur.line + 1, scanFences(doc));
+    const range = getTableRange(doc, cur.line + 1, cachedFences(doc));
     if (!range) return null;
     const from = doc.line(range.startLine).from;
     const to = doc.line(range.endLine).to;
@@ -5966,7 +9978,7 @@ export default class NotionFlowPlugin extends Plugin {
     const view = this.editorView(editor);
     if (!view) return;
     const doc = view.state.doc;
-    const fences = scanFences(doc);
+    const fences = cachedFences(doc);
     const cur = editor.getCursor();
     const block = getBlockRange(doc, cur.line + 1, fences);
     if (!block) return;
@@ -6010,7 +10022,7 @@ export default class NotionFlowPlugin extends Plugin {
     const view = this.editorView(editor);
     if (!view) return;
     const doc = view.state.doc;
-    const fences = scanFences(doc);
+    const fences = cachedFences(doc);
     const cur = editor.getCursor();
     const block = getBlockRange(doc, cur.line + 1, fences);
     if (!block) return;
@@ -6058,17 +10070,23 @@ export default class NotionFlowPlugin extends Plugin {
     for (const cls of [
       "nf-clean",
       "nf-dragging",
+      "nf-resizing-columns",
       "nf-tables",
       "nf-table-stripes",
       "nf-thead-tint",
       "nf-list-color",
       "nf-quote-color",
+      "nf-code-color",
+      "nf-callout-menu",
+      "nf-columns",
+      "nf-comments",
     ]) {
       document.body.classList.remove(cls);
     }
     document.body.style.removeProperty("--nf-table-header-bg");
     document.body.style.removeProperty("--nf-list-marker");
     document.body.style.removeProperty("--nf-quote-bar");
+    document.body.style.removeProperty("--nf-inline-code");
   }
 
   /** Each appearance feature drives its own body class, so table look,
@@ -6076,6 +10094,12 @@ export default class NotionFlowPlugin extends Plugin {
    *  cleaner-rendering toggle. */
   applyCleanClass() {
     document.body.classList.toggle("nf-clean", this.settings.cleanRendering);
+    document.body.classList.toggle(
+      "nf-callout-menu",
+      this.settings.calloutEditing
+    );
+    document.body.classList.toggle("nf-columns", this.settings.columnLayout);
+    document.body.classList.toggle("nf-comments", this.settings.commenting);
     document.body.classList.toggle("nf-tables", this.settings.tableStyle);
     document.body.classList.toggle("nf-table-stripes", this.settings.tableStripes);
     const c = this.settings.tableHeaderColor;
@@ -6110,6 +10134,14 @@ export default class NotionFlowPlugin extends Plugin {
       document.body.style.setProperty("--nf-quote-bar", `var(--color-${qb})`);
     } else {
       document.body.style.removeProperty("--nf-quote-bar");
+    }
+    const ic = this.settings.inlineCodeColor;
+    const validInlineCode = (PALETTE_COLORS as readonly string[]).includes(ic);
+    document.body.classList.toggle("nf-code-color", validInlineCode);
+    if (validInlineCode) {
+      document.body.style.setProperty("--nf-inline-code", `var(--color-${ic})`);
+    } else {
+      document.body.style.removeProperty("--nf-inline-code");
     }
   }
 
@@ -6221,7 +10253,7 @@ class NotionFlowSettingTab extends PluginSettingTab {
     parent: HTMLElement,
     name: string,
     desc: string,
-    key: "tableHeaderColor" | "listMarkerColor" | "quoteBarColor",
+    key: "tableHeaderColor" | "listMarkerColor" | "quoteBarColor" | "inlineCodeColor",
     leading: [string, string][]
   ): Setting {
     return new Setting(parent)
@@ -6291,6 +10323,36 @@ class NotionFlowSettingTab extends PluginSettingTab {
       "Pasting a URL over selected text turns it into [text](url).",
       "pasteUrlLinks"
     );
+    this.toggle(
+      this.containerEl,
+      "Paste URLs with page titles",
+      "Pasting a URL with nothing selected fetches the page title in the background and turns the URL into [title](url). The plain URL stays when the page cannot be reached; code contexts are never touched.",
+      "pasteUrlTitles"
+    );
+    this.toggle(
+      this.containerEl,
+      "Callout and quote enhancements",
+      "Enter continues the block and exits on an empty line, Backspace at the text start removes a \">\" marker, multi-line pastes stay inside the block, a Callout keeps its rendered look while you edit inside it, and clicking its icon opens the type menu.",
+      "calloutEditing"
+    );
+    this.toggle(
+      this.containerEl,
+      "Code block enhancements",
+      "In fenced code blocks, Enter keeps the current line's indentation (so blocks nested in lists stay aligned), Backspace at the text start removes one indent level, Enter after an unclosed ``` writes the closing fence, and Cmd/Ctrl+Shift+Enter (the \"Exit code block\" command) exits below the block.",
+      "codeBlockEditing"
+    );
+    this.toggle(
+      this.containerEl,
+      "Columns",
+      'Notion-style side-by-side layout. Insert with "/columns", pick "Turn into columns" from a block menu, or drag a block to the right edge of another. Written as nested [!nf-cols]/[!nf-col] callouts — plain quotes in any other Markdown app. "[!nf-col|30]" pins a column to 30% width.',
+      "columnLayout"
+    );
+    this.toggle(
+      this.containerEl,
+      "Comments",
+      'Select text and add a note to it — from the toolbar 💬 button, the "Add comment" command, or Cmd/Ctrl+Shift+M. The anchor highlights in yellow with a 💬 marker; click the marker to read, edit, or resolve. Comments are stored inside the note and stay invisible in other Markdown apps.',
+      "commenting"
+    );
 
     this.heading(
       "Tables",
@@ -6335,7 +10397,7 @@ class NotionFlowSettingTab extends PluginSettingTab {
     this.toggle(
       this.containerEl,
       "Conceal HTML formatting tags",
-      "Hide the raw <span>, <mark>, and <u> tags written by the formatting tools in Live Preview.",
+      "Hide the raw <span>, <mark>, <u>, <b>, <i>, and <s> tags written by the formatting tools in Live Preview, and render them as styled text inside code blocks in Reading view.",
       "concealHtml"
     );
     this.colorDropdown(
@@ -6355,6 +10417,13 @@ class NotionFlowSettingTab extends PluginSettingTab {
         ["accent", "Accent color"],
         ["default", "Theme default"],
       ]
+    );
+    this.colorDropdown(
+      this.containerEl,
+      "Inline code color",
+      "Ink of `inline code` text, Notion-style. Fenced code blocks are unaffected.",
+      "inlineCodeColor",
+      [["default", "Theme default"]]
     );
 
     this.heading(

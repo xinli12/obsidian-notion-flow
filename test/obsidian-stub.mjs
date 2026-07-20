@@ -11,6 +11,8 @@ export class Modal {
   close() {}
 }
 export const setIcon = () => {};
+export const requestUrl = async () => ({ status: 200, headers: {}, text: "" });
+export const htmlToMarkdown = (html) => html;
 export const editorLivePreviewField = {};
 export class Menu {
   addItem(cb) { cb({ setTitle(){return this}, setIcon(){return this}, onClick(){return this} }); return this; }
