@@ -43,6 +43,7 @@ const ZH: Record<string, string> = {
   "Add comment": "添加批注",
   Comment: "批注",
   "Write a comment…": "输入批注内容…",
+  "Enter saves · Shift+Enter breaks the line": "Enter 保存 · Shift+Enter 换行",
   Save: "保存",
   Resolve: "解除批注",
   "Select some text to comment on.": "先选中要批注的文本。",
@@ -230,6 +231,9 @@ const ZH: Record<string, string> = {
   "Clear block selection": "清除块选择",
   "{n} blocks selected": "已选择 {n} 个块",
   "Skipped {n} structural blocks.": "已跳过 {n} 个结构块。",
+  Copy: "复制",
+  Delete: "删除",
+  "Copied {n} blocks.": "已复制 {n} 个块。",
 
   // Floating toolbar
   "Formatting toolbar": "格式工具栏",

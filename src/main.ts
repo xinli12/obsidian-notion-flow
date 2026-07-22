@@ -12,6 +12,7 @@ import {
   Notice,
   Plugin,
   PluginSettingTab,
+  Scope,
   Setting,
   TFile,
   editorLivePreviewField,
@@ -5380,6 +5381,10 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
       selectedBlocks: BlockRange[] = [];
       pendingSelect: { x: number; y: number; line: number } | null = null;
       selecting = false;
+      /** Pushed while blocks are selected. Obsidian's app hotkey scope runs
+       * before document-level capture listeners, so Mod+D ("Delete
+       * paragraph") and Mod+A must be claimed through the keymap itself. */
+      keyScope: Scope | null = null;
       hoverBlock: BlockRange | null = null;
       pendingDrag: { x: number; y: number; block: BlockRange } | null = null;
       dragging = false;
@@ -5424,11 +5429,42 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
       onSelectMove = (e: MouseEvent) => this.handleSelectionMove(e);
       onSelectUp = (e: MouseEvent) => this.handleSelectionEnd(e);
       onKeyDown = (e: KeyboardEvent) => {
-        if (e.key !== "Escape") return;
+        if (e.key === "Escape") {
+          e.preventDefault();
+          e.stopPropagation();
+          if (this.dragging || this.pendingDrag) this.endDrag();
+          else this.clearBlockSelection();
+          return;
+        }
+        if (
+          this.selectedBlocks.length === 0 ||
+          this.dragging || this.pendingDrag || this.selecting
+        ) return;
+        if (
+          (e.key === "Backspace" || e.key === "Delete") &&
+          !e.metaKey && !e.ctrlKey && !e.altKey
+        ) {
+          e.preventDefault();
+          e.stopPropagation();
+          this.deleteSelectedBlocks();
+          return;
+        }
+        // Notion-style clipboard actions while blocks are selected. Keys
+        // already claimed by the selection Scope arrive defaultPrevented —
+        // running them here again would double the edit.
+        if (
+          !(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey ||
+          e.defaultPrevented
+        ) return;
+        const key = e.key.toLowerCase();
+        if (!["c", "x", "v", "d", "a"].includes(key)) return;
         e.preventDefault();
         e.stopPropagation();
-        if (this.dragging || this.pendingDrag) this.endDrag();
-        else this.clearBlockSelection();
+        if (key === "c") this.copySelectedBlocks(false);
+        else if (key === "x") this.copySelectedBlocks(true);
+        else if (key === "v") void this.pasteOverSelectedBlocks();
+        else if (key === "d") this.duplicateSelectedBlocks();
+        else this.selectAllBlocks();
       };
 
       /** True for embedded editors (Live Preview table cells, canvas …):
@@ -5534,6 +5570,28 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
           event.preventDefault();
           event.stopPropagation();
           this.openBatchTurnIntoMenu(event as MouseEvent);
+        });
+        const copySelection = this.selectionToolbar.createEl("button", {
+          cls: "clickable-icon nf-block-selection-action",
+          attr: { type: "button", "aria-label": t("Copy text") },
+        });
+        setIcon(copySelection, "clipboard-copy");
+        copySelection.createSpan({ text: t("Copy") });
+        copySelection.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          this.copySelectedBlocks(false);
+        });
+        const deleteSelection = this.selectionToolbar.createEl("button", {
+          cls: "clickable-icon nf-block-selection-action nf-block-selection-delete",
+          attr: { type: "button", "aria-label": t("Delete block") },
+        });
+        setIcon(deleteSelection, "trash-2");
+        deleteSelection.createSpan({ text: t("Delete") });
+        deleteSelection.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          this.deleteSelectedBlocks();
         });
         const closeSelection = this.selectionToolbar.createEl("button", {
           cls: "clickable-icon nf-block-selection-close",
@@ -5681,6 +5739,7 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
           endLine,
           this.fences
         );
+        if (this.selectedBlocks.length > 0) this.armSelectionScope();
         this.renderBlockSelection();
       }
 
@@ -5747,6 +5806,7 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         if (!this.dragging && !this.pendingDrag) {
           this.ownerDocument.removeEventListener("keydown", this.onKeyDown, true);
         }
+        this.disarmSelectionScope();
         this.pendingSelect = null;
         this.selecting = false;
         this.selectedBlocks = [];
@@ -5754,6 +5814,156 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         this.marquee.style.display = "none";
         this.selectionLayer.empty();
         this.selectionToolbar.style.display = "none";
+      }
+
+      /** Backspace/Delete with a block selection removes the whole swept
+       * span in one edit. Selected blocks are contiguous except for blank
+       * lines between them, so deleting first-to-last matches the marquee
+       * and sidesteps overlapping per-block removal ranges. */
+      deleteSelectedBlocks() {
+        if (this.selectedBlocks.length === 0) return;
+        const doc = this.view.state.doc;
+        const span: BlockRange = {
+          startLine: this.selectedBlocks[0].startLine,
+          endLine: this.selectedBlocks[this.selectedBlocks.length - 1].endLine,
+        };
+        const { from, to } = protectedBlockRemovalRange(doc, span);
+        this.view.dispatch({
+          changes: { from, to },
+          selection: { anchor: from },
+          userEvent: "delete.block",
+        });
+        this.clearBlockSelection();
+        this.view.focus();
+      }
+
+      armSelectionScope() {
+        if (this.keyScope) return;
+        const scope = new Scope(plugin.app.scope);
+        const idle = () =>
+          !this.selecting && !this.dragging && !this.pendingDrag;
+        scope.register(["Mod"], "D", () => {
+          if (idle()) this.duplicateSelectedBlocks();
+          return false;
+        });
+        scope.register(["Mod"], "A", () => {
+          if (idle()) this.selectAllBlocks();
+          return false;
+        });
+        this.keyScope = scope;
+        plugin.app.keymap.pushScope(scope);
+      }
+
+      disarmSelectionScope() {
+        if (!this.keyScope) return;
+        plugin.app.keymap.popScope(this.keyScope);
+        this.keyScope = null;
+      }
+
+      /** Document span of the selection: first block's first line through
+       * the last block's last line (blank lines between blocks included,
+       * matching what the marquee visibly swept). */
+      selectedSpan(): { from: number; to: number; text: string } | null {
+        if (this.selectedBlocks.length === 0) return null;
+        const doc = this.view.state.doc;
+        const from = doc.line(this.selectedBlocks[0].startLine).from;
+        const to = doc.line(
+          this.selectedBlocks[this.selectedBlocks.length - 1].endLine
+        ).to;
+        return { from, to, text: doc.sliceString(from, to) };
+      }
+
+      /** Programmatic selection (duplicate result, select-all) re-arms the
+       * key handler that a marquee gesture normally attaches. */
+      setBlockSelection(blocks: BlockRange[]) {
+        if (blocks.length === 0) {
+          this.clearBlockSelection();
+          return;
+        }
+        this.selectedBlocks = blocks;
+        this.ownerDocument.addEventListener("keydown", this.onKeyDown, true);
+        this.armSelectionScope();
+        this.ownerWindow.requestAnimationFrame(() => this.renderBlockSelection());
+      }
+
+      /** Cmd/Ctrl+C and +X. The selection survives a plain copy so a
+       * follow-up paste can still replace it, Notion-style. */
+      copySelectedBlocks(cut: boolean) {
+        const span = this.selectedSpan();
+        if (!span) return;
+        void navigator.clipboard.writeText(span.text);
+        if (cut) {
+          this.deleteSelectedBlocks();
+        } else {
+          new Notice(
+            t("Copied {n} blocks.").replace(
+              "{n}",
+              String(this.selectedBlocks.length)
+            )
+          );
+        }
+      }
+
+      /** Cmd/Ctrl+V replaces the selected blocks with the clipboard text. */
+      async pasteOverSelectedBlocks() {
+        let clip = "";
+        try {
+          clip = await navigator.clipboard.readText();
+        } catch {
+          return;
+        }
+        if (!clip) return;
+        // Re-read the selection after the await: any document change in the
+        // meantime cleared it, so a stale span can never be overwritten.
+        const span = this.selectedSpan();
+        if (!span) return;
+        const insert = clip.replace(/\r\n?/g, "\n").replace(/\n$/, "");
+        this.view.dispatch({
+          changes: { from: span.from, to: span.to, insert },
+          selection: { anchor: span.from + insert.length },
+          userEvent: "input.paste",
+        });
+        this.clearBlockSelection();
+        this.view.focus();
+      }
+
+      /** Cmd/Ctrl+D inserts a copy below and selects it, ready to move. */
+      duplicateSelectedBlocks() {
+        const span = this.selectedSpan();
+        if (!span) return;
+        const doc = this.view.state.doc;
+        const lastLine =
+          this.selectedBlocks[this.selectedBlocks.length - 1].endLine;
+        const lines = span.text.split("\n");
+        const separator = needsProtectedSeam(lines[lines.length - 1], lines[0])
+          ? "\n\n"
+          : "\n";
+        const nextText =
+          lastLine < doc.lines ? doc.line(lastLine + 1).text : "";
+        const suffix = needsProtectedSeam(lines[lines.length - 1], nextText)
+          ? "\n"
+          : "";
+        this.view.dispatch({
+          changes: { from: span.to, insert: separator + span.text + suffix },
+          userEvent: "input.duplicate",
+        });
+        const startLine = lastLine + (separator === "\n\n" ? 2 : 1);
+        this.setBlockSelection(
+          blocksInLineSpan(
+            this.view.state.doc,
+            startLine,
+            startLine + lines.length - 1,
+            this.fences
+          )
+        );
+      }
+
+      /** Cmd/Ctrl+A grows an existing block selection to the whole note. */
+      selectAllBlocks() {
+        const doc = this.view.state.doc;
+        this.setBlockSelection(
+          blocksInLineSpan(doc, 1, doc.lines, this.fences)
+        );
       }
 
       openBatchTurnIntoMenu(evt: MouseEvent) {
@@ -6520,6 +6730,7 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         this.ownerDocument.removeEventListener("mousemove", this.onSelectMove, true);
         this.ownerDocument.removeEventListener("mouseup", this.onSelectUp, true);
         this.ownerDocument.removeEventListener("keydown", this.onKeyDown, true);
+        this.disarmSelectionScope();
         this.stopAutoScroll();
         if (this.dragging) this.ownerDocument.body.classList.remove("nf-dragging");
         this.controls.remove();
@@ -6606,6 +6817,7 @@ function makeNestedIndentPlugin(plugin: NotionFlowPlugin) {
       decorations: DecorationSet;
       fences: FenceRange[];
       frame: number | null = null;
+      styleWatch: MutationObserver;
       calloutRenders = new Map<
         HTMLElement,
         { component: Component; signature: string; container: HTMLElement }
@@ -6615,6 +6827,33 @@ function makeNestedIndentPlugin(plugin: NotionFlowPlugin) {
         this.view = view;
         this.fences = cachedFences(view.state.doc);
         this.decorations = this.build(view);
+        // The measured layer offsets live in each line's style attribute,
+        // which CM and Obsidian's own indent styling rewrite on their own
+        // schedule (decoration redraws, async font/metric passes). Losing
+        // the race leaves nested lines on the coarse estimate — visibly so
+        // for --nf-quote-cont, whose fallback is 0. A measured --nf-nest is
+        // always a px value, so a nested line whose --nf-nest still holds
+        // the var()-based estimate marks a clobbered style: re-measure.
+        this.styleWatch = new MutationObserver((mutations) => {
+          for (const mutation of mutations) {
+            const el = mutation.target as HTMLElement;
+            if (!el.classList?.contains("nf-nested-block")) continue;
+            const nest = el.style.getPropertyValue("--nf-nest");
+            if (!nest || nest.includes("var(")) {
+              this.scheduleWidgetSync();
+              return;
+            }
+          }
+        });
+        this.styleWatch.observe(view.contentDOM, {
+          attributes: true,
+          attributeFilter: ["style"],
+          subtree: true,
+        });
+        // Late font loading changes glyph metrics without any CM update.
+        view.dom.ownerDocument.fonts?.ready
+          ?.then(() => this.scheduleWidgetSync())
+          .catch(() => {});
         this.scheduleWidgetSync();
       }
 
@@ -6691,6 +6930,18 @@ function makeNestedIndentPlugin(plugin: NotionFlowPlugin) {
         const view = this.view;
         const doc = view.state.doc;
         const fenceLefts = new Map<number, number | null>();
+        // HyperMD only gives the FIRST line of a quote nested in a list the
+        // list-line hanging indent (later lines' leading whitespace becomes
+        // hmd-indent-in-quote before the list continuation branch runs), so
+        // every following line of the block renders one list level too far
+        // left. Measure each line's ">" column relative to its own box —
+        // margin-invariant, so repeated syncs stay stable — and push
+        // continuation lines right by the deficit via --nf-quote-cont.
+        let prevQuote: {
+          lineNo: number;
+          indent: number;
+          headOffset: number;
+        } | null = null;
         for (const range of view.visibleRanges) {
           let pos = range.from;
           while (pos <= range.to) {
@@ -6747,6 +6998,28 @@ function makeNestedIndentPlugin(plugin: NotionFlowPlugin) {
             const offset = left - el.getBoundingClientRect().left;
             if (Number.isFinite(offset) && offset >= 0) {
               el.style.setProperty("--nf-nest", `${offset}px`);
+            }
+            if (!quote || !Number.isFinite(offset)) continue;
+            const indent = indentWidth(line.text);
+            if (
+              prevQuote &&
+              prevQuote.lineNo === line.number - 1 &&
+              prevQuote.indent === indent
+            ) {
+              const delta = prevQuote.headOffset - offset;
+              if (delta > 0.5) {
+                el.style.setProperty("--nf-quote-cont", `${delta}px`);
+              } else {
+                el.style.removeProperty("--nf-quote-cont");
+              }
+              prevQuote = {
+                lineNo: line.number,
+                indent,
+                headOffset: prevQuote.headOffset,
+              };
+            } else {
+              el.style.removeProperty("--nf-quote-cont");
+              prevQuote = { lineNo: line.number, indent, headOffset: offset };
             }
           }
         }
@@ -6972,6 +7245,7 @@ function makeNestedIndentPlugin(plugin: NotionFlowPlugin) {
       destroy() {
         const win = this.view.dom.ownerDocument.defaultView ?? window;
         if (this.frame != null) win.cancelAnimationFrame(this.frame);
+        this.styleWatch.disconnect();
         for (const widget of [...this.calloutRenders.keys()]) {
           this.releaseCalloutRender(widget);
         }
@@ -7163,71 +7437,162 @@ export function buildCommentWrap(selected: string, comment: string): string | nu
 }
 
 /** Modal editor for one comment: write, save, or resolve (remove). */
-class CommentModal extends Modal {
-  private value: string;
+/** Notion-style inline comment editor: a small floating card anchored to
+ * the commented text instead of a full-screen modal, so writing a note
+ * never leaves the page. Enter saves (IME composition is respected, so
+ * confirming Chinese input never submits), Shift+Enter breaks the line,
+ * Esc cancels, and clicking elsewhere saves any change and closes. */
+class CommentPopover {
+  private el: HTMLDivElement | null = null;
+  private input: HTMLTextAreaElement | null = null;
+  private readonly initial: string;
+  private readonly doc: Document;
+  private readonly win: Window;
 
   constructor(
-    app: App,
+    private view: EditorView,
+    private anchor: number,
     initial: string | null,
     private onSave: (text: string) => void,
     private onResolve: (() => void) | null
   ) {
-    super(app);
-    this.value = initial ?? "";
+    this.initial = initial ?? "";
+    this.doc = view.dom.ownerDocument;
+    this.win = this.doc.defaultView ?? window;
   }
 
-  onOpen() {
-    this.titleEl.setText(t("Comment"));
-    this.modalEl.addClass("nf-cmt-modal");
-    const input = this.contentEl.createEl("textarea", {
+  open() {
+    activeCommentPopover?.close();
+    activeCommentPopover = this;
+    const el = (this.el = this.doc.body.createDiv({ cls: "nf-cmt-pop" }));
+    el.setAttribute("aria-label", t("Comment"));
+    const input = (this.input = el.createEl("textarea", {
       cls: "nf-cmt-input",
-      attr: { placeholder: t("Write a comment…"), rows: "4" },
-    });
-    input.value = this.value;
+      attr: { placeholder: t("Write a comment…"), rows: "3" },
+    }));
+    input.value = this.initial;
     input.addEventListener("input", () => {
-      this.value = input.value;
+      this.autogrow();
+      this.position();
     });
-    input.addEventListener("keydown", (evt) => {
-      if ((evt.metaKey || evt.ctrlKey) && evt.key === "Enter") {
-        evt.preventDefault();
-        this.submit();
-      }
+    input.addEventListener("keydown", this.onKeyDown);
+    const footer = el.createDiv({ cls: "nf-cmt-pop-footer" });
+    footer.createSpan({
+      cls: "nf-cmt-hint",
+      text: t("Enter saves · Shift+Enter breaks the line"),
     });
-    const buttons = new Setting(this.contentEl);
+    const actions = footer.createDiv({ cls: "nf-cmt-pop-actions" });
     if (this.onResolve) {
       const resolve = this.onResolve;
-      buttons.addButton((btn) =>
-        btn
-          .setButtonText(t("Resolve"))
-          .setWarning()
-          .onClick(() => {
-            this.close();
-            resolve();
-          })
-      );
+      const btn = actions.createEl("button", {
+        cls: "mod-warning",
+        text: t("Resolve"),
+      });
+      btn.addEventListener("click", () => {
+        this.close();
+        resolve();
+      });
     }
-    buttons.addButton((btn) =>
-      btn.setButtonText(t("Save")).setCta().onClick(() => this.submit())
-    );
-    window.setTimeout(() => input.focus(), 0);
+    const save = actions.createEl("button", { cls: "mod-cta", text: t("Save") });
+    save.addEventListener("click", () => this.submit());
+    this.doc.addEventListener("mousedown", this.onDocMouseDown, true);
+    this.doc.addEventListener("scroll", this.onReposition, true);
+    this.win.addEventListener("resize", this.onReposition);
+    this.autogrow();
+    this.position();
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+  }
+
+  private onKeyDown = (evt: KeyboardEvent) => {
+    // An IME composition owns Enter/Escape while it is open.
+    if (evt.isComposing || evt.keyCode === 229) return;
+    if (evt.key === "Escape") {
+      evt.preventDefault();
+      evt.stopPropagation();
+      this.close();
+      this.view.focus();
+      return;
+    }
+    if (evt.key === "Enter" && !evt.shiftKey) {
+      evt.preventDefault();
+      this.submit();
+    }
+  };
+
+  /** Clicking anywhere else keeps the click and commits any edit — losing
+   * a typed note to a stray click would be worse than saving it. */
+  private onDocMouseDown = (evt: MouseEvent) => {
+    if (this.el && evt.target instanceof Node && this.el.contains(evt.target)) return;
+    const text = (this.input?.value ?? "").trim();
+    this.close();
+    if (text && text !== this.initial.trim()) this.onSave(text);
+  };
+
+  private onReposition = () => this.position();
+
+  private autogrow() {
+    const input = this.input;
+    if (!input) return;
+    input.style.height = "auto";
+    input.style.height =
+      Math.min(input.scrollHeight + 2, Math.round(this.win.innerHeight * 0.4)) + "px";
+  }
+
+  private position() {
+    const el = this.el;
+    if (!el) return;
+    let coords: { left: number; top: number; bottom: number } | null = null;
+    try {
+      coords = this.view.coordsAtPos(
+        Math.min(this.anchor, this.view.state.doc.length)
+      );
+    } catch {
+      // The editor may already be gone; keep the card where it was.
+    }
+    const w = el.offsetWidth;
+    const h = el.offsetHeight;
+    const vw = this.win.innerWidth;
+    const vh = this.win.innerHeight;
+    let left: number;
+    let top: number;
+    if (coords) {
+      left = Math.min(Math.max(8, coords.left - 12), vw - w - 8);
+      top = coords.bottom + 8;
+      if (top + h > vh - 8) top = Math.max(8, coords.top - h - 8);
+    } else {
+      const rect = this.view.dom.getBoundingClientRect();
+      left = Math.min(Math.max(8, rect.left + 24), vw - w - 8);
+      top = Math.max(8, Math.min(vh - h - 8, rect.top + 48));
+    }
+    el.style.left = left + "px";
+    el.style.top = top + "px";
   }
 
   private submit() {
-    const text = this.value.trim();
+    const text = (this.input?.value ?? "").trim();
     this.close();
     if (text) this.onSave(text);
   }
 
-  onClose() {
-    this.contentEl.empty();
+  close() {
+    if (activeCommentPopover === this) activeCommentPopover = null;
+    this.doc.removeEventListener("mousedown", this.onDocMouseDown, true);
+    this.doc.removeEventListener("scroll", this.onReposition, true);
+    this.win.removeEventListener("resize", this.onReposition);
+    this.el?.remove();
+    this.el = null;
+    this.input = null;
   }
 }
+
+let activeCommentPopover: CommentPopover | null = null;
 
 /** Open the editor for the comment whose anchor contains `pos`. Saving
  * rewrites the open tag's attribute; resolving deletes both tags and
  * leaves the anchored text as plain prose. Both re-verify that the tags
  * still sit untouched before dispatching. */
-function openCommentAt(plugin: NotionFlowPlugin, view: EditorView, pos: number) {
+function openCommentAt(view: EditorView, pos: number) {
   const doc = view.state.doc;
   const line = doc.lineAt(pos);
   const rel = pos - line.from;
@@ -7244,8 +7609,9 @@ function openCommentAt(plugin: NotionFlowPlugin, view: EditorView, pos: number) 
       openText &&
     view.state.doc.sliceString(close.from, Math.min(close.to, view.state.doc.length)) ===
       closeText;
-  new CommentModal(
-    plugin.app,
+  new CommentPopover(
+    view,
+    pos,
     decodeCommentAttr(pair.comment ?? ""),
     (text) => {
       if (!intact()) return;
@@ -7285,8 +7651,9 @@ function startAddComment(plugin: NotionFlowPlugin, view: EditorView) {
     return;
   }
   const { from, to } = sel;
-  new CommentModal(
-    plugin.app,
+  new CommentPopover(
+    view,
+    to,
     null,
     (text) => {
       if (view.state.doc.sliceString(from, to) !== selected) return;
@@ -7305,10 +7672,7 @@ function startAddComment(plugin: NotionFlowPlugin, view: EditorView) {
 
 /** The 💬 marker rendered in place of a comment's closing tag. */
 class CommentIconWidget extends WidgetType {
-  constructor(
-    readonly plugin: NotionFlowPlugin,
-    readonly tooltip: string
-  ) {
+  constructor(readonly tooltip: string) {
     super();
   }
 
@@ -7332,7 +7696,7 @@ class CommentIconWidget extends WidgetType {
       evt.preventDefault();
       evt.stopPropagation();
       try {
-        openCommentAt(this.plugin, view, view.posAtDOM(el));
+        openCommentAt(view, view.posAtDOM(el));
       } catch {
         // The widget may already be detached from the editor.
       }
@@ -7628,7 +7992,7 @@ function makeConcealPlugin(plugin: NotionFlowPlugin) {
               const note = decodeCommentAttr(pair.comment ?? "");
               hide.push(
                 Decoration.replace({
-                  widget: new CommentIconWidget(plugin, note),
+                  widget: new CommentIconWidget(note),
                 }).range(close.from, close.to)
               );
               if (open.to < close.from) {
@@ -11046,6 +11410,7 @@ class NotionFlowSettingTab extends PluginSettingTab {
 
   display(): void {
     this.containerEl.empty();
+    this.containerEl.addClass("nf-settings");
     this.resetButton = null;
 
     this.heading(

@@ -9,6 +9,18 @@
   to { opacity: 1; }
 }
 
+/* One floating-surface language for every Notion Flow popover — the block
+   menu, table picker, floating toolbar, selection toolbar, and drag ghost
+   share the same radius, frosted background, border, and shadow, so the
+   plugin's chrome reads as one product rather than five widgets. */
+body {
+  --nf-pop-radius: 11px;
+  --nf-pop-bg: color-mix(in srgb, var(--background-primary) 94%, transparent);
+  --nf-pop-border-color: var(--background-modifier-border);
+  --nf-pop-shadow: var(--shadow-l), 0 12px 32px rgba(0, 0, 0, 0.18);
+  --nf-pop-blur: blur(18px);
+}
+
 /* ---------- Drag handle + insert button ---------- */
 .nf-block-controls {
   position: fixed;
@@ -136,10 +148,12 @@ body.nf-selecting-blocks * {
   box-sizing: border-box;
   min-height: 36px;
   padding: 4px 5px 4px 10px;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 8px;
-  background: var(--background-primary);
-  box-shadow: var(--shadow-s);
+  border: 1px solid var(--nf-pop-border-color);
+  border-radius: var(--nf-pop-radius);
+  background: var(--nf-pop-bg);
+  box-shadow: var(--nf-pop-shadow);
+  backdrop-filter: var(--nf-pop-blur);
+  -webkit-backdrop-filter: var(--nf-pop-blur);
   animation: nf-pop 0.12s ease-out;
 }
 
@@ -182,6 +196,10 @@ body.nf-selecting-blocks * {
   background: var(--background-modifier-hover);
 }
 
+.nf-block-selection-delete:hover {
+  color: var(--text-error);
+}
+
 .nf-block-selection-action svg,
 .nf-block-selection-close svg {
   width: 15px;
@@ -194,6 +212,7 @@ body.nf-selecting-blocks * {
   height: 3px;
   border-radius: 2px;
   background-color: var(--interactive-accent);
+  box-shadow: 0 0 0 3px hsla(var(--interactive-accent-hsl), 0.14);
   opacity: 0.9;
   pointer-events: none;
   transition: top 0.09s ease, left 0.09s ease, width 0.09s ease;
@@ -217,6 +236,7 @@ body.nf-selecting-blocks * {
   width: 3px;
   border-radius: 2px;
   background-color: var(--interactive-accent);
+  box-shadow: 0 0 0 3px hsla(var(--interactive-accent-hsl), 0.14);
   opacity: 0.9;
   pointer-events: none;
   transition: top 0.09s ease, left 0.09s ease, height 0.09s ease;
@@ -254,11 +274,13 @@ body.nf-selecting-blocks * {
   max-height: 110px;
   overflow: hidden;
   padding: 8px 12px;
-  border-radius: 8px;
-  background-color: var(--background-primary);
-  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--nf-pop-radius);
+  background-color: var(--nf-pop-bg);
+  border: 1px solid var(--nf-pop-border-color);
   box-shadow: var(--shadow-l), 0 8px 28px rgba(0, 0, 0, 0.22);
-  opacity: 0.82;
+  backdrop-filter: var(--nf-pop-blur);
+  -webkit-backdrop-filter: var(--nf-pop-blur);
+  opacity: 0.88;
   pointer-events: none;
 }
 .nf-drag-ghost-text {
@@ -289,13 +311,12 @@ body.nf-selecting-blocks * {
   min-width: 244px;
   max-width: min(280px, calc(100vw - 16px));
   padding: 6px;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 11px;
-  background-color: var(--background-primary);
-  background-color: color-mix(in srgb, var(--background-primary) 94%, transparent);
-  box-shadow: var(--shadow-l), 0 12px 32px rgba(0, 0, 0, 0.18);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
+  border: 1px solid var(--nf-pop-border-color);
+  border-radius: var(--nf-pop-radius);
+  background-color: var(--nf-pop-bg);
+  box-shadow: var(--nf-pop-shadow);
+  backdrop-filter: var(--nf-pop-blur);
+  -webkit-backdrop-filter: var(--nf-pop-blur);
   pointer-events: auto;
   animation: nf-pop 0.12s ease-out;
 }
@@ -364,10 +385,13 @@ body.nf-selecting-blocks * {
   overscroll-behavior: contain;
   scrollbar-width: none;
   padding: 5px;
-  border-radius: var(--radius-s, 6px);
-  background-color: var(--background-primary);
-  border: 1px solid var(--background-modifier-border);
-  box-shadow: var(--shadow-s);
+  border-radius: var(--nf-pop-radius);
+  background-color: var(--nf-pop-bg);
+  border: 1px solid var(--nf-pop-border-color);
+  box-shadow: var(--nf-pop-shadow);
+  backdrop-filter: var(--nf-pop-blur);
+  -webkit-backdrop-filter: var(--nf-pop-blur);
+  animation: nf-pop 0.12s ease-out;
 }
 .nf-toolbar::-webkit-scrollbar {
   display: none;
@@ -458,11 +482,12 @@ body.nf-selecting-blocks * {
   height: 28px;
   padding: 0;
   border: none;
-  border-radius: 4px;
+  border-radius: 6px;
   background: transparent;
   box-shadow: none;
   color: var(--text-muted);
   cursor: pointer;
+  transition: background-color 0.1s ease, color 0.1s ease;
 }
 .nf-toolbar-btn:hover {
   background-color: var(--background-modifier-hover);
@@ -556,11 +581,15 @@ body.nf-selecting-blocks * {
   text-overflow: ellipsis;
 }
 .nf-slash-hint {
-  margin-left: auto;
-  padding-left: 12px;
+  margin-inline-start: auto;
   flex-shrink: 0;
+  padding: 1px 6px;
+  border: 1px solid color-mix(in srgb, var(--background-modifier-border) 80%, transparent);
+  border-radius: 5px;
+  background-color: color-mix(in srgb, var(--background-secondary) 70%, transparent);
   font-family: var(--font-monospace);
   font-size: var(--font-ui-smaller);
+  line-height: 1.5;
   color: var(--text-faint);
 }
 
@@ -573,13 +602,12 @@ body.nf-selecting-blocks * {
   width: max-content;
   max-width: calc(100vw - 16px);
   padding: 10px;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 11px;
-  background-color: var(--background-primary);
-  background-color: color-mix(in srgb, var(--background-primary) 94%, transparent);
-  box-shadow: var(--shadow-l), 0 12px 32px rgba(0, 0, 0, 0.18);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
+  border: 1px solid var(--nf-pop-border-color);
+  border-radius: var(--nf-pop-radius);
+  background-color: var(--nf-pop-bg);
+  box-shadow: var(--nf-pop-shadow);
+  backdrop-filter: var(--nf-pop-blur);
+  -webkit-backdrop-filter: var(--nf-pop-blur);
   animation: nf-pop 0.12s ease-out;
 }
 .nf-table-picker:focus-visible {
@@ -1200,6 +1228,12 @@ body.nf-columns .callout[data-callout="nf-cols"] > .callout-content > .callout[d
   min-height: 2.4em;
   border: 1.5px dashed var(--background-modifier-border-hover);
   border-radius: var(--radius-s, 4px);
+  cursor: pointer;
+  transition: border-color 0.12s ease, background-color 0.12s ease;
+}
+body.nf-columns .callout[data-callout="nf-cols"] > .callout-content > .callout[data-callout="nf-col"]:not(:has(> .callout-content *)):hover {
+  border-color: color-mix(in srgb, var(--interactive-accent) 55%, transparent);
+  background-color: hsla(var(--interactive-accent-hsl), 0.045);
 }
 body.nf-columns .callout[data-callout="nf-cols"] > .callout-content > .callout[data-callout="nf-col"]:not(:has(> .callout-content *))::after {
   content: "+";
@@ -1210,6 +1244,10 @@ body.nf-columns .callout[data-callout="nf-cols"] > .callout-content > .callout[d
   font-size: 1.1em;
   color: var(--text-faint);
   pointer-events: none;
+  transition: color 0.12s ease;
+}
+body.nf-columns .callout[data-callout="nf-cols"] > .callout-content > .callout[data-callout="nf-col"]:not(:has(> .callout-content *)):hover::after {
+  color: var(--text-muted);
 }
 
 /* Column boundaries are invisible ink until you need them: hovering the
@@ -1578,17 +1616,70 @@ body.nf-comments span.nf-cmt[data-nf-cmt]::after {
   opacity: 1;
 }
 
-/* Comment editor modal. */
-.nf-cmt-modal .nf-cmt-input {
+/* Inline comment editor: a floating card anchored to the commented text,
+   sharing the plugin-wide popover language. No modal, no page dimming —
+   type, press Enter, keep writing. */
+.nf-cmt-pop {
+  position: fixed;
+  z-index: calc(var(--layer-menu, 40) + 1);
+  box-sizing: border-box;
+  width: min(320px, calc(100vw - 24px));
+  padding: 8px;
+  border: 1px solid var(--nf-pop-border-color);
+  border-radius: var(--nf-pop-radius);
+  background-color: var(--nf-pop-bg);
+  box-shadow: var(--nf-pop-shadow);
+  backdrop-filter: var(--nf-pop-blur);
+  -webkit-backdrop-filter: var(--nf-pop-blur);
+  animation: nf-pop 0.12s ease-out;
+}
+.nf-cmt-pop .nf-cmt-input {
+  display: block;
   width: 100%;
-  min-height: 90px;
-  resize: vertical;
+  min-height: 60px;
+  box-sizing: border-box;
+  resize: none;
+  overflow-y: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 7px;
+  background-color: var(--background-primary);
   font-family: inherit;
   font-size: var(--font-ui-medium, 14px);
+  line-height: 1.55;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
 }
-.nf-cmt-modal .setting-item {
-  border-top: none;
-  padding-top: var(--size-4-2, 8px);
+.nf-cmt-pop .nf-cmt-input:focus,
+.nf-cmt-pop .nf-cmt-input:focus-visible {
+  outline: none;
+  border-color: var(--interactive-accent);
+  box-shadow: 0 0 0 2px hsla(var(--interactive-accent-hsl), 0.18);
+}
+.nf-cmt-pop-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 7px;
+}
+.nf-cmt-pop .nf-cmt-hint {
+  color: var(--text-faint);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.3;
+  user-select: none;
+}
+.nf-cmt-pop-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.nf-cmt-pop-actions button {
+  min-height: 26px;
+  height: 26px;
+  padding: 2px 10px;
+  font-size: var(--font-ui-small);
+  border-radius: 6px;
 }
 
 /* ---------- Document typography ---------- */
@@ -2435,10 +2526,14 @@ body.nf-tables .markdown-reading-view table :is(th, td):focus-within {
 
 /* Literal Markdown indentation already places quote/code text at its nested
    content column. Moving the complete line adds that offset a second time.
-   Keep source text in native coordinates and move only the painted layer. */
+   Keep source text in native coordinates and move only the painted layer.
+   Exception: HyperMD gives only the FIRST line of a quote nested in a list
+   the list hanging indent, so later lines land one list level too far left.
+   syncLineLayers measures that per-line deficit into --nf-quote-cont; the
+   margin shifts text, wrap indent, and quote rule together. */
 .markdown-source-view.is-live-preview .cm-line.nf-nested-block {
   box-sizing: border-box;
-  margin-inline-start: 0 !important;
+  margin-inline-start: var(--nf-quote-cont, 0px) !important;
   width: auto !important;
 }
 .markdown-source-view.is-live-preview
@@ -2534,10 +2629,21 @@ body.nf-tables .markdown-reading-view table :is(th, td):focus-within {
   display: none;
 }
 
+/* ---------- Settings tab ---------- */
+/* Everything stays native Obsidian settings UI; Notion Flow only adds
+   vertical rhythm so the long option list reads as clear groups. */
+.nf-settings .setting-item-heading:not(:first-child) {
+  margin-top: 26px;
+}
+.nf-settings .setting-item-heading .setting-item-description {
+  margin-top: 3px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .nf-block-menu-anchor .menu,
   .nf-table-picker,
   .nf-toolbar,
+  .nf-cmt-pop,
   .nf-block-controls {
     animation: none;
   }
@@ -2563,6 +2669,8 @@ body.nf-tables .markdown-reading-view table :is(th, td):focus-within {
   .nf-table-picker-cell,
   .nf-swatch,
   .nf-toolbar-btn,
+  .nf-cmt-pop .nf-cmt-input,
+  body.nf-columns .callout[data-callout="nf-cols"] > .callout-content > .callout[data-callout="nf-col"],
   body.nf-tables .markdown-source-view.is-live-preview table :is(th, td),
   body.nf-tables .markdown-reading-view table :is(th, td) {
     transition: none;

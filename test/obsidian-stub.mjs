@@ -5,6 +5,7 @@ export class PluginSettingTab {}
 export class EditorSuggest { constructor(){} setInstructions(){} }
 export class Setting { constructor(){} setName(){return this} setDesc(){return this} addToggle(){return this} }
 export class Notice { constructor(){} }
+export class Scope { constructor(){} register(){} }
 export class Modal {
   constructor() { this.contentEl = null; }
   open() {}

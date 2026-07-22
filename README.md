@@ -10,7 +10,7 @@ Notion-style block editing for Obsidian: move complete Markdown blocks, insert c
 ## Highlights
 
 - **Block controls:** drag paragraphs, headings, lists with children, quotes, Callouts, code fences, and tables. Click the handle for block actions, or click `+` to insert below.
-- **Multi-block selection:** drag a marquee from empty editor space (or Alt/Option-drag anywhere), then convert all selected blocks in one step.
+- **Multi-block selection:** drag a marquee from empty editor space (or Alt/Option-drag anywhere), then convert, copy, cut, paste over, duplicate, or delete the selected blocks in one step.
 - **Slash commands:** insert headings, lists, Callouts, toggles, code blocks, tables, columns, dividers, embeds, and internal links with English or Chinese search terms.
 - **Columns:** put blocks side by side, Notion-style — insert with `/columns`, convert from the block menu, or drag a block to the right edge of another. Written as plain nested Callouts, so notes stay portable.
 - **Comments:** select text and attach a note to it, Notion-style — yellow anchor, 💬 marker, click to read, edit, or resolve. Stored inside the note, invisible in other Markdown apps.
@@ -78,7 +78,7 @@ Click the handle without dragging to open the block menu:
 
 `+` inserts a fresh line below the current block and opens the slash menu.
 
-Drag from empty space beside a line to frame-select several blocks. You can also hold Alt/Option and drag from anywhere in the editor. The floating block toolbar converts every selected ordinary block at once; tables, fenced code blocks, and multi-line quotes are skipped so their structure is not damaged. Press `Esc` or use the × button to clear the selection.
+Drag from empty space beside a line to frame-select several blocks. You can also hold Alt/Option and drag from anywhere in the editor. The floating block toolbar converts every selected ordinary block at once (tables, fenced code blocks, and multi-line quotes are skipped so their structure is not damaged), and offers copy and delete buttons. The selection also answers the keyboard: `Cmd/Ctrl+C` copies, `Cmd/Ctrl+X` cuts, `Cmd/Ctrl+V` replaces the selected blocks with the clipboard, `Cmd/Ctrl+D` duplicates them and selects the copy, `Cmd/Ctrl+A` grows the selection to the whole note, and `Backspace`/`Delete` removes them. Press `Esc` or use the × button to clear the selection.
 
 ### Slash commands
 
