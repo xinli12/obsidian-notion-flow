@@ -101,7 +101,8 @@ const mk = (text, from, to) => {
     v.state.doc.toString()
   );
 }
-ok("palette has 8 text colors", TEXT_COLORS.length === 8);
+ok("palette has 9 text colors", TEXT_COLORS.length === 9);
+ok("gray text follows Obsidian muted ink", TEXT_COLORS[0] === "var(--text-muted)");
 
 console.log(fail === 0 ? "ALL PASS" : `${fail} FAILURES`);
 process.exit(fail);

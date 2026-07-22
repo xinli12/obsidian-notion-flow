@@ -85,6 +85,9 @@ interface NotionFlowSettings {
   /** "default" (theme) or a theme palette color name. Notion inks `code`
    *  red, so red is the default. */
   inlineCodeColor: string;
+  /** "default" keeps the active Obsidian theme; the other values apply a
+   *  bundled syntax palette to fenced code blocks only. */
+  codeTheme: string;
 }
 
 const DEFAULT_SETTINGS: NotionFlowSettings = {
@@ -107,10 +110,13 @@ const DEFAULT_SETTINGS: NotionFlowSettings = {
   listMarkerColor: "accent",
   quoteBarColor: "text",
   inlineCodeColor: "red",
+  codeTheme: "default",
 };
 
-/** Theme palette color names Obsidian defines as --color-<name>-rgb. */
+/** Theme-native colors. Gray uses Obsidian's semantic muted text/background;
+ * the chromatic entries use its light/dark-aware --color-* palette. */
 const PALETTE_COLORS = [
+  "gray",
   "red",
   "orange",
   "yellow",
@@ -120,6 +126,65 @@ const PALETTE_COLORS = [
   "purple",
   "pink",
 ] as const;
+
+type PaletteColor = (typeof PALETTE_COLORS)[number];
+
+function paletteTextColor(color: PaletteColor | string): string {
+  return color === "gray" ? "var(--text-muted)" : `var(--color-${color})`;
+}
+
+function paletteTint(color: PaletteColor | string, alpha: number): string {
+  return color === "gray"
+    ? `color-mix(in srgb, var(--text-muted) ${Math.round(alpha * 100)}%, transparent)`
+    : `rgba(var(--color-${color}-rgb), ${alpha})`;
+}
+
+const CODE_THEMES = [
+  "default",
+  "obsidian",
+  "github",
+  "vscode",
+  "one-dark",
+  "catppuccin",
+  "tokyo-night",
+  "gruvbox",
+  "dracula",
+  "nord",
+  "solarized",
+] as const;
+const CODE_THEME_LABELS: Record<(typeof CODE_THEMES)[number], string> = {
+  default: "Theme default",
+  obsidian: "Obsidian adaptive",
+  github: "GitHub",
+  vscode: "VS Code",
+  "one-dark": "One Dark",
+  catppuccin: "Catppuccin",
+  "tokyo-night": "Tokyo Night",
+  gruvbox: "Gruvbox",
+  dracula: "Dracula",
+  nord: "Nord",
+  solarized: "Solarized",
+};
+
+/** Responsive Mermaid sizing kept separate from the DOM hook so the wide
+ * diagram threshold and cap remain predictable across themes and pane sizes. */
+export function mermaidViewport(
+  rawWidth: number,
+  rawHeight: number,
+  availableWidth: number
+): { wide: boolean; width: number } {
+  const available = Math.max(1, Number.isFinite(availableWidth) ? availableWidth : 1);
+  const aspect = rawHeight > 0 && Number.isFinite(rawWidth / rawHeight)
+    ? rawWidth / rawHeight
+    : 1;
+  const wide = aspect > 1.85;
+  const width = wide
+    ? Math.ceil(
+        Math.min(1600, available * Math.min(2.2, Math.max(1.12, aspect / 1.55)))
+      )
+    : available;
+  return { wide, width };
+}
 
 /* ------------------------------------------------------------------ */
 /* Paste URL over selection → markdown link                            */
@@ -212,6 +277,12 @@ interface BlockRange {
   endLine: number; // 1-based, inclusive
 }
 
+export interface BlockTextChange {
+  from: number;
+  to: number;
+  insert: string;
+}
+
 // Keep the complete marker padding: CommonMark permits 1–4 spaces after a
 // marker, and that padding determines the real content column.
 const RE_LIST = /^(\s*)(?:[-*+]|\d+[.)])([ \t]+)/;
@@ -221,6 +292,19 @@ const RE_HR = /^\s*(-{3,}|\*{3,}|_{3,})\s*$/;
 const RE_FENCE = /^\s*(```|~~~)/;
 const RE_QUOTE = /^\s*>/;
 const RE_BLANK = /^\s*$/;
+
+/** A blockquote marker used as the first child of a list item on the same
+ * source line (`- > quote`). Obsidian's HyperMD tree styles that row as a
+ * list line, so Live Preview otherwise exposes the `>` as plain text and
+ * omits the quote rule even though Reading view parses it as a blockquote. */
+export function inlineListQuoteMarker(
+  text: string
+): { from: number; to: number } | null {
+  const match = text.match(/^(\s*)(?:[-*+]|\d+[.)])([ \t]+)>/);
+  if (!match) return null;
+  const from = match[0].length - 1;
+  return { from, to: from + 1 };
+}
 
 function indentWidth(s: string): number {
   const m = s.match(/^\s*/);
@@ -572,11 +656,16 @@ export interface FenceRange {
    *  the opener's whitespace, plus marker-width spaces when the fence
    *  opens directly on a list-item line ("- ```js"). */
   bodyPrefix: string;
+  /** Quote markers before the fence (for example `> ` or `> > `), without
+   *  the ordinary whitespace indentation that precedes them. */
+  quotePrefix: string;
+  quoteDepth: number;
   /** True when the opener shares its line with a list marker. */
   markerOpener: boolean;
 }
 
 const RE_FENCE_OPEN = /^(\s*)(`{3,}|~{3,})(.*)$/;
+const RE_FENCE_OPEN_QUOTE = /^([ \t]*)((?:>[ \t]?)+)(`{3,}|~{3,})(.*)$/;
 // CommonMark also allows a fence to open right on a list-marker line.
 const RE_FENCE_OPEN_ITEM = /^(\s*)((?:[-*+]|\d+[.)])[ \t]+)(`{3,}|~{3,})(.*)$/;
 
@@ -594,15 +683,19 @@ export function scanFences(doc: Text): FenceRange[] {
   let openIndent = 0;
   let openMarker = "";
   let openBodyPrefix = "";
+  let openQuotePrefix = "";
+  let openQuoteDepth = 0;
   let openOnItem = false;
   for (let i = 1; i <= doc.lines; i++) {
     const text = doc.line(i).text;
     const m = text.match(RE_FENCE_OPEN);
+    const quoted = m ? null : text.match(RE_FENCE_OPEN_QUOTE);
     if (openLine < 0) {
-      const item = m ? null : text.match(RE_FENCE_OPEN_ITEM);
-      const ws = m?.[1] ?? item?.[1];
-      const fenceMarker = m?.[2] ?? item?.[3];
-      const info = m?.[3] ?? item?.[4];
+      const item = m || quoted ? null : text.match(RE_FENCE_OPEN_ITEM);
+      const ws = m?.[1] ?? quoted?.[1] ?? item?.[1];
+      const quotePrefix = quoted?.[2] ?? "";
+      const fenceMarker = m?.[2] ?? quoted?.[3] ?? item?.[3];
+      const info = m?.[3] ?? quoted?.[4] ?? item?.[4];
       // Backtick info strings cannot themselves contain a backtick.
       if (
         ws != null &&
@@ -615,20 +708,30 @@ export function scanFences(doc: Text): FenceRange[] {
         openLen = fenceMarker.length;
         openMarker = fenceMarker;
         openOnItem = item != null;
+        openQuotePrefix = quotePrefix;
+        openQuoteDepth = (quotePrefix.match(/>/g) ?? []).length;
         openIndent = item
           ? listContentIndent(text) ?? indentWidth(ws)
           : indentWidth(ws);
         openBodyPrefix = item
           ? ws + " ".repeat(Math.max(0, openIndent - indentWidth(ws)))
-          : ws;
+          : ws + quotePrefix;
       }
-    } else if (
-      m &&
-      m[2][0] === openChar &&
-      m[2].length >= openLen &&
-      /^[ \t]*$/.test(m[3]) &&
-      indentWidth(m[1]) <= openIndent + 3
-    ) {
+    } else {
+      const closeMarker = m?.[2] ?? quoted?.[3];
+      const closeRest = m?.[3] ?? quoted?.[4];
+      const closeWs = m?.[1] ?? quoted?.[1];
+      const closeDepth = quoted ? (quoted[2].match(/>/g) ?? []).length : 0;
+      if (!(
+        closeMarker &&
+        closeRest != null &&
+        closeWs != null &&
+        closeDepth === openQuoteDepth &&
+        closeMarker[0] === openChar &&
+        closeMarker.length >= openLen &&
+        /^[ \t]*$/.test(closeRest) &&
+        indentWidth(closeWs) <= openIndent + 3
+      )) continue;
       fences.push({
         startLine: openLine,
         endLine: i,
@@ -636,6 +739,8 @@ export function scanFences(doc: Text): FenceRange[] {
         closed: true,
         marker: openMarker,
         bodyPrefix: openBodyPrefix,
+        quotePrefix: openQuotePrefix,
+        quoteDepth: openQuoteDepth,
         markerOpener: openOnItem,
       });
       openLine = -1;
@@ -649,6 +754,8 @@ export function scanFences(doc: Text): FenceRange[] {
       closed: false,
       marker: openMarker,
       bodyPrefix: openBodyPrefix,
+      quotePrefix: openQuotePrefix,
+      quoteDepth: openQuoteDepth,
       markerOpener: openOnItem,
     });
   }
@@ -1149,6 +1256,14 @@ function protectedBlockRemovalRange(
   const range = blockRemovalRange(doc, block);
   const above = block.startLine > 1 ? doc.line(block.startLine - 1).text : "";
   const below = block.endLine < doc.lines ? doc.line(block.endLine + 1).text : "";
+  const removedQuote = quotePrefixParts(doc.line(block.startLine).text)?.quotePrefix;
+  if (
+    removedQuote &&
+    quotePrefixParts(above)?.quotePrefix === removedQuote &&
+    quotePrefixParts(below)?.quotePrefix === removedQuote
+  ) {
+    return range;
+  }
   const nestedListContinuation =
     RE_LIST.test(above) && indentWidth(below) > indentWidth(above);
   if (needsProtectedSeam(above, below) && !nestedListContinuation) {
@@ -1158,6 +1273,44 @@ function protectedBlockRemovalRange(
     };
   }
   return range;
+}
+
+interface QuotePrefixParts {
+  whitespace: string;
+  quotePrefix: string;
+  length: number;
+}
+
+/** Structural quote prefix at the start of a source row. */
+function quotePrefixParts(text: string): QuotePrefixParts | null {
+  const match = text.match(/^([ \t]*)((?:>[ \t]?)+)/);
+  if (!match) return null;
+  return {
+    whitespace: match[1],
+    quotePrefix: match[2],
+    length: match[0].length,
+  };
+}
+
+/** Replace only the quote-container markers of a fenced block. Whitespace
+ * indentation remains available to the ordinary list nesting model. */
+function rewriteFenceQuotePrefix(
+  text: string,
+  sourceDepth: number,
+  targetQuotePrefix: string
+): string {
+  return text.split("\n").map((line) => {
+    const whitespace = line.match(/^[ \t]*/)?.[0] ?? "";
+    let rest = line.slice(whitespace.length);
+    let prefixEnd = 0;
+    for (let depth = 0; depth < sourceDepth; depth++) {
+      if (rest[prefixEnd] !== ">") break;
+      prefixEnd++;
+      if (rest[prefixEnd] === " " || rest[prefixEnd] === "\t") prefixEnd++;
+    }
+    rest = rest.slice(prefixEnd);
+    return whitespace + targetQuotePrefix + rest;
+  }).join("\n");
 }
 
 /**
@@ -1390,13 +1543,15 @@ export function moveBlock(
   targetLine: number,
   fences: FenceRange[] = cachedFences(view.state.doc),
   indentOverride?: number,
-  unit: IndentUnit = DEFAULT_INDENT_UNIT
+  unit: IndentUnit = DEFAULT_INDENT_UNIT,
+  quotePrefixOverride?: string
 ): number | null {
   const doc = view.state.doc;
   const inPlace = targetLine >= block.startLine && targetLine <= block.endLine + 1;
   if (inPlace && indentOverride === undefined) return null;
 
   const baseIndent = indentWidth(doc.line(block.startLine).text);
+  const movingFence = fenceAt(fences, block.startLine);
   const targetIndent =
     indentOverride !== undefined
       ? pickIndent(computeDropIndents(doc, fences, targetLine, block), indentOverride)
@@ -1451,6 +1606,13 @@ export function moveBlock(
     targetIndent - baseIndent,
     structural ? { ...unit, useTab: false } : unit
   );
+  if (movingFence && quotePrefixOverride !== undefined) {
+    text = rewriteFenceQuotePrefix(
+      text,
+      movingFence.quoteDepth,
+      quotePrefixOverride
+    );
+  }
 
   // Blank-line sealing at the destination seams, so a drop never changes
   // the meaning of its neighbors. Above: a table or divider directly under
@@ -1465,10 +1627,11 @@ export function moveBlock(
   let prev = targetLine - 1;
   if (prev >= block.startLine && prev <= block.endLine) prev = block.startLine - 1;
   const prevText = prev >= 1 && prev <= doc.lines ? doc.line(prev).text : "";
-  const sealAbove = needsProtectedSeam(prevText, firstMoved);
+  const joinsQuote = movingFence && quotePrefixOverride !== undefined && quotePrefixOverride !== "";
+  const sealAbove = !joinsQuote && needsProtectedSeam(prevText, firstMoved);
   if (sealAbove) text = "\n" + text;
   const nextText = targetLine <= doc.lines ? doc.line(targetLine).text : "";
-  const sealBelow = needsProtectedSeam(lastMoved, nextText);
+  const sealBelow = !joinsQuote && needsProtectedSeam(lastMoved, nextText);
   if (sealBelow) text += "\n";
 
   let insertPos: number;
@@ -1543,6 +1706,60 @@ export function applyLinePrefix(lineText: string, prefix: string): string {
     if (prefix.startsWith(m[0])) break;
   }
   return ws + prefix + rest;
+}
+
+/** Logical, non-overlapping blocks touched by an inclusive line span. */
+export function blocksInLineSpan(
+  doc: Text,
+  startLine: number,
+  endLine: number,
+  fences: FenceRange[] = cachedFences(doc)
+): BlockRange[] {
+  const first = Math.max(1, Math.min(startLine, endLine));
+  const last = Math.min(doc.lines, Math.max(startLine, endLine));
+  const blocks: BlockRange[] = [];
+  let lineNo = first;
+  while (lineNo <= last) {
+    const block = getBlockRange(doc, lineNo, fences);
+    if (!block) {
+      lineNo++;
+      continue;
+    }
+    const previous = blocks[blocks.length - 1];
+    if (
+      !previous ||
+      previous.startLine !== block.startLine ||
+      previous.endLine !== block.endLine
+    ) blocks.push(block);
+    lineNo = Math.max(lineNo + 1, block.endLine + 1);
+  }
+  return blocks;
+}
+
+/** Build one transaction's changes for a multi-block type conversion.
+ * Structural blocks that the single-block menu cannot safely convert are
+ * reported as skipped and left byte-for-byte intact. */
+export function batchTurnIntoChanges(
+  doc: Text,
+  blocks: readonly BlockRange[],
+  prefix: string,
+  fences: FenceRange[] = cachedFences(doc)
+): { changes: BlockTextChange[]; skipped: number } {
+  const changes: BlockTextChange[] = [];
+  let skipped = 0;
+  for (const block of blocks) {
+    const line = doc.line(block.startLine);
+    const isFence = fenceAt(fences, block.startLine) != null;
+    const isTable = !isFence && RE_TABLE.test(line.text);
+    const isMultiLineQuote = block.endLine > block.startLine && RE_QUOTE.test(line.text);
+    if (isFence || isTable || isMultiLineQuote) {
+      skipped++;
+      continue;
+    }
+    const insert = applyLinePrefix(line.text, prefix);
+    if (insert !== line.text) changes.push({ from: line.from, to: line.to, insert });
+  }
+  return { changes, skipped };
 }
 
 /* ------------------------------------------------------------------ */
@@ -2381,6 +2598,16 @@ function applyKeyPlan(
 
 const RE_LEADING_WS = /^[ \t]*/;
 
+/** Prefix to repeat when splitting a code body row. In a quote this keeps
+ * the structural `>` markers and any code indentation after them. */
+function fenceLinePrefix(text: string, fence: FenceRange): string {
+  if (fence.quoteDepth === 0) return text.match(RE_LEADING_WS)?.[0] ?? "";
+  const quoted = quotePrefixParts(text);
+  if (!quoted) return fence.bodyPrefix;
+  const restWs = text.slice(quoted.length).match(RE_LEADING_WS)?.[0] ?? "";
+  return text.slice(0, quoted.length) + restWs;
+}
+
 /**
  * Enter inside a fenced code block. Body lines continue their own leading
  * indentation — essential for blocks nested in (deep) lists, where every
@@ -2407,7 +2634,7 @@ export function fenceEnterPlan(
     return { from: pos, to: pos, insert, cursor: pos + 1 + bodyWs.length };
   }
   if (fence.closed && line.number === fence.endLine) return null;
-  const ws = line.text.match(RE_LEADING_WS)![0];
+  const ws = fenceLinePrefix(line.text, fence);
   // A caret inside the leading whitespace would double the indentation.
   if (pos < line.from + ws.length) return null;
   return { from: pos, to: pos, insert: "\n" + ws, cursor: pos + 1 + ws.length };
@@ -2431,8 +2658,11 @@ export function fenceBackspacePlan(
     (fence.closed && line.number === fence.endLine)
   )
     return null;
-  const ws = line.text.match(RE_LEADING_WS)![0];
-  if (ws.length === 0 || pos !== line.from + ws.length) return null;
+  const containerLength = fence.quoteDepth > 0
+    ? quotePrefixParts(line.text)?.length ?? fence.bodyPrefix.length
+    : 0;
+  const ws = line.text.slice(containerLength).match(RE_LEADING_WS)?.[0] ?? "";
+  if (ws.length === 0 || pos !== line.from + containerLength + ws.length) return null;
   const width = indentWidth(ws);
   const target =
     width % unit.width === 0
@@ -2440,10 +2670,10 @@ export function fenceBackspacePlan(
       : Math.floor(width / unit.width) * unit.width;
   const insert = indentPrefix(Math.max(0, target), unit);
   return {
-    from: line.from,
-    to: line.from + ws.length,
+    from: line.from + containerLength,
+    to: line.from + containerLength + ws.length,
     insert,
-    cursor: line.from + insert.length,
+    cursor: line.from + containerLength + insert.length,
   };
 }
 
@@ -5143,6 +5373,13 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
       colIndicator: HTMLElement;
       highlight: HTMLElement;
       ghost: HTMLElement;
+      marquee: HTMLElement;
+      selectionLayer: HTMLElement;
+      selectionToolbar: HTMLElement;
+      selectionCount: HTMLElement;
+      selectedBlocks: BlockRange[] = [];
+      pendingSelect: { x: number; y: number; line: number } | null = null;
+      selecting = false;
       hoverBlock: BlockRange | null = null;
       pendingDrag: { x: number; y: number; block: BlockRange } | null = null;
       dragging = false;
@@ -5150,6 +5387,7 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
       dropColumnsTarget: BlockRange | null = null;
       dropLine = -1;
       dropIndent: number | undefined = undefined;
+      dropQuotePrefix: string | undefined = undefined;
       dropCandidatesLine = -1;
       dropCandidates: number[] = [];
       fences: FenceRange[] = [];
@@ -5164,9 +5402,14 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
       handleKind: "block" | "table" = "block";
 
       onMouseMove = (e: MouseEvent) => this.handleMouseMove(e);
-      onScroll = () => this.hideHover();
+      onScroll = () => {
+        this.hideHover();
+        if (this.selectedBlocks.length > 0) {
+          this.ownerWindow.requestAnimationFrame(() => this.renderBlockSelection());
+        }
+      };
       onLeave = (e: MouseEvent) => {
-        if (this.dragging) return;
+        if (this.dragging || this.selecting) return;
         const t = e.relatedTarget as HTMLElement | null;
         if (
           t &&
@@ -5177,11 +5420,15 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
       };
       onDocMove = (e: MouseEvent) => this.handleDragMove(e);
       onDocUp = (e: MouseEvent) => this.handleDrop(e);
+      onEditorMouseDown = (e: MouseEvent) => this.handleSelectionStart(e);
+      onSelectMove = (e: MouseEvent) => this.handleSelectionMove(e);
+      onSelectUp = (e: MouseEvent) => this.handleSelectionEnd(e);
       onKeyDown = (e: KeyboardEvent) => {
         if (e.key !== "Escape") return;
         e.preventDefault();
         e.stopPropagation();
-        this.endDrag();
+        if (this.dragging || this.pendingDrag) this.endDrag();
+        else this.clearBlockSelection();
       };
 
       /** True for embedded editors (Live Preview table cells, canvas …):
@@ -5262,14 +5509,289 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         this.ghost = this.ownerDocument.body.createDiv({ cls: "nf-drag-ghost" });
         this.ghost.style.display = "none";
 
+        this.marquee = this.ownerDocument.body.createDiv({ cls: "nf-block-marquee" });
+        this.marquee.style.display = "none";
+
+        this.selectionLayer = this.ownerDocument.body.createDiv({
+          cls: "nf-block-selection-layer",
+        });
+
+        this.selectionToolbar = this.ownerDocument.body.createDiv({
+          cls: "nf-block-selection-toolbar",
+          attr: { role: "toolbar", "aria-label": t("Block selection") },
+        });
+        this.selectionToolbar.style.display = "none";
+        this.selectionCount = this.selectionToolbar.createSpan({
+          cls: "nf-block-selection-count",
+        });
+        const turnInto = this.selectionToolbar.createEl("button", {
+          cls: "clickable-icon nf-block-selection-action",
+          attr: { type: "button", "aria-label": t("Turn into") },
+        });
+        setIcon(turnInto, "replace");
+        turnInto.createSpan({ text: t("Turn into") });
+        turnInto.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          this.openBatchTurnIntoMenu(event as MouseEvent);
+        });
+        const closeSelection = this.selectionToolbar.createEl("button", {
+          cls: "clickable-icon nf-block-selection-close",
+          attr: { type: "button", "aria-label": t("Clear block selection") },
+        });
+        setIcon(closeSelection, "x");
+        closeSelection.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          this.clearBlockSelection();
+        });
+        this.selectionToolbar.addEventListener("mousedown", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+        });
+
         if (!this.nested) {
           // Capture phase: Obsidian's table widget stops mouse events from
           // bubbling (it runs its own hover controls), so a bubble-phase
           // listener never fires over a rendered table.
           view.scrollDOM.addEventListener("mousemove", this.onMouseMove, true);
+          view.scrollDOM.addEventListener("mousedown", this.onEditorMouseDown, true);
           view.scrollDOM.addEventListener("scroll", this.onScroll);
           view.scrollDOM.addEventListener("mouseleave", this.onLeave);
         }
+      }
+
+      /** Empty editor space starts a Notion-style marquee. Holding Alt/Option
+       * deliberately opts into it even when the pointer starts over text. */
+      canStartBlockSelection(e: MouseEvent): boolean {
+        if (e.button !== 0 || !plugin.settings.dragHandles) return false;
+        const target = e.target as Element | null;
+        if (
+          !target ||
+          target.closest(
+            ".nf-block-controls,.nf-block-selection-toolbar,.nf-block-menu-anchor," +
+            "button,input,textarea,select,a,.cm-table-widget,.cm-embed-block"
+          )
+        ) return false;
+        // Code blocks need uninterrupted native text dragging, including
+        // selections that begin in indentation or after the last character.
+        // A whole code block can still be marquee-selected by starting the
+        // gesture outside it and sweeping across its vertical range.
+        if (
+          target.closest(
+            "pre,code,.HyperMD-codeblock,.cm-preview-code-block,.code-block-flair"
+          )
+        ) return false;
+        const editorPos = this.view.posAtCoords({ x: e.clientX, y: e.clientY });
+        if (
+          editorPos != null &&
+          fenceAt(
+            this.fences,
+            this.view.state.doc.lineAt(editorPos).number
+          )
+        ) return false;
+        if (e.altKey) return true;
+        const line = target.closest<HTMLElement>(".cm-line");
+        if (!line) return target === this.view.contentDOM || target === this.view.scrollDOM;
+        const range = this.ownerDocument.createRange();
+        range.selectNodeContents(line);
+        const ink = Array.from(range.getClientRects()).filter(
+          (rect) => rect.width > 0 && rect.height > 0
+        );
+        // Empty rows and whitespace beyond the rendered text are the natural
+        // drag handles for a marquee; ordinary text dragging remains native.
+        return ink.length === 0 || !ink.some(
+          (rect) =>
+            e.clientX >= rect.left - 3 && e.clientX <= rect.right + 3 &&
+            e.clientY >= rect.top && e.clientY <= rect.bottom
+        );
+      }
+
+      lineAtSelectionY(y: number, x: number): number {
+        const doc = this.view.state.doc;
+        const direct = this.posAt(x, y);
+        if (direct != null) return doc.lineAt(direct).number;
+        const content = this.view.contentDOM.getBoundingClientRect();
+        if (y <= content.top) return 1;
+        if (y >= content.bottom) return doc.lines;
+        try {
+          const block = this.view.lineBlockAtHeight(y - this.view.documentTop);
+          return doc.lineAt(Math.max(0, Math.min(doc.length, block.from))).number;
+        } catch {
+          return y < (content.top + content.bottom) / 2 ? 1 : doc.lines;
+        }
+      }
+
+      handleSelectionStart(e: MouseEvent) {
+        if (this.dragging || this.pendingDrag) return;
+        if (!this.canStartBlockSelection(e)) {
+          if (
+            this.selectedBlocks.length > 0 &&
+            !(e.target as Element | null)?.closest?.(".nf-block-selection-toolbar")
+          ) this.clearBlockSelection();
+          return;
+        }
+        // Do not consume mousedown yet. A simple click in the whitespace at
+        // the end of a line must still let CodeMirror place its text caret.
+        // We only take ownership once pointer movement crosses the marquee
+        // threshold in handleSelectionMove.
+        this.clearBlockSelection();
+        this.pendingSelect = {
+          x: e.clientX,
+          y: e.clientY,
+          line: this.lineAtSelectionY(e.clientY, e.clientX),
+        };
+        this.ownerDocument.addEventListener("mousemove", this.onSelectMove, true);
+        this.ownerDocument.addEventListener("mouseup", this.onSelectUp, true);
+        this.ownerDocument.addEventListener("keydown", this.onKeyDown, true);
+      }
+
+      handleSelectionMove(e: MouseEvent) {
+        const start = this.pendingSelect;
+        if (!start) return;
+        if (!this.selecting) {
+          const dx = e.clientX - start.x;
+          const dy = e.clientY - start.y;
+          if (dx * dx + dy * dy < 16) return;
+          this.selecting = true;
+          this.ownerDocument.body.classList.add("nf-selecting-blocks");
+          this.controls.style.display = "none";
+          // CodeMirror saw the original mousedown so a native text selection
+          // may have started. Once this becomes a block marquee, discard that
+          // DOM selection and intercept subsequent movement in capture phase.
+          this.ownerDocument.getSelection()?.removeAllRanges();
+        }
+        e.preventDefault();
+        e.stopPropagation();
+        const scroll = this.view.scrollDOM.getBoundingClientRect();
+        const x = Math.max(scroll.left, Math.min(scroll.right, e.clientX));
+        const y = Math.max(scroll.top, Math.min(scroll.bottom, e.clientY));
+        const left = Math.min(start.x, x);
+        const top = Math.min(start.y, y);
+        this.marquee.style.display = "block";
+        this.marquee.style.left = `${left}px`;
+        this.marquee.style.top = `${top}px`;
+        this.marquee.style.width = `${Math.abs(x - start.x)}px`;
+        this.marquee.style.height = `${Math.abs(y - start.y)}px`;
+
+        const endLine = this.lineAtSelectionY(y, x);
+        this.selectedBlocks = blocksInLineSpan(
+          this.view.state.doc,
+          start.line,
+          endLine,
+          this.fences
+        );
+        this.renderBlockSelection();
+      }
+
+      handleSelectionEnd(e: MouseEvent) {
+        const didSelect = this.selecting;
+        this.ownerDocument.removeEventListener("mousemove", this.onSelectMove, true);
+        this.ownerDocument.removeEventListener("mouseup", this.onSelectUp, true);
+        this.pendingSelect = null;
+        this.selecting = false;
+        this.ownerDocument.body.classList.remove("nf-selecting-blocks");
+        this.marquee.style.display = "none";
+        if (!didSelect || this.selectedBlocks.length === 0) {
+          this.clearBlockSelection();
+          return;
+        }
+        e.preventDefault();
+        e.stopPropagation();
+        this.renderBlockSelection();
+      }
+
+      renderBlockSelection() {
+        this.selectionLayer.empty();
+        if (this.selectedBlocks.length === 0) {
+          this.selectionToolbar.style.display = "none";
+          return;
+        }
+        const content = this.view.contentDOM.getBoundingClientRect();
+        let top = Infinity;
+        let bottom = -Infinity;
+        for (const block of this.selectedBlocks) {
+          const rect = this.blockRect(block);
+          if (!rect) continue;
+          top = Math.min(top, rect.top);
+          bottom = Math.max(bottom, rect.bottom);
+          const mark = this.selectionLayer.createDiv({ cls: "nf-multi-block-highlight" });
+          mark.style.left = `${content.left - 6}px`;
+          mark.style.top = `${rect.top - 2}px`;
+          mark.style.width = `${content.width + 12}px`;
+          mark.style.height = `${rect.bottom - rect.top + 4}px`;
+        }
+        if (!Number.isFinite(top)) {
+          this.selectionToolbar.style.display = "none";
+          return;
+        }
+        this.selectionCount.textContent = t("{n} blocks selected").replace(
+          "{n}",
+          String(this.selectedBlocks.length)
+        );
+        this.selectionToolbar.style.display = "flex";
+        const toolbarWidth = this.selectionToolbar.offsetWidth || 220;
+        const viewportWidth = this.ownerWindow.innerWidth;
+        this.selectionToolbar.style.left = `${Math.max(
+          8,
+          Math.min(viewportWidth - toolbarWidth - 8, content.left + 8)
+        )}px`;
+        const toolbarHeight = this.selectionToolbar.offsetHeight || 36;
+        const above = top - toolbarHeight - 8;
+        this.selectionToolbar.style.top = `${above >= 8 ? above : bottom + 8}px`;
+      }
+
+      clearBlockSelection() {
+        this.ownerDocument.removeEventListener("mousemove", this.onSelectMove, true);
+        this.ownerDocument.removeEventListener("mouseup", this.onSelectUp, true);
+        if (!this.dragging && !this.pendingDrag) {
+          this.ownerDocument.removeEventListener("keydown", this.onKeyDown, true);
+        }
+        this.pendingSelect = null;
+        this.selecting = false;
+        this.selectedBlocks = [];
+        this.ownerDocument.body.classList.remove("nf-selecting-blocks");
+        this.marquee.style.display = "none";
+        this.selectionLayer.empty();
+        this.selectionToolbar.style.display = "none";
+      }
+
+      openBatchTurnIntoMenu(evt: MouseEvent) {
+        if (this.selectedBlocks.length === 0) return;
+        const menuHost = this.ownerDocument.body.createDiv({ cls: "nf-block-menu-anchor" });
+        const menu = new Menu().setUseNativeMenu(false).setParentElement(menuHost);
+        menu.onHide(() => menuHost.remove());
+        for (const entry of TURN_INTO) {
+          menu.addItem((item) =>
+            item
+              .setTitle(entry.title)
+              .setIcon(entry.icon)
+              .onClick(() => {
+                const result = batchTurnIntoChanges(
+                  this.view.state.doc,
+                  this.selectedBlocks,
+                  entry.prefix,
+                  this.fences
+                );
+                if (result.changes.length > 0) {
+                  this.view.dispatch({
+                    changes: result.changes,
+                    userEvent: "input.turninto.batch",
+                  });
+                }
+                if (result.skipped > 0) {
+                  new Notice(
+                    t("Skipped {n} structural blocks.").replace(
+                      "{n}",
+                      String(result.skipped)
+                    )
+                  );
+                }
+                this.clearBlockSelection();
+              })
+          );
+        }
+        menu.showAtMouseEvent(evt);
       }
 
       /** Real visual rows for source text inside a pre-wrap widget. A source
@@ -5682,7 +6204,7 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
       }
 
       hideHover() {
-        if (this.dragging || this.pendingDrag) return;
+        if (this.dragging || this.pendingDrag || this.selecting || this.pendingSelect) return;
         this.controls.style.display = "none";
         this.highlight.style.display = "none";
         this.hoverBlock = null;
@@ -5702,6 +6224,7 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         if (e.button !== 0 || !this.hoverBlock) return;
         e.preventDefault();
         e.stopPropagation();
+        this.clearBlockSelection();
         this.pendingDrag = { x: e.clientX, y: e.clientY, block: this.hoverBlock };
         // Capture phase: keep tracking even while the pointer crosses a
         // table widget that swallows bubbled mouse events.
@@ -5844,11 +6367,17 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
 
         const pos = this.posAt(x, y);
         const doc = this.view.state.doc;
+        // An ordinary row means "outside any quote". This explicit empty
+        // prefix also lets a previously quoted fence be dragged back out.
+        this.dropQuotePrefix = "";
         let target: number;
         if (pos == null) {
           target = y < this.view.contentDOM.getBoundingClientRect().top ? 1 : doc.lines + 1;
         } else {
           const line = doc.lineAt(pos);
+          const hoveredFence = fenceAt(this.fences, line.number);
+          this.dropQuotePrefix = hoveredFence?.quotePrefix ??
+            quotePrefixParts(line.text)?.quotePrefix;
           const top = this.posY(line.from, "top");
           const bottom = this.posY(line.to, "bottom");
           const mid = top != null && bottom != null ? (top + bottom) / 2 : y;
@@ -5913,6 +6442,7 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         this.dropColumnsTarget = null;
         this.dropLine = -1;
         this.dropIndent = undefined;
+        this.dropQuotePrefix = undefined;
         this.dropCandidatesLine = -1;
         this.dropCandidates = [];
         this.dragStartX = 0;
@@ -5934,6 +6464,7 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         const block = this.dragBlock;
         const dropLine = this.dropLine;
         const dropIndent = this.dropIndent;
+        const dropQuotePrefix = this.dropQuotePrefix;
         const colTarget = this.dropColumnsTarget;
         this.endDrag();
         if (pending) {
@@ -5955,15 +6486,22 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
             dropLine,
             this.fences,
             dropIndent,
-            vaultIndentUnit(plugin.app)
+            vaultIndentUnit(plugin.app),
+            dropQuotePrefix
           );
         }
       }
 
       update(update: ViewUpdate) {
         if (update.geometryChanged) this.listIndentCache = null;
-        if (update.geometryChanged || update.viewportChanged) this.hideHover();
+        if (update.geometryChanged || update.viewportChanged) {
+          this.hideHover();
+          if (this.selectedBlocks.length > 0) {
+            this.ownerWindow.requestAnimationFrame(() => this.renderBlockSelection());
+          }
+        }
         if (update.docChanged) {
+          this.clearBlockSelection();
           this.fences = cachedFences(update.state.doc);
           this.dropCandidatesLine = -1;
           this.dropCandidates = [];
@@ -5974,10 +6512,13 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
 
       destroy() {
         this.view.scrollDOM.removeEventListener("mousemove", this.onMouseMove, true);
+        this.view.scrollDOM.removeEventListener("mousedown", this.onEditorMouseDown, true);
         this.view.scrollDOM.removeEventListener("scroll", this.onScroll);
         this.view.scrollDOM.removeEventListener("mouseleave", this.onLeave);
         this.ownerDocument.removeEventListener("mousemove", this.onDocMove, true);
         this.ownerDocument.removeEventListener("mouseup", this.onDocUp, true);
+        this.ownerDocument.removeEventListener("mousemove", this.onSelectMove, true);
+        this.ownerDocument.removeEventListener("mouseup", this.onSelectUp, true);
         this.ownerDocument.removeEventListener("keydown", this.onKeyDown, true);
         this.stopAutoScroll();
         if (this.dragging) this.ownerDocument.body.classList.remove("nf-dragging");
@@ -5986,6 +6527,9 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         this.colIndicator.remove();
         this.highlight.remove();
         this.ghost.remove();
+        this.marquee.remove();
+        this.selectionLayer.remove();
+        this.selectionToolbar.remove();
       }
     }
   );
@@ -6154,7 +6698,31 @@ function makeNestedIndentPlugin(plugin: NotionFlowPlugin) {
             pos = line.to + 1;
             const fence = fenceAt(this.fences, line.number);
             const quote = !fence && RE_QUOTE.test(line.text);
-            if (!quote && !(fence && fence.indent > 0)) continue;
+            const inlineQuote = !fence
+              ? inlineListQuoteMarker(line.text)
+              : null;
+            if (!quote && !inlineQuote && !(fence && fence.indent > 0)) continue;
+
+            if (inlineQuote) {
+              try {
+                const start = this.view.coordsAtPos(
+                  line.from + inlineQuote.from,
+                  1
+                );
+                const el = this.lineElement(line.from);
+                if (start && el) {
+                  const offset = start.left - el.getBoundingClientRect().left;
+                  if (Number.isFinite(offset) && offset >= 0) {
+                    el.style.setProperty("--nf-inline-quote-left", `${offset}px`);
+                  }
+                }
+              } catch {
+                // The visible line was replaced between the viewport walk
+                // and measurement. The next animation frame recalculates it.
+              }
+              continue;
+            }
+
             const anchorLine = fence ? fence.startLine : line.number;
             if (listNestingDepth(doc, anchorLine, this.fences) === 0) continue;
             let left: number | null;
@@ -6348,6 +6916,9 @@ function makeNestedIndentPlugin(plugin: NotionFlowPlugin) {
             const line = doc.lineAt(pos);
             const f = fenceAt(this.fences, line.number);
             const quote = !f && RE_QUOTE.test(line.text);
+            const inlineQuote = !f
+              ? inlineListQuoteMarker(line.text)
+              : null;
             const code = !!f && f.indent > 0;
             // A fence's body may contain empty or deliberately unindented
             // source lines. They still belong to the opener's list level,
@@ -6370,6 +6941,27 @@ function makeNestedIndentPlugin(plugin: NotionFlowPlugin) {
                   },
                 })
               );
+            }
+            if (inlineQuote) {
+              builder.add(
+                line.from,
+                line.from,
+                Decoration.line({
+                  attributes: { class: "nf-inline-list-quote" },
+                })
+              );
+              builder.add(
+                line.from + inlineQuote.from,
+                line.from + inlineQuote.to,
+                Decoration.mark({ class: "nf-inline-list-quote-marker" })
+              );
+              if (line.from + inlineQuote.to < line.to) {
+                builder.add(
+                  line.from + inlineQuote.to,
+                  line.to,
+                  Decoration.mark({ class: "nf-inline-list-quote-content" })
+                );
+              }
             }
             pos = line.to + 1;
           }
@@ -7912,17 +8504,10 @@ export function toggleUnderline(view: EditorView) {
  * Colors written with these variables always match the user's theme and
  * flip automatically when the theme changes.
  */
-export const TEXT_COLORS = [
-  "var(--color-red)", "var(--color-orange)", "var(--color-yellow)",
-  "var(--color-green)", "var(--color-cyan)", "var(--color-blue)",
-  "var(--color-purple)", "var(--color-pink)",
-];
-export const BG_COLORS = [
-  "rgba(var(--color-red-rgb),0.18)", "rgba(var(--color-orange-rgb),0.18)",
-  "rgba(var(--color-yellow-rgb),0.20)", "rgba(var(--color-green-rgb),0.18)",
-  "rgba(var(--color-cyan-rgb),0.18)", "rgba(var(--color-blue-rgb),0.18)",
-  "rgba(var(--color-purple-rgb),0.18)", "rgba(var(--color-pink-rgb),0.18)",
-];
+export const TEXT_COLORS = PALETTE_COLORS.map(paletteTextColor);
+export const BG_COLORS = PALETTE_COLORS.map((color) =>
+  paletteTint(color, color === "yellow" ? 0.2 : 0.18)
+);
 
 const spanOpen = (c: string) => `<span style="color:${c}">`;
 const markOpen = (c: string) => `<mark style="background:${c};color:inherit">`;
@@ -8622,7 +9207,7 @@ function makeToolbarPlugin(plugin: NotionFlowPlugin) {
               },
             });
             sw.classList.toggle("is-active", current === name);
-            sw.style.backgroundColor = `rgba(var(--color-${name}-rgb), 0.35)`;
+            sw.style.backgroundColor = paletteTint(name, 0.35);
             press(sw, () => this.applyTableColor(scope, name));
           }
           const off = this.palRow.createEl("button", {
@@ -9317,6 +9902,9 @@ export default class NotionFlowPlugin extends Plugin {
   settings: NotionFlowSettings = DEFAULT_SETTINGS;
   private tableScrollDocuments = new Set<Document>();
   private tableScrollObservers = new Set<ResizeObserver>();
+  private mermaidMutationObservers = new Set<MutationObserver>();
+  private mermaidResizeObservers = new Set<ResizeObserver>();
+  private mermaidDocumentObservers = new Map<Document, MutationObserver>();
 
   async onload() {
     await this.loadSettings();
@@ -9346,6 +9934,18 @@ export default class NotionFlowPlugin extends Plugin {
       // attribute gives UL bullets and OL numbers the same unlimited cycle,
       // including mixed unordered/ordered ancestry.
       annotateReadingListPhases(el);
+
+      // Mermaid can finish rendering asynchronously after this processor
+      // runs. Enhance both already-rendered SVGs and late arrivals, then
+      // keep wide-diagram behavior in sync with pane resizing.
+      if (this.settings.cleanRendering) {
+        this.watchMermaidDocument(el.ownerDocument);
+        const diagrams = [
+          ...(el.matches(".mermaid") ? [el as HTMLElement] : []),
+          ...Array.from(el.querySelectorAll<HTMLElement>(".mermaid")),
+        ];
+        for (const diagram of diagrams) this.enhanceMermaid(diagram);
+      }
 
       // Formatting tags written inside fenced code blocks render as
       // styled text instead of literal markup, matching Live Preview.
@@ -9760,6 +10360,113 @@ export default class NotionFlowPlugin extends Plugin {
     this.applyCleanClass();
   }
 
+  private watchMermaidDocument(ownerDocument: Document) {
+    if (this.mermaidDocumentObservers.has(ownerDocument)) return;
+    const scan = (root: ParentNode) => {
+      const element = root as Element;
+      if (typeof element.matches === "function" && element.matches(".mermaid")) {
+        this.enhanceMermaid(element as HTMLElement);
+      }
+      for (const diagram of Array.from(
+        root.querySelectorAll<HTMLElement>(".mermaid")
+      )) this.enhanceMermaid(diagram);
+    };
+    scan(ownerDocument);
+    const Observer = ownerDocument.defaultView?.MutationObserver;
+    if (!Observer || !ownerDocument.body) return;
+    const observer = new Observer((records) => {
+      for (const record of records) {
+        for (const node of Array.from(record.addedNodes)) {
+          if (node.nodeType === 1) scan(node as Element);
+        }
+      }
+    });
+    observer.observe(ownerDocument.body, { childList: true, subtree: true });
+    this.mermaidDocumentObservers.set(ownerDocument, observer);
+  }
+
+  private enhanceMermaid(diagram: HTMLElement) {
+    if (diagram.dataset.nfMermaidEnhanced === "true") return;
+    diagram.dataset.nfMermaidEnhanced = "true";
+    diagram.classList.add("nf-mermaid");
+    diagram.setAttribute("role", "region");
+    diagram.setAttribute("aria-label", t("Mermaid diagram"));
+
+    const connectSvg = (): boolean => {
+      const svg = diagram.querySelector<SVGSVGElement>(":scope > svg, svg");
+      if (!svg || svg.dataset.nfMermaidEnhanced === "true") return !!svg;
+      svg.dataset.nfMermaidEnhanced = "true";
+      svg.classList.add("nf-mermaid-svg");
+      svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+
+      const sync = () => {
+        if (!diagram.isConnected) return;
+        const viewBox = svg.viewBox?.baseVal;
+        const rawWidth = viewBox?.width || svg.getBoundingClientRect().width;
+        const rawHeight = viewBox?.height || svg.getBoundingClientRect().height;
+        const styles = diagram.ownerDocument.defaultView?.getComputedStyle(diagram);
+        const padding =
+          Number.parseFloat(styles?.paddingLeft ?? "0") +
+          Number.parseFloat(styles?.paddingRight ?? "0");
+        const available = Math.max(1, diagram.clientWidth - padding);
+        // Mermaid viewBox units are layout coordinates, not CSS pixels.
+        // Scaling them 1:1 makes some mindmaps enormous. Only genuinely
+        // landscape diagrams need a readable scroll width, derived from the
+        // pane itself and capped to a little over two pane widths.
+        const viewport = mermaidViewport(rawWidth, rawHeight, available);
+        const { wide } = viewport;
+        if (wide) {
+          diagram.style.setProperty("--nf-mermaid-natural-width", `${viewport.width}px`);
+        } else {
+          diagram.style.removeProperty("--nf-mermaid-natural-width");
+        }
+        diagram.classList.toggle("is-wide", wide);
+        if (wide) {
+          diagram.tabIndex = 0;
+          diagram.setAttribute("aria-label", t("Scrollable Mermaid diagram"));
+        } else {
+          diagram.removeAttribute("tabindex");
+          diagram.setAttribute("aria-label", t("Mermaid diagram"));
+        }
+      };
+
+      const ownerWindow = diagram.ownerDocument.defaultView as
+        (Window & typeof globalThis) | null;
+      const Observer = ownerWindow?.ResizeObserver;
+      if (Observer) {
+        const observer = new Observer(() => {
+          if (diagram.isConnected) {
+            sync();
+          } else {
+            observer.disconnect();
+            this.mermaidResizeObservers.delete(observer);
+          }
+        });
+        observer.observe(diagram);
+        observer.observe(svg);
+        this.mermaidResizeObservers.add(observer);
+      }
+      ownerWindow?.requestAnimationFrame(sync);
+      return true;
+    };
+
+    if (connectSvg()) return;
+    const ownerWindow = diagram.ownerDocument.defaultView as
+      (Window & typeof globalThis) | null;
+    const Observer = ownerWindow?.MutationObserver;
+    if (!Observer) return;
+    const observer = new Observer(() => {
+      // Renderers often build inside a detached fragment and attach it only
+      // afterward, so disconnection alone is not a cleanup signal here.
+      if (connectSvg()) {
+        observer.disconnect();
+        this.mermaidMutationObservers.delete(observer);
+      }
+    });
+    observer.observe(diagram, { childList: true, subtree: true });
+    this.mermaidMutationObservers.add(observer);
+  }
+
   private editorView(editor: Editor): EditorView | null {
     return ((editor as unknown as { cm?: EditorView }).cm as EditorView) ?? null;
   }
@@ -10059,6 +10766,12 @@ export default class NotionFlowPlugin extends Plugin {
   onunload() {
     for (const observer of this.tableScrollObservers) observer.disconnect();
     this.tableScrollObservers.clear();
+    for (const observer of this.mermaidMutationObservers) observer.disconnect();
+    this.mermaidMutationObservers.clear();
+    for (const observer of this.mermaidResizeObservers) observer.disconnect();
+    this.mermaidResizeObservers.clear();
+    for (const observer of this.mermaidDocumentObservers.values()) observer.disconnect();
+    this.mermaidDocumentObservers.clear();
     for (const doc of this.tableScrollDocuments) {
       for (const wrapper of Array.from(doc.querySelectorAll<HTMLElement>(".nf-table-scroll"))) {
         const table = wrapper.querySelector<HTMLTableElement>(":scope > table");
@@ -10083,6 +10796,9 @@ export default class NotionFlowPlugin extends Plugin {
     ]) {
       document.body.classList.remove(cls);
     }
+    for (const theme of CODE_THEMES) {
+      if (theme !== "default") document.body.classList.remove(`nf-code-theme-${theme}`);
+    }
     document.body.style.removeProperty("--nf-table-header-bg");
     document.body.style.removeProperty("--nf-list-marker");
     document.body.style.removeProperty("--nf-quote-bar");
@@ -10094,6 +10810,15 @@ export default class NotionFlowPlugin extends Plugin {
    *  cleaner-rendering toggle. */
   applyCleanClass() {
     document.body.classList.toggle("nf-clean", this.settings.cleanRendering);
+    // Settings can be enabled after a note has already rendered. Upgrade the
+    // current document immediately instead of waiting for another Markdown
+    // render pass; pop-out documents are picked up by their post-processors.
+    if (this.settings.cleanRendering) {
+      this.watchMermaidDocument(document);
+      for (const diagram of Array.from(
+        document.querySelectorAll<HTMLElement>(".mermaid")
+      )) this.enhanceMermaid(diagram);
+    }
     document.body.classList.toggle(
       "nf-callout-menu",
       this.settings.calloutEditing
@@ -10110,7 +10835,7 @@ export default class NotionFlowPlugin extends Plugin {
       // Theme palette tint: follows the theme and light/dark mode.
       document.body.style.setProperty(
         "--nf-table-header-bg",
-        `rgba(var(--color-${c}-rgb), 0.16)`
+        paletteTint(c, 0.16)
       );
     } else {
       document.body.style.removeProperty("--nf-table-header-bg");
@@ -10120,7 +10845,7 @@ export default class NotionFlowPlugin extends Plugin {
     if (lm === "accent") {
       document.body.style.setProperty("--nf-list-marker", "var(--interactive-accent)");
     } else if ((PALETTE_COLORS as readonly string[]).includes(lm)) {
-      document.body.style.setProperty("--nf-list-marker", `var(--color-${lm})`);
+      document.body.style.setProperty("--nf-list-marker", paletteTextColor(lm));
     } else {
       document.body.style.removeProperty("--nf-list-marker");
     }
@@ -10131,7 +10856,7 @@ export default class NotionFlowPlugin extends Plugin {
     } else if (qb === "accent") {
       document.body.style.setProperty("--nf-quote-bar", "var(--interactive-accent)");
     } else if ((PALETTE_COLORS as readonly string[]).includes(qb)) {
-      document.body.style.setProperty("--nf-quote-bar", `var(--color-${qb})`);
+      document.body.style.setProperty("--nf-quote-bar", paletteTextColor(qb));
     } else {
       document.body.style.removeProperty("--nf-quote-bar");
     }
@@ -10139,9 +10864,20 @@ export default class NotionFlowPlugin extends Plugin {
     const validInlineCode = (PALETTE_COLORS as readonly string[]).includes(ic);
     document.body.classList.toggle("nf-code-color", validInlineCode);
     if (validInlineCode) {
-      document.body.style.setProperty("--nf-inline-code", `var(--color-${ic})`);
+      document.body.style.setProperty("--nf-inline-code", paletteTextColor(ic));
     } else {
       document.body.style.removeProperty("--nf-inline-code");
+    }
+    const codeTheme = (CODE_THEMES as readonly string[]).includes(this.settings.codeTheme)
+      ? this.settings.codeTheme
+      : "default";
+    for (const theme of CODE_THEMES) {
+      if (theme !== "default") {
+        document.body.classList.toggle(
+          `nf-code-theme-${theme}`,
+          codeTheme === theme
+        );
+      }
     }
   }
 
@@ -10162,6 +10898,7 @@ export default class NotionFlowPlugin extends Plugin {
 /* ------------------------------------------------------------------ */
 
 const COLOR_LABELS: Record<string, string> = {
+  gray: "Gray",
   red: "Red",
   orange: "Orange",
   yellow: "Yellow",
@@ -10264,6 +11001,22 @@ class NotionFlowSettingTab extends PluginSettingTab {
         for (const c of PALETTE_COLORS) dd.addOption(c, t(COLOR_LABELS[c]));
         dd.setValue(this.plugin.settings[key]).onChange(async (v) => {
           this.plugin.settings[key] = v;
+          await this.plugin.saveSettings();
+          this.syncResetButton();
+        });
+      });
+  }
+
+  private codeThemeDropdown(parent: HTMLElement): Setting {
+    return new Setting(parent)
+      .setName(t("Code block theme"))
+      .setDesc(t("Syntax colors for fenced code blocks in Live Preview and Reading view. Obsidian adaptive is designed for the default theme and follows light/dark mode."))
+      .addDropdown((dd) => {
+        for (const value of CODE_THEMES) {
+          dd.addOption(value, t(CODE_THEME_LABELS[value]));
+        }
+        dd.setValue(this.plugin.settings.codeTheme).onChange(async (value) => {
+          this.plugin.settings.codeTheme = value;
           await this.plugin.saveSettings();
           this.syncResetButton();
         });
@@ -10391,7 +11144,7 @@ class NotionFlowSettingTab extends PluginSettingTab {
     this.toggle(
       this.containerEl,
       "Cleaner WYSIWYG rendering",
-      "Apply display-only polish to quotes, dividers, headings, tasks, and inline code in Live Preview and Reading view. List cycles stay enabled independently. Your Markdown is never changed.",
+      "Apply display-only polish to quotes, dividers, headings, tasks, inline code, and Mermaid diagrams in Live Preview and Reading view. List cycles stay enabled independently. Your Markdown is never changed.",
       "cleanRendering"
     );
     this.toggle(
@@ -10425,6 +11178,7 @@ class NotionFlowSettingTab extends PluginSettingTab {
       "inlineCodeColor",
       [["default", "Theme default"]]
     );
+    this.codeThemeDropdown(this.containerEl);
 
     this.heading(
       "Markdown syntax",

@@ -51,8 +51,8 @@ const ZH: Record<string, string> = {
   'In fenced code blocks, Enter keeps the current line\'s indentation (so blocks nested in lists stay aligned), Backspace at the text start removes one indent level, Enter after an unclosed ``` writes the closing fence, and Cmd/Ctrl+Shift+Enter (the "Exit code block" command) exits below the block.':
     "在代码块内：按 Enter 续行时保持当前缩进（列表内嵌套的代码块不再错位）；在代码文本开头按 Backspace 回退一级缩进；在未闭合的 ``` 行按 Enter 自动补全闭合围栏；按 Cmd/Ctrl+Shift+Enter（「跳出代码块」命令）跳出代码块。",
   "Cleaner WYSIWYG rendering": "更简洁的所见即所得渲染",
-  "Apply display-only polish to quotes, dividers, headings, tasks, and inline code in Live Preview and Reading view. List cycles stay enabled independently. Your Markdown is never changed.":
-    "只优化实时预览和阅读视图中的引用、分割线、标题、任务与行内代码外观；列表循环独立保持启用，且不会修改 Markdown 内容。",
+  "Apply display-only polish to quotes, dividers, headings, tasks, inline code, and Mermaid diagrams in Live Preview and Reading view. List cycles stay enabled independently. Your Markdown is never changed.":
+    "只优化实时预览和阅读视图中的引用、分割线、标题、任务、行内代码与 Mermaid 图表外观；列表循环独立保持启用，且不会修改 Markdown 内容。",
   "Table editing enhancements": "表格编辑增强",
   "In tables, Tab and Enter move between cells, and new rows are added automatically at the end.":
     "在表格中,Tab 和 Enter 在单元格间移动,到达末尾时自动新增行。",
@@ -70,6 +70,19 @@ const ZH: Record<string, string> = {
   "Inline code color": "行内代码颜色",
   "Ink of `inline code` text, Notion-style. Fenced code blocks are unaffected.":
     "`行内代码` 文本的颜色，Notion 风格；不影响代码块。",
+  "Code block theme": "代码块主题",
+  "Syntax colors for fenced code blocks in Live Preview and Reading view. Obsidian adaptive is designed for the default theme and follows light/dark mode.":
+    "设置实时预览和阅读视图中围栏代码块的语法配色；“Obsidian 自适应”专为默认主题设计，并会跟随明暗模式。",
+  GitHub: "GitHub",
+  "Obsidian adaptive": "Obsidian 自适应（推荐）",
+  "VS Code": "VS Code",
+  "One Dark": "One Dark",
+  Catppuccin: "Catppuccin",
+  "Tokyo Night": "Tokyo Night",
+  Gruvbox: "Gruvbox",
+  Dracula: "Dracula",
+  Nord: "Nord",
+  Solarized: "Solarized",
   "Accent color": "强调色",
   "Striped table rows": "表格斑马纹",
   "Shade every other table row.": "表格隔行着色。",
@@ -103,6 +116,7 @@ const ZH: Record<string, string> = {
   "Reset all Notion Flow settings to their defaults?":
     "确定要将所有 Notion Flow 设置恢复为默认值吗？",
   "Notion Flow settings restored.": "Notion Flow 设置已恢复。",
+  Gray: "灰",
   Red: "红",
   Orange: "橙",
   Yellow: "黄",
@@ -212,11 +226,17 @@ const ZH: Record<string, string> = {
   "Drag table": "拖拽整张表格",
   "{n} lines": "{n} 行",
   "Empty line": "空行",
+  "Block selection": "块框选",
+  "Clear block selection": "清除块选择",
+  "{n} blocks selected": "已选择 {n} 个块",
+  "Skipped {n} structural blocks.": "已跳过 {n} 个结构块。",
 
   // Floating toolbar
   "Formatting toolbar": "格式工具栏",
   "Table actions": "表格操作",
   "Scrollable table": "可横向滚动的表格",
+  "Mermaid diagram": "Mermaid 图表",
+  "Scrollable Mermaid diagram": "可横向滚动的 Mermaid 图表",
   Bold: "加粗",
   Italic: "斜体",
   Underline: "下划线",

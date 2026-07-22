@@ -26,6 +26,8 @@ While dragging, move the pointer left or right to change the nesting level. Try 
 
 Click a handle without dragging and try **Turn into**, **Duplicate**, and **Copy text**. Use **Delete block** only on content you do not mind removing.
 
+To work on several blocks at once, drag a selection frame from the empty space beside the lines above, or hold `Alt/Option` and drag from anywhere in the editor. The floating toolbar that appears converts every selected ordinary block in one step; tables, fenced code blocks, and multi-line quotes are skipped so their structure stays intact. Press `Esc` or click × to clear the selection.
+
 ## 2. Insert with slash commands
 
 Replace the practice text below with `/`, then keep typing to filter the menu. English and Chinese search terms both work.
@@ -99,6 +101,19 @@ Switch between Live Preview and Reading view after trying these blocks.
 ---
 
 Cleaner rendering also affects the divider above, tasks, and `inline code`. Table styling, header tint, striped rows, and list marker colors have separate settings.
+
+### Mermaid diagrams and code themes
+
+```mermaid
+flowchart LR
+  A[Draft] --> B{Review}
+  B -->|Approved| C[Publish]
+  B -->|Changes| A
+```
+
+With **Cleaner WYSIWYG rendering** on, the diagram above renders on a bordered, theme-aware canvas. Wide diagrams keep readable labels and scroll horizontally instead of shrinking; focus the diagram to scroll it with a keyboard or trackpad.
+
+Fenced code blocks — like the `ts` block in section 1 — follow the **Code block theme** setting. Try switching from **Theme default** to **Obsidian adaptive** or one of the other nine palettes; supported palettes swap their light and dark variants automatically.
 
 ## 6. Try shortcuts
 

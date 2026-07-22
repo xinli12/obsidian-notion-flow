@@ -54,6 +54,24 @@ const check = (name, got, expected) => {
   );
   check("plain line is not body", fenceBodyRange(doc, 0, 1), null);
 }
+
+/* ---------- fences inside blockquotes ---------- */
+{
+  const doc = Text.of(["> before", "> ```js", "> const x = 1;", "> ```", "> after"]);
+  const fences = scanFences(doc);
+  check("quoted fence recognized", fences.length, 1);
+  check("quoted fence range", [fences[0].startLine, fences[0].endLine], [2, 4]);
+  check("quoted fence prefix", fences[0].bodyPrefix, "> ");
+  check("quoted fence depth", fences[0].quoteDepth, 1);
+  const body = doc.line(3);
+  check("quoted fence Enter keeps quote", fenceEnterPlan(doc, body.to, fences), {
+    from: body.to,
+    to: body.to,
+    insert: "\n> ",
+    cursor: body.to + 3,
+  });
+  check("quoted fence body formatting detected", fenceBodyRange(doc, body.from + 2, body.to, fences) != null, true);
+}
 {
   const doc = Text.of(["```", "tail"]);
   const tail = doc.line(2);

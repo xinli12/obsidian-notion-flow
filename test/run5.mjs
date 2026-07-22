@@ -104,5 +104,49 @@ const noteText = [
   ok("indent before fence body uses fence indent", computeTargetIndent(v.state.doc, fences, 2) === 2);
 }
 
+// Dropping a fenced block on a quote row makes it quoted Markdown, and the
+// scanner still exposes the result as one independently draggable fence.
+{
+  const v = makeView(["```js", "const x = 1;", "```", "", "> quoted text"].join("\n"));
+  const fences = scanFences(v.state.doc);
+  const block = getBlockRange(v.state.doc, 1, fences);
+  moveBlock(v, block, 5, fences, 0, undefined, "> ");
+  const out = v.state.doc.toString();
+  ok(
+    "fence dragged into quote gets quote markers",
+    out === "\n> ```js\n> const x = 1;\n> ```\n> quoted text",
+    JSON.stringify(out)
+  );
+  const moved = scanFences(v.state.doc);
+  ok(
+    "dragged quoted fence remains a code block",
+    moved.length === 1 && moved[0].startLine === 2 && moved[0].endLine === 4,
+    JSON.stringify(moved)
+  );
+}
+
+// Moving that independently recognized fence back to ordinary prose strips
+// only its quote container markers and keeps the surrounding quote intact.
+{
+  const v = makeView([
+    "> before",
+    "> ```js",
+    "> > literal code character",
+    "> ```",
+    "> after",
+    "",
+    "plain",
+  ].join("\n"));
+  const fences = scanFences(v.state.doc);
+  const block = getBlockRange(v.state.doc, 3, fences);
+  moveBlock(v, block, 7, fences, 0, undefined, "");
+  const out = v.state.doc.toString();
+  ok(
+    "quoted fence can be dragged back out",
+    out === "> before\n> after\n\n```js\n> literal code character\n```\nplain",
+    JSON.stringify(out)
+  );
+}
+
 console.log(fail === 0 ? "ALL PASS" : `${fail} FAILURES`);
 process.exit(fail);

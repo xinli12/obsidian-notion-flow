@@ -96,6 +96,98 @@ body.nf-dragging * {
   cursor: grabbing !important;
 }
 
+body.nf-selecting-blocks,
+body.nf-selecting-blocks * {
+  cursor: crosshair !important;
+  user-select: none !important;
+}
+
+.nf-block-marquee {
+  position: fixed;
+  z-index: var(--layer-popover, 30);
+  box-sizing: border-box;
+  border: 1px solid var(--interactive-accent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--interactive-accent) 10%, transparent);
+  pointer-events: none;
+}
+
+.nf-block-selection-layer {
+  position: fixed;
+  inset: 0;
+  z-index: calc(var(--layer-popover, 30) - 1);
+  pointer-events: none;
+}
+
+.nf-multi-block-highlight {
+  position: fixed;
+  box-sizing: border-box;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--interactive-accent) 12%, transparent);
+  outline: 1px solid color-mix(in srgb, var(--interactive-accent) 42%, transparent);
+  pointer-events: none;
+}
+
+.nf-block-selection-toolbar {
+  position: fixed;
+  z-index: calc(var(--layer-popover, 30) + 2);
+  align-items: center;
+  gap: 4px;
+  box-sizing: border-box;
+  min-height: 36px;
+  padding: 4px 5px 4px 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  background: var(--background-primary);
+  box-shadow: var(--shadow-s);
+  animation: nf-pop 0.12s ease-out;
+}
+
+.nf-block-selection-count {
+  margin-right: 3px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  white-space: nowrap;
+}
+
+.nf-block-selection-action,
+.nf-block-selection-close {
+  box-sizing: border-box;
+  min-height: 26px;
+  height: 26px;
+  margin: 0;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-normal);
+  box-shadow: none;
+}
+
+.nf-block-selection-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  width: auto;
+}
+
+.nf-block-selection-close {
+  width: 26px;
+  padding: 5px;
+  color: var(--text-muted);
+}
+
+.nf-block-selection-action:hover,
+.nf-block-selection-close:hover {
+  background: var(--background-modifier-hover);
+}
+
+.nf-block-selection-action svg,
+.nf-block-selection-close svg {
+  width: 15px;
+  height: 15px;
+}
+
 .nf-drop-indicator {
   position: fixed;
   z-index: var(--layer-popover, 30);
@@ -683,15 +775,56 @@ body.nf-clean .markdown-source-view.is-live-preview
   opacity: 0.5;
 }
 
+/* HyperMD does not give a same-line list child (`- > quote`) its normal
+   quote row chrome. The editor decoration supplies the missing rule at the
+   real source position while leaving the list bullet and Markdown intact. */
+body.nf-clean .markdown-source-view.is-live-preview
+  .cm-line.nf-inline-list-quote {
+  position: relative;
+}
+body.nf-clean .markdown-source-view.is-live-preview
+  .cm-line.nf-inline-list-quote::after {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: calc(var(--nf-inline-quote-left, var(--list-indent)) - 0.35em);
+  width: 3px;
+  border-radius: 999px;
+  background-color: var(--blockquote-border-color, var(--background-modifier-border));
+  pointer-events: none;
+}
+body.nf-clean .markdown-source-view.is-live-preview
+  .cm-line.nf-inline-list-quote.hmd-inactive-line
+  .nf-inline-list-quote-marker {
+  color: transparent;
+}
+body.nf-clean .markdown-source-view.is-live-preview
+  .cm-line.nf-inline-list-quote .nf-inline-list-quote-content {
+  color: var(--text-muted);
+}
+body.nf-clean .markdown-source-view.is-live-preview
+  .cm-line.nf-inline-list-quote.cm-active
+  .nf-inline-list-quote-marker {
+  color: var(--text-faint);
+  opacity: 0.5;
+}
+
 /* Softer, centered divider instead of raw --- */
 body.nf-clean .markdown-source-view.is-live-preview .cm-line:has(> .cm-hr) {
   opacity: 0.9;
 }
 body.nf-clean .markdown-source-view.is-live-preview hr,
 body.nf-clean .markdown-reading-view hr {
-  border: none;
-  border-top: 1px solid var(--background-modifier-border);
-  margin: 1.5em 0;
+  height: 1px;
+  border: 0;
+  margin: 2em 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--background-modifier-border-hover) 18%,
+    var(--background-modifier-border-hover) 82%,
+    transparent
+  );
 }
 
 /* Heading hashes: nearly gone on the active line too */
@@ -728,12 +861,13 @@ body.nf-clean .markdown-source-view.is-live-preview .cm-active .callout-title-in
    the rendered content keep native click-to-edit and no affordance. */
 body.nf-callout-menu .markdown-source-view.mod-cm6 .cm-embed-block.cm-callout .callout-icon {
   cursor: pointer;
-  border-radius: var(--radius-s, 4px);
-  transition: background-color 0.12s ease, box-shadow 0.12s ease;
+  transition: opacity 0.12s ease, transform 0.12s ease;
 }
 body.nf-callout-menu .markdown-source-view.mod-cm6 .cm-embed-block.cm-callout .callout-icon:hover {
-  background-color: var(--background-modifier-hover);
-  box-shadow: 0 0 0 4px var(--background-modifier-hover);
+  background-color: transparent;
+  box-shadow: none;
+  opacity: 0.78;
+  transform: scale(1.08);
 }
 body.nf-callout-menu .markdown-source-view.mod-cm6 .cm-embed-block.cm-callout .callout .callout .callout-icon {
   cursor: inherit;
@@ -741,6 +875,135 @@ body.nf-callout-menu .markdown-source-view.mod-cm6 .cm-embed-block.cm-callout .c
 body.nf-callout-menu .markdown-source-view.mod-cm6 .cm-embed-block.cm-callout .callout .callout .callout-icon:hover {
   background-color: transparent;
   box-shadow: none;
+  opacity: 1;
+  transform: none;
+}
+
+/* ---------- Polished Callouts ---------- */
+/* Keep the palette semantic and flat: every Callout follows its type and
+   active Obsidian theme through a solid tint and an even, crisp border.
+   Column scaffolding is excluded; genuine Callouts nested inside a column
+   still receive this treatment. */
+body.nf-callout-menu
+  :is(.markdown-source-view.is-live-preview, .markdown-reading-view)
+  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"]) {
+  --callout-radius: 10px;
+  position: relative;
+  overflow: clip;
+  padding: 0;
+  border: 1px solid rgba(var(--callout-color, var(--callout-default)), 0.2);
+  border-radius: var(--callout-radius);
+  background-color: color-mix(
+    in srgb,
+    rgb(var(--callout-color, var(--callout-default))) 7%,
+    var(--background-primary)
+  );
+  box-shadow: none;
+  transition: background-color 0.12s ease, border-color 0.12s ease;
+}
+body.nf-callout-menu
+  :is(.markdown-source-view.is-live-preview, .markdown-reading-view)
+  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"]):hover {
+  border-color: rgba(var(--callout-color, var(--callout-default)), 0.34);
+  background-color: color-mix(
+    in srgb,
+    rgb(var(--callout-color, var(--callout-default))) 9%,
+    var(--background-primary)
+  );
+}
+body.nf-callout-menu
+  :is(.markdown-source-view.is-live-preview, .markdown-reading-view)
+  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"])
+  > .callout-title {
+  align-items: center;
+  gap: 7px;
+  min-height: 20px;
+  padding: 10px 13px 9px;
+  color: rgb(var(--callout-color, var(--callout-default)));
+  border-bottom: 1px solid rgba(var(--callout-color, var(--callout-default)), 0.1);
+  background-color: rgba(var(--callout-color, var(--callout-default)), 0.035);
+  line-height: 1.35;
+}
+body.nf-callout-menu
+  :is(.markdown-source-view.is-live-preview, .markdown-reading-view)
+  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"])
+  > .callout-title .callout-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  padding: 0;
+  border-radius: 0;
+  background-color: transparent;
+  box-shadow: none;
+}
+body.nf-callout-menu
+  :is(.markdown-source-view.is-live-preview, .markdown-reading-view)
+  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"])
+  > .callout-title .callout-icon svg {
+  width: 18px;
+  height: 18px;
+  stroke-width: 2;
+}
+body.nf-callout-menu
+  :is(.markdown-source-view.is-live-preview, .markdown-reading-view)
+  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"])
+  > .callout-title .callout-title-inner {
+  letter-spacing: -0.008em;
+  font-weight: 650;
+}
+body.nf-callout-menu
+  :is(.markdown-source-view.is-live-preview, .markdown-reading-view)
+  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"])
+  > .callout-title .callout-fold {
+  margin-inline-start: auto;
+  padding: 3px;
+  border-radius: 5px;
+  opacity: 0.62;
+  transition: background-color 0.12s ease, opacity 0.12s ease;
+}
+body.nf-callout-menu
+  :is(.markdown-source-view.is-live-preview, .markdown-reading-view)
+  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"])
+  > .callout-title .callout-fold:hover {
+  background-color: rgba(var(--callout-color, var(--callout-default)), 0.12);
+  opacity: 1;
+}
+body.nf-callout-menu
+  :is(.markdown-source-view.is-live-preview, .markdown-reading-view)
+  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"])
+  > .callout-content {
+  padding-block: 2px 12px;
+  padding-inline: 38px 14px;
+  color: var(--text-normal);
+  line-height: 1.65;
+}
+body.nf-callout-menu
+  :is(.markdown-source-view.is-live-preview, .markdown-reading-view)
+  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"])
+  > .callout-content > :first-child {
+  margin-top: 0.25em;
+}
+body.nf-callout-menu
+  :is(.markdown-source-view.is-live-preview, .markdown-reading-view)
+  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"])
+  > .callout-content > :last-child {
+  margin-bottom: 0;
+}
+body.nf-callout-menu
+  :is(.markdown-source-view.is-live-preview, .markdown-reading-view)
+  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"])
+  > .callout-content :is(ul, ol) {
+  margin-block: 0.45em;
+}
+body.nf-callout-menu
+  :is(.markdown-source-view.is-live-preview, .markdown-reading-view)
+  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"])
+  > .callout-content .callout {
+  margin-block: 0.75em 0.15em;
 }
 
 /* ---------- In-place Callout editing ---------- */
@@ -761,7 +1024,11 @@ body.nf-callout-menu .markdown-source-view.is-live-preview .cm-line.nf-co-edit::
   inset-block: 0;
   inset-inline-start: calc(var(--nf-nest, 16px) - 16px);
   inset-inline-end: 0;
-  background-color: rgba(var(--callout-color, var(--callout-default)), 0.08);
+  background-color: color-mix(
+    in srgb,
+    rgb(var(--callout-color, var(--callout-default))) 7%,
+    var(--background-primary)
+  );
   pointer-events: none;
 }
 body.nf-callout-menu .markdown-source-view.is-live-preview .cm-line.nf-co-first {
@@ -1324,13 +1591,103 @@ body.nf-comments span.nf-cmt[data-nf-cmt]::after {
   padding-top: var(--size-4-2, 8px);
 }
 
-/* Notion-like breathing room */
+/* ---------- Document typography ---------- */
+/* A compact editorial rhythm shared by Live Preview and Reading view.
+   Font family and measure remain theme-owned; Notion Flow only refines
+   spacing, weight, and small interaction details. */
+body.nf-clean
+  :is(.markdown-source-view.is-live-preview, .markdown-reading-view) {
+  --nf-prose-leading: 1.68;
+}
+body.nf-clean .markdown-source-view.is-live-preview
+  .cm-line:not(.HyperMD-header):not(.HyperMD-codeblock),
+body.nf-clean .markdown-reading-view :is(p, li) {
+  line-height: var(--nf-prose-leading);
+}
+
+/* Notion-like breathing room and a slightly tighter display face. */
 body.nf-clean .markdown-source-view.is-live-preview .HyperMD-header {
   padding-top: 0.5em;
   padding-bottom: 0.1em;
+  letter-spacing: -0.018em;
+  line-height: 1.25;
 }
 body.nf-clean .markdown-source-view.is-live-preview .HyperMD-header-1 {
   padding-top: 0.7em;
+}
+body.nf-clean .markdown-reading-view :is(h1, h2, h3, h4, h5, h6) {
+  margin-block: 1.45em 0.5em;
+  letter-spacing: -0.018em;
+  line-height: 1.25;
+  text-wrap: balance;
+}
+body.nf-clean .markdown-reading-view :is(h1, h2, h3, h4, h5, h6):first-child {
+  margin-top: 0;
+}
+body.nf-clean
+  :is(.markdown-source-view.is-live-preview, .markdown-reading-view)
+  :is(strong, .cm-strong) {
+  font-weight: 650;
+}
+
+/* Paragraph and list spacing: enough separation for scanning without
+   breaking the compact outline feel of nested notes. */
+body.nf-clean .markdown-reading-view p {
+  margin-block: 0.65em;
+}
+body.nf-clean .markdown-reading-view :is(ul, ol) {
+  margin-block: 0.65em;
+  padding-inline-start: 1.65em;
+}
+body.nf-clean .markdown-reading-view li + li {
+  margin-top: 0.16em;
+}
+body.nf-clean .markdown-reading-view li > :is(ul, ol) {
+  margin-block: 0.2em 0.1em;
+}
+
+/* Links retain the theme accent but gain a quiet, readable underline. */
+body.nf-clean
+  :is(.markdown-source-view.is-live-preview, .markdown-reading-view)
+  :is(a, .cm-hmd-internal-link, .cm-link) {
+  text-decoration-line: underline;
+  text-decoration-color: color-mix(in srgb, currentColor 32%, transparent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.16em;
+  transition: text-decoration-color 0.12s ease;
+}
+body.nf-clean
+  :is(.markdown-source-view.is-live-preview, .markdown-reading-view)
+  :is(a, .cm-hmd-internal-link, .cm-link):hover {
+  text-decoration-color: currentColor;
+}
+
+/* Quotes use a transparent editorial treatment: one quiet rule and a small
+   indent, without a card background competing with Callouts. */
+body.nf-clean .markdown-reading-view blockquote {
+  margin: 1.15em 0.25em;
+  padding-block: 0.25em;
+  padding-inline: 1em 0;
+  border-radius: 0;
+  background: transparent;
+}
+body.nf-clean .markdown-reading-view blockquote > :first-child {
+  margin-top: 0;
+}
+body.nf-clean .markdown-reading-view blockquote > :last-child {
+  margin-bottom: 0;
+}
+
+/* Media gets a quiet flat boundary without floating above the page. */
+body.nf-clean
+  :is(.markdown-source-view.is-live-preview, .markdown-reading-view)
+  img:not(.emoji) {
+  border-radius: 9px;
+  border: 1px solid var(--background-modifier-border);
+  box-shadow: none;
+}
+body.nf-clean .markdown-reading-view img:not(.emoji) {
+  margin-block: 0.35em;
 }
 
 /* Completed to-dos fade out, Notion-style */
@@ -1358,21 +1715,279 @@ body.nf-code-color .markdown-reading-view :not(pre) > code {
   color: var(--nf-inline-code);
 }
 
+/* Optional fenced-code palettes. These deliberately override only Obsidian's
+   code variables, leaving prose, inline code, and the active vault theme
+   untouched. Obsidian's editor and Reading-view highlighters both consume
+   these variables, so token colors stay aligned across the two views. */
+body[class*="nf-code-theme-"] .markdown-source-view,
+body[class*="nf-code-theme-"] .markdown-reading-view {
+  --code-radius: 7px;
+}
+
+/* Best match for Obsidian's stock theme. This palette intentionally uses
+   Obsidian's semantic variables rather than fixed hex colors, so it follows
+   the default light/dark modes, accent palette, and compatible custom
+   themes without introducing a visually separate editor surface. */
+body.nf-code-theme-obsidian .markdown-source-view,
+body.nf-code-theme-obsidian .markdown-reading-view {
+  --code-background: var(--background-secondary);
+  --code-normal: var(--text-normal);
+  --code-comment: var(--text-faint);
+  --code-function: var(--color-blue);
+  --code-important: var(--color-red);
+  --code-keyword: var(--color-purple);
+  --code-operator: var(--color-cyan);
+  --code-property: var(--color-orange);
+  --code-punctuation: var(--text-muted);
+  --code-string: var(--color-green);
+  --code-tag: var(--color-red);
+  --code-value: var(--color-cyan);
+}
+
+body.nf-code-theme-github .markdown-source-view,
+body.nf-code-theme-github .markdown-reading-view {
+  --code-background: #f6f8fa;
+  --code-normal: #24292f;
+  --code-comment: #6e7781;
+  --code-function: #8250df;
+  --code-important: #cf222e;
+  --code-keyword: #cf222e;
+  --code-operator: #0550ae;
+  --code-property: #953800;
+  --code-punctuation: #57606a;
+  --code-string: #0a3069;
+  --code-tag: #116329;
+  --code-value: #0550ae;
+}
+body.theme-dark.nf-code-theme-github .markdown-source-view,
+body.theme-dark.nf-code-theme-github .markdown-reading-view {
+  --code-background: #161b22;
+  --code-normal: #c9d1d9;
+  --code-comment: #8b949e;
+  --code-function: #d2a8ff;
+  --code-important: #ff7b72;
+  --code-keyword: #ff7b72;
+  --code-operator: #79c0ff;
+  --code-property: #ffa657;
+  --code-punctuation: #8b949e;
+  --code-string: #a5d6ff;
+  --code-tag: #7ee787;
+  --code-value: #79c0ff;
+}
+
+body.nf-code-theme-vscode .markdown-source-view,
+body.nf-code-theme-vscode .markdown-reading-view {
+  --code-background: #f7f7f7;
+  --code-normal: #24292e;
+  --code-comment: #008000;
+  --code-function: #795e26;
+  --code-important: #cd3131;
+  --code-keyword: #0000ff;
+  --code-operator: #001080;
+  --code-property: #001080;
+  --code-punctuation: #393a34;
+  --code-string: #a31515;
+  --code-tag: #800000;
+  --code-value: #098658;
+}
+body.theme-dark.nf-code-theme-vscode .markdown-source-view,
+body.theme-dark.nf-code-theme-vscode .markdown-reading-view {
+  --code-background: #1e1e1e;
+  --code-normal: #d4d4d4;
+  --code-comment: #6a9955;
+  --code-function: #dcdcaa;
+  --code-important: #f44747;
+  --code-keyword: #c586c0;
+  --code-operator: #9cdcfe;
+  --code-property: #9cdcfe;
+  --code-punctuation: #d4d4d4;
+  --code-string: #ce9178;
+  --code-tag: #569cd6;
+  --code-value: #b5cea8;
+}
+
+body.nf-code-theme-one-dark .markdown-source-view,
+body.nf-code-theme-one-dark .markdown-reading-view {
+  --code-background: #282c34;
+  --code-normal: #abb2bf;
+  --code-comment: #5c6370;
+  --code-function: #61afef;
+  --code-important: #e06c75;
+  --code-keyword: #c678dd;
+  --code-operator: #56b6c2;
+  --code-property: #e06c75;
+  --code-punctuation: #abb2bf;
+  --code-string: #98c379;
+  --code-tag: #e06c75;
+  --code-value: #d19a66;
+}
+
+body.nf-code-theme-catppuccin .markdown-source-view,
+body.nf-code-theme-catppuccin .markdown-reading-view {
+  --code-background: #eff1f5;
+  --code-normal: #4c4f69;
+  --code-comment: #8c8fa1;
+  --code-function: #1e66f5;
+  --code-important: #d20f39;
+  --code-keyword: #8839ef;
+  --code-operator: #04a5e5;
+  --code-property: #e64553;
+  --code-punctuation: #6c6f85;
+  --code-string: #40a02b;
+  --code-tag: #d20f39;
+  --code-value: #df8e1d;
+}
+body.theme-dark.nf-code-theme-catppuccin .markdown-source-view,
+body.theme-dark.nf-code-theme-catppuccin .markdown-reading-view {
+  --code-background: #1e1e2e;
+  --code-normal: #cdd6f4;
+  --code-comment: #6c7086;
+  --code-function: #89b4fa;
+  --code-important: #f38ba8;
+  --code-keyword: #cba6f7;
+  --code-operator: #89dceb;
+  --code-property: #f38ba8;
+  --code-punctuation: #bac2de;
+  --code-string: #a6e3a1;
+  --code-tag: #f38ba8;
+  --code-value: #f9e2af;
+}
+
+body.nf-code-theme-tokyo-night .markdown-source-view,
+body.nf-code-theme-tokyo-night .markdown-reading-view {
+  --code-background: #e6e7ed;
+  --code-normal: #3760bf;
+  --code-comment: #848cb5;
+  --code-function: #2e7de9;
+  --code-important: #f52a65;
+  --code-keyword: #9854f1;
+  --code-operator: #007197;
+  --code-property: #b15c00;
+  --code-punctuation: #6172b0;
+  --code-string: #587539;
+  --code-tag: #f52a65;
+  --code-value: #b15c00;
+}
+body.theme-dark.nf-code-theme-tokyo-night .markdown-source-view,
+body.theme-dark.nf-code-theme-tokyo-night .markdown-reading-view {
+  --code-background: #1a1b26;
+  --code-normal: #c0caf5;
+  --code-comment: #565f89;
+  --code-function: #7aa2f7;
+  --code-important: #f7768e;
+  --code-keyword: #bb9af7;
+  --code-operator: #89ddff;
+  --code-property: #ff9e64;
+  --code-punctuation: #9aa5ce;
+  --code-string: #9ece6a;
+  --code-tag: #f7768e;
+  --code-value: #e0af68;
+}
+
+body.nf-code-theme-gruvbox .markdown-source-view,
+body.nf-code-theme-gruvbox .markdown-reading-view {
+  --code-background: #fbf1c7;
+  --code-normal: #3c3836;
+  --code-comment: #928374;
+  --code-function: #076678;
+  --code-important: #9d0006;
+  --code-keyword: #8f3f71;
+  --code-operator: #427b58;
+  --code-property: #b57614;
+  --code-punctuation: #665c54;
+  --code-string: #79740e;
+  --code-tag: #9d0006;
+  --code-value: #af3a03;
+}
+body.theme-dark.nf-code-theme-gruvbox .markdown-source-view,
+body.theme-dark.nf-code-theme-gruvbox .markdown-reading-view {
+  --code-background: #282828;
+  --code-normal: #ebdbb2;
+  --code-comment: #928374;
+  --code-function: #83a598;
+  --code-important: #fb4934;
+  --code-keyword: #d3869b;
+  --code-operator: #8ec07c;
+  --code-property: #fabd2f;
+  --code-punctuation: #bdae93;
+  --code-string: #b8bb26;
+  --code-tag: #fb4934;
+  --code-value: #fe8019;
+}
+
+body.nf-code-theme-dracula .markdown-source-view,
+body.nf-code-theme-dracula .markdown-reading-view {
+  --code-background: #282a36;
+  --code-normal: #f8f8f2;
+  --code-comment: #6272a4;
+  --code-function: #50fa7b;
+  --code-important: #ff5555;
+  --code-keyword: #ff79c6;
+  --code-operator: #ff79c6;
+  --code-property: #8be9fd;
+  --code-punctuation: #f8f8f2;
+  --code-string: #f1fa8c;
+  --code-tag: #ff79c6;
+  --code-value: #bd93f9;
+}
+
+body.nf-code-theme-nord .markdown-source-view,
+body.nf-code-theme-nord .markdown-reading-view {
+  --code-background: #2e3440;
+  --code-normal: #d8dee9;
+  --code-comment: #616e88;
+  --code-function: #88c0d0;
+  --code-important: #bf616a;
+  --code-keyword: #81a1c1;
+  --code-operator: #81a1c1;
+  --code-property: #8fbcbb;
+  --code-punctuation: #eceff4;
+  --code-string: #a3be8c;
+  --code-tag: #81a1c1;
+  --code-value: #b48ead;
+}
+
+body.nf-code-theme-solarized .markdown-source-view,
+body.nf-code-theme-solarized .markdown-reading-view {
+  --code-background: #fdf6e3;
+  --code-normal: #657b83;
+  --code-comment: #93a1a1;
+  --code-function: #268bd2;
+  --code-important: #dc322f;
+  --code-keyword: #859900;
+  --code-operator: #6c71c4;
+  --code-property: #b58900;
+  --code-punctuation: #839496;
+  --code-string: #2aa198;
+  --code-tag: #268bd2;
+  --code-value: #d33682;
+}
+body.theme-dark.nf-code-theme-solarized .markdown-source-view,
+body.theme-dark.nf-code-theme-solarized .markdown-reading-view {
+  --code-background: #002b36;
+  --code-normal: #839496;
+  --code-comment: #586e75;
+  --code-punctuation: #657b83;
+}
+
 /* Blockquote: restyle Obsidian's native ::before rule (adding a real border
    to the line changes its box width and doubles some themes' quote rule).
    Reading view uses the same variables for parity. */
 body.nf-clean .markdown-source-view.is-live-preview .HyperMD-quote {
-  --blockquote-border-thickness: 3px;
-  opacity: 0.95;
+  --blockquote-border-thickness: 2px;
+  --blockquote-background-color: transparent;
+  opacity: 1;
 }
 body.nf-clean .markdown-reading-view {
-  --blockquote-border-thickness: 3px;
+  --blockquote-border-thickness: 2px;
+  --blockquote-background-color: transparent;
 }
 
 /* Bar color follows the "Quote bar color" setting: neutral ink (Notion
    default, so semantic color stays reserved for Callouts), accent, or a
    palette color. "Theme default" leaves the theme's own value untouched. */
 body.nf-quote-color .markdown-source-view.is-live-preview .HyperMD-quote,
+body.nf-quote-color .markdown-source-view.is-live-preview .nf-inline-list-quote,
 body.nf-quote-color .markdown-reading-view {
   --blockquote-border-color: var(--nf-quote-bar);
 }
@@ -1383,10 +1998,10 @@ body.nf-quote-color .markdown-reading-view {
    rows inside an in-place Callout box (nf-co-edit) keep normal ink. */
 body.nf-clean .markdown-source-view.is-live-preview
   .cm-line.HyperMD-quote:not(.HyperMD-callout):not(.nf-co-edit) {
-  color: var(--text-faint);
+  color: var(--text-muted);
 }
 body.nf-clean .markdown-reading-view {
-  --blockquote-color: var(--text-faint);
+  --blockquote-color: var(--text-muted);
 }
 
 /* Code fence rows read like the block's own padding: the ``` markers and
@@ -1408,6 +2023,155 @@ body.nf-clean .markdown-source-view.is-live-preview
    right edge of the painted block. Match the 16px start padding. */
 body.nf-clean .markdown-source-view.is-live-preview .cm-line.HyperMD-codeblock {
   padding-inline-end: var(--size-4-4, 16px);
+}
+
+/* Code always owns text-selection gestures. This explicit rule also wins
+   over themes that treat rendered code previews as atomic UI widgets. */
+body.nf-clean .markdown-source-view.is-live-preview
+  :is(.cm-line.HyperMD-codeblock, .cm-preview-code-block pre, .cm-preview-code-block code) {
+  -webkit-user-select: text;
+  user-select: text;
+  cursor: text;
+}
+
+/* ---------- Mermaid diagrams ------------------------------------- */
+/* Mermaid is rendered by Obsidian; Notion Flow supplies the responsive
+   presentation layer. Wide diagrams retain readable labels and scroll as
+   a region instead of being squeezed into an illegible thumbnail. */
+body.nf-clean .nf-mermaid {
+  position: relative;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  margin-block: 1.25em;
+  padding: clamp(14px, 2.5vw, 26px);
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-inline: contain;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  background:
+    radial-gradient(
+      circle at 50% 0%,
+      color-mix(in srgb, var(--interactive-accent) 5%, transparent),
+      transparent 54%
+    ),
+    var(--background-primary-alt, var(--background-primary));
+  scrollbar-width: thin;
+  scrollbar-gutter: stable;
+  scrollbar-color: var(--background-modifier-border-hover) transparent;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+body.nf-clean .nf-mermaid:hover {
+  border-color: var(--background-modifier-border-hover);
+}
+
+body.nf-clean .nf-mermaid:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--interactive-accent) 62%, transparent);
+  outline-offset: 2px;
+}
+
+body.nf-clean .nf-mermaid > svg,
+body.nf-clean .nf-mermaid .nf-mermaid-svg {
+  display: block;
+  height: auto;
+  /* Keep Mermaid's inline intrinsic max-width for ordinary diagrams. The
+     is-wide rule below deliberately overrides it only for landscape charts. */
+  max-width: 100%;
+  margin-inline: auto;
+  font-family: var(--font-interface, var(--font-text)) !important;
+}
+
+body.nf-clean .nf-mermaid.is-wide > svg,
+body.nf-clean .nf-mermaid.is-wide .nf-mermaid-svg {
+  width: var(--nf-mermaid-natural-width) !important;
+  min-width: var(--nf-mermaid-natural-width);
+  max-width: none !important;
+}
+
+/* Shared visual hierarchy: quiet connectors, crisp shapes, and labels that
+   use the vault's interface face. Fill colors remain Mermaid-owned so class
+   diagrams and user-defined semantic styles keep their meaning. */
+body.nf-clean .nf-mermaid :is(text, .nodeLabel, .edgeLabel, .label, .legend) {
+  font-family: var(--font-interface, var(--font-text)) !important;
+}
+body.nf-clean .nf-mermaid :is(.node rect, .node circle, .node ellipse, .node polygon, .node path) {
+  stroke-width: 1.25px !important;
+  filter: drop-shadow(0 1px 1px color-mix(in srgb, var(--background-modifier-box-shadow) 22%, transparent));
+}
+body.nf-clean .nf-mermaid :is(.flowchart-link, .relation, .transition, .messageLine0, .messageLine1) {
+  stroke: var(--text-faint) !important;
+  stroke-width: 1.35px !important;
+}
+body.nf-clean .nf-mermaid :is(marker path, .arrowheadPath) {
+  fill: var(--text-faint) !important;
+  stroke: var(--text-faint) !important;
+}
+
+/* Flowchart subgraphs and edge labels read as nested surfaces rather than
+   competing nodes. Mermaid emits both SVG and foreignObject label paths. */
+body.nf-clean .nf-mermaid .cluster rect {
+  fill: color-mix(in srgb, var(--background-secondary) 72%, transparent) !important;
+  stroke: var(--background-modifier-border-hover) !important;
+  stroke-width: 1px !important;
+  rx: 8px;
+  ry: 8px;
+}
+body.nf-clean .nf-mermaid :is(.edgeLabel rect, .labelBkg) {
+  fill: var(--background-primary) !important;
+  opacity: 0.94 !important;
+}
+body.nf-clean .nf-mermaid .edgeLabel {
+  color: var(--text-muted) !important;
+  background-color: var(--background-primary) !important;
+  border-radius: 4px;
+}
+
+/* Sequence diagrams: actors are stable neutral anchors, notes keep a warm
+   semantic tint, and activation bars use the current accent. */
+body.nf-clean .nf-mermaid :is(.actor, .labelBox) {
+  fill: var(--background-secondary) !important;
+  stroke: var(--background-modifier-border-hover) !important;
+}
+body.nf-clean .nf-mermaid :is(.actor-line, .loopLine) {
+  stroke: var(--background-modifier-border-hover) !important;
+}
+body.nf-clean .nf-mermaid .activation0,
+body.nf-clean .nf-mermaid .activation1,
+body.nf-clean .nf-mermaid .activation2 {
+  fill: color-mix(in srgb, var(--interactive-accent) 16%, var(--background-primary)) !important;
+  stroke: var(--interactive-accent) !important;
+}
+body.nf-clean .nf-mermaid .note {
+  fill: color-mix(in srgb, var(--color-yellow) 15%, var(--background-primary)) !important;
+  stroke: color-mix(in srgb, var(--color-yellow) 58%, var(--background-modifier-border)) !important;
+}
+
+/* Gantt, journey, requirement and pie charts otherwise inherit a few fixed
+   light-theme strokes from Mermaid. Normalize scaffolding while preserving
+   the chart's categorical fills. */
+body.nf-clean .nf-mermaid .grid .tick line {
+  stroke: var(--background-modifier-border) !important;
+}
+body.nf-clean .nf-mermaid :is(.sectionTitle, .taskTextOutsideRight, .taskTextOutsideLeft) {
+  color: var(--text-muted) !important;
+  fill: var(--text-muted) !important;
+}
+body.nf-clean .nf-mermaid :is(.today, .requirementBox, .relationshipLabelBox) {
+  stroke: var(--interactive-accent) !important;
+}
+body.nf-clean .nf-mermaid :is(.pieTitleText, .legend text, .legend) {
+  fill: var(--text-normal) !important;
+  color: var(--text-normal) !important;
+}
+
+@media (max-width: 560px) {
+  body.nf-clean .nf-mermaid {
+    margin-block: 1em;
+    padding: 12px;
+    border-radius: 8px;
+  }
 }
 
 /* ---------- Tables: Notion-like clean look ---------- */
@@ -1637,6 +2401,14 @@ body.nf-tables .markdown-reading-view table :is(th, td):focus-within {
 .markdown-reading-view table:has(span.nf-tbl-pink) th { background-color: rgba(var(--color-pink-rgb), 0.22); }
 .markdown-source-view.is-live-preview table:has(span.nf-tbl-pink) td,
 .markdown-reading-view table:has(span.nf-tbl-pink) td { background-color: rgba(var(--color-pink-rgb), 0.07); }
+.markdown-source-view.is-live-preview table:has(span.nf-tbl-gray) th,
+.markdown-reading-view table:has(span.nf-tbl-gray) th {
+  background-color: color-mix(in srgb, var(--text-muted) 22%, transparent);
+}
+.markdown-source-view.is-live-preview table:has(span.nf-tbl-gray) td,
+.markdown-reading-view table:has(span.nf-tbl-gray) td {
+  background-color: color-mix(in srgb, var(--text-muted) 7%, transparent);
+}
 
 .markdown-source-view.is-live-preview table :is(td, th):has(span.nf-cell-red),
 .markdown-reading-view table :is(td, th):has(span.nf-cell-red) { background-color: rgba(var(--color-red-rgb), 0.25); }
@@ -1654,6 +2426,10 @@ body.nf-tables .markdown-reading-view table :is(th, td):focus-within {
 .markdown-reading-view table :is(td, th):has(span.nf-cell-purple) { background-color: rgba(var(--color-purple-rgb), 0.25); }
 .markdown-source-view.is-live-preview table :is(td, th):has(span.nf-cell-pink),
 .markdown-reading-view table :is(td, th):has(span.nf-cell-pink) { background-color: rgba(var(--color-pink-rgb), 0.25); }
+.markdown-source-view.is-live-preview table :is(td, th):has(span.nf-cell-gray),
+.markdown-reading-view table :is(td, th):has(span.nf-cell-gray) {
+  background-color: color-mix(in srgb, var(--text-muted) 25%, transparent);
+}
 
 /* ---------- List-contained block layers ---------------------------- */
 
@@ -1774,7 +2550,16 @@ body.nf-tables .markdown-reading-view table :is(th, td):focus-within {
   .nf-col-menu,
   .nf-column-editor.is-preview,
   .nf-column-preview-action,
+  body.nf-callout-menu
+    :is(.markdown-source-view.is-live-preview, .markdown-reading-view)
+    .callout,
+  body.nf-callout-menu .callout-fold,
+  body.nf-clean
+    :is(.markdown-source-view.is-live-preview, .markdown-reading-view)
+    :is(a, .cm-hmd-internal-link, .cm-link),
   .nf-block-highlight,
+  .nf-block-marquee,
+  .nf-block-selection-toolbar,
   .nf-table-picker-cell,
   .nf-swatch,
   .nf-toolbar-btn,

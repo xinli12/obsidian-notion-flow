@@ -10,12 +10,13 @@ Notion-style block editing for Obsidian: move complete Markdown blocks, insert c
 ## Highlights
 
 - **Block controls:** drag paragraphs, headings, lists with children, quotes, Callouts, code fences, and tables. Click the handle for block actions, or click `+` to insert below.
+- **Multi-block selection:** drag a marquee from empty editor space (or Alt/Option-drag anywhere), then convert all selected blocks in one step.
 - **Slash commands:** insert headings, lists, Callouts, toggles, code blocks, tables, columns, dividers, embeds, and internal links with English or Chinese search terms.
 - **Columns:** put blocks side by side, Notion-style — insert with `/columns`, convert from the block menu, or drag a block to the right edge of another. Written as plain nested Callouts, so notes stay portable.
 - **Comments:** select text and attach a note to it, Notion-style — yellow anchor, 💬 marker, click to read, edit, or resolve. Stored inside the note, invisible in other Markdown apps.
 - **Formatting toolbar:** apply bold, italic, underline, strikethrough, text color, highlight, inline code, links, or clear formatting — including bold, italic, strikethrough, underline, and colors inside fenced code blocks.
 - **Table tools:** add, remove, align, color, format, and move tables; use faster keyboard navigation while editing raw Markdown tables.
-- **Cleaner Live Preview:** refine tasks, quotes, dividers, inline code, nested blocks, and Markdown syntax visibility; list-marker cycles remain available independently.
+- **Cleaner Live Preview:** refine tasks, quotes, dividers, inline code, Mermaid diagrams, nested blocks, and Markdown syntax visibility; list-marker cycles remain available independently.
 
 ## Requirements
 
@@ -77,6 +78,8 @@ Click the handle without dragging to open the block menu:
 
 `+` inserts a fresh line below the current block and opens the slash menu.
 
+Drag from empty space beside a line to frame-select several blocks. You can also hold Alt/Option and drag from anywhere in the editor. The floating block toolbar converts every selected ordinary block at once; tables, fenced code blocks, and multi-line quotes are skipped so their structure is not damaged. Press `Esc` or use the × button to clear the selection.
+
 ### Slash commands
 
 Type `/` (or fullwidth `／`) at the start of a line, after whitespace, or directly after CJK text. Search works with English and Chinese terms regardless of the interface language. Each menu row shows an icon, a name, a one-line description, and the syntax it writes; the commands you used most recently rise to the top of the unfiltered menu.
@@ -119,6 +122,10 @@ With **Callout and quote enhancements** enabled:
 - While the caret is inside a Callout, its source lines keep the rendered look: type-colored background, rounded corners, and a colored title row.
 - In Live Preview, clicking a rendered Callout's icon opens a type menu with Obsidian's thirteen built-in types, a **Foldable** toggle, and **Turn into quote**. The same controls appear in the block handle menu, where choosing a type for a plain quote upgrades it to a Callout.
 - With **Cleaner WYSIWYG rendering** on, idle code-fence rows hide their ``` markers (the language flair still names the block), and quote markers stay quiet even on the active line.
+
+### Mermaid diagrams
+
+With **Cleaner WYSIWYG rendering** enabled, rendered Mermaid diagrams use a theme-aware bordered canvas in Live Preview and Reading view. Flowcharts, sequence diagrams, subgraphs, notes, Gantt charts, and pie charts get clearer visual hierarchy. Wide diagrams retain readable labels and become horizontally scrollable instead of shrinking into a thumbnail; focus the diagram to scroll it with a keyboard or trackpad. Mermaid source remains unchanged.
 
 ### Columns
 
@@ -163,7 +170,7 @@ The same structural operations are available in the command palette and the raw-
 
 ### Appearance
 
-- **Cleaner WYSIWYG rendering** is display-only: it refines headings, tasks, dividers, inline code, and quotes without rewriting Markdown. List cycles stay enabled independently. Quote markers are concealed on inactive Live Preview lines and return on the active line.
+- **Cleaner WYSIWYG rendering** is display-only: it refines headings, tasks, dividers, inline code, quotes, and Mermaid diagrams without rewriting Markdown. List cycles stay enabled independently. Quote markers are concealed on inactive Live Preview lines and return on the active line.
 - Both Live Preview and Reading view cycle styles across the full mixed-list depth: filled, hollow, and square bullets; decimal, lower-alpha, and lower-Roman numbers. The active Live Preview line still shows its editable Markdown number.
 - Code fences, Callouts, and quotes dragged to any valid list depth use the real content level and stay aligned in source and rendered states.
 - **Notion-style tables**, header tint, and striped rows can be configured independently.
@@ -198,13 +205,14 @@ Block shortcuts can be changed under Obsidian's **Hotkeys** settings. The comman
 | Comments | On | Selection-anchored notes with yellow anchors, 💬 markers, and hover tooltips |
 | Table editing enhancements | On | Raw-table keyboard navigation and editor context menu |
 | Notion-style tables | On | Rounded table appearance, focus, hover, and spacing |
-| Table header background | Theme default | Header tint, none, or one of eight palette colors |
+| Table header background | Theme default | Header tint, none, or one of nine palette colors |
 | Striped table rows | Off | Alternating body-row tint |
 | Cleaner WYSIWYG rendering | On | Display-only Live Preview and Reading-view refinements; never changes Markdown |
 | Conceal HTML formatting tags | On | Hides plugin-generated formatting tags in Live Preview and renders them inside Reading-view code blocks |
-| List marker color | Accent | Accent, theme default, or one of eight palette colors |
-| Quote bar color | Text color | Neutral ink, accent, theme default, or one of eight palette colors |
-| Inline code color | Red | Notion-style ink for `inline code`, theme default, or one of eight palette colors |
+| List marker color | Accent | Accent, theme default, or one of nine palette colors |
+| Quote bar color | Text color | Neutral ink, accent, theme default, or one of nine palette colors |
+| Inline code color | Red | Notion-style ink for `inline code`, theme default, or one of nine palette colors |
+| Code block theme | Theme default | Ten built-in options including Obsidian adaptive; supported palettes switch light/dark variants automatically |
 | Conceal inline Markdown syntax | On | Hides supported inline Markdown markers in Live Preview |
 
 The settings page also includes **Restore defaults**.

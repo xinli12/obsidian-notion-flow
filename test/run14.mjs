@@ -9,6 +9,7 @@ import {
   getBlockRange,
   indentCharsForColumns,
   insertBlockBelow,
+  inlineListQuoteMarker,
   listNestingDepth,
   moveBlock,
   pickIndentByDrag,
@@ -31,6 +32,23 @@ const makeView = (text) => {
     focus() {},
   };
 };
+
+/* A blockquote that starts directly after a list marker is semantic
+   Markdown, but HyperMD needs an explicit Live Preview decoration. */
+{
+  ok(
+    "same-line bullet quote marker",
+    JSON.stringify(inlineListQuoteMarker("- > quote")) ===
+      JSON.stringify({ from: 2, to: 3 })
+  );
+  ok(
+    "same-line ordered quote marker",
+    JSON.stringify(inlineListQuoteMarker("  12)  >quote")) ===
+      JSON.stringify({ from: 7, to: 8 })
+  );
+  ok("ordinary list item has no quote marker", inlineListQuoteMarker("- item") == null);
+  ok("indented child quote is handled normally", inlineListQuoteMarker("  > quote") == null);
+}
 
 /* Ordered labels match native counter semantics, including wide alpha and
    Roman values and decimal fallback outside Roman's supported range. */
