@@ -124,9 +124,18 @@ body.nf-selecting-blocks * {
   pointer-events: none;
 }
 
+/* A zero-size fixed anchor, not a full-window overlay: the highlight marks
+   inside are themselves position:fixed in viewport coordinates, so this
+   container needs no area. Crucially, Electron's -webkit-app-region drag
+   calculation ignores pointer-events:none, so a fixed layer covering the
+   window would cut the titlebar's draggable region and make the whole
+   Obsidian window impossible to drag. Keeping it 0x0 avoids that. */
 .nf-block-selection-layer {
   position: fixed;
-  inset: 0;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
   z-index: calc(var(--layer-popover, 30) - 1);
   pointer-events: none;
 }
