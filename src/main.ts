@@ -1763,6 +1763,118 @@ export function batchTurnIntoChanges(
   return { changes, skipped };
 }
 
+/** Inline-formattable span of a line: past leading whitespace and block
+ * prefixes (heading/list/quote/task), trailing spaces excluded. Null for
+ * blank lines and callout headers, whose syntax must stay intact. */
+export function lineContentSpan(
+  lineText: string
+): { from: number; to: number } | null {
+  const ws = lineText.match(/^\s*/)?.[0] ?? "";
+  let offset = ws.length;
+  let rest = lineText.slice(offset);
+  for (let i = 0; i < 3; i++) {
+    const m = rest.match(RE_LINE_PREFIX);
+    if (!m) break;
+    offset += m[0].length;
+    rest = rest.slice(m[0].length);
+  }
+  const trimmed = rest.replace(/\s+$/, "");
+  if (trimmed.length === 0 || trimmed.startsWith("[!")) return null;
+  return { from: offset, to: offset + trimmed.length };
+}
+
+export interface BatchFormatMarkers {
+  /** Markdown pair; absent for HTML-only formats (underline). */
+  marker?: string;
+  endMarker?: string;
+  /** HTML pair for lines that already carry plugin HTML tags — mixing
+   * families breaks Live Preview (see rangeTouchesHtmlPairIn). */
+  open: string;
+  close: string;
+}
+
+function contentWrappedByMarkdown(
+  text: string,
+  marker: string,
+  end: string
+): boolean {
+  if (!text.startsWith(marker) || !text.endsWith(end)) return false;
+  if (text.length < marker.length + end.length) return false;
+  if (marker.length === 1 && marker !== "`") {
+    // A run of exactly two emphasis chars is BOLD, not italic.
+    const ch = marker[0];
+    let lead = 0;
+    while (lead < text.length && text[lead] === ch) lead++;
+    let tail = 0;
+    while (tail < text.length - lead && text[text.length - 1 - tail] === ch) tail++;
+    if (lead === 2 && tail === 2) return false;
+  }
+  return true;
+}
+
+/** Build one transaction's changes toggling an inline format across every
+ * selected block's per-line content. Notion semantics: if every eligible
+ * line already carries the format it comes off everywhere, otherwise the
+ * unformatted lines gain it. Fences and tables are reported as skipped. */
+export function batchToggleFormatChanges(
+  doc: Text,
+  blocks: readonly BlockRange[],
+  markers: BatchFormatMarkers,
+  fences: FenceRange[] = cachedFences(doc)
+): { changes: BlockTextChange[]; removed: boolean; skipped: number } {
+  const md = markers.marker;
+  const mdEnd = markers.endMarker ?? markers.marker ?? "";
+  interface Entry {
+    from: number;
+    to: number;
+    text: string;
+    wrap: "md" | "html" | null;
+  }
+  const entries: Entry[] = [];
+  let skipped = 0;
+  for (const block of blocks) {
+    const first = doc.line(block.startLine);
+    if (fenceAt(fences, block.startLine) || RE_TABLE.test(first.text)) {
+      skipped++;
+      continue;
+    }
+    for (let n = block.startLine; n <= block.endLine; n++) {
+      if (fenceAt(fences, n)) continue;
+      const line = doc.line(n);
+      const span = lineContentSpan(line.text);
+      if (!span) continue;
+      const text = line.text.slice(span.from, span.to);
+      let wrap: Entry["wrap"] = null;
+      if (md && contentWrappedByMarkdown(text, md, mdEnd)) wrap = "md";
+      else if (
+        text.startsWith(markers.open) &&
+        text.endsWith(markers.close) &&
+        text.length >= markers.open.length + markers.close.length
+      ) wrap = "html";
+      entries.push({ from: line.from + span.from, to: line.from + span.to, text, wrap });
+    }
+  }
+  if (entries.length === 0) return { changes: [], removed: false, skipped };
+  const removed = entries.every((entry) => entry.wrap !== null);
+  const changes: BlockTextChange[] = [];
+  for (const entry of entries) {
+    if (removed) {
+      const head = entry.wrap === "md" ? md! : markers.open;
+      const tail = entry.wrap === "md" ? mdEnd : markers.close;
+      changes.push({ from: entry.from, to: entry.from + head.length, insert: "" });
+      changes.push({ from: entry.to - tail.length, to: entry.to, insert: "" });
+    } else if (entry.wrap === null) {
+      const useHtml =
+        !md || rangeTouchesHtmlPairIn(entry.text, 0, entry.text.length);
+      const head = useHtml ? markers.open : md!;
+      const tail = useHtml ? markers.close : mdEnd;
+      changes.push({ from: entry.from, to: entry.from, insert: head });
+      changes.push({ from: entry.to, to: entry.to, insert: tail });
+    }
+  }
+  return { changes, removed, skipped };
+}
+
 /* ------------------------------------------------------------------ */
 /* Table model (parse / format / edit)                                 */
 /* ------------------------------------------------------------------ */
@@ -2790,7 +2902,7 @@ export const CODE_TAG_FOR_MARKER: Record<string, [string, string]> = {
 
 function makeCodeMarkerRewriter(plugin: NotionFlowPlugin) {
   return EditorState.transactionFilter.of((tr) => {
-    if (!plugin.settings.codeBlockEditing || !tr.docChanged) return tr;
+    if (!tr.docChanged) return tr;
     const inserts: { from: number; text: string }[] = [];
     let pureInsert = true;
     tr.changes.iterChanges((fromA, toA, _fromB, _toB, ins) => {
@@ -2801,23 +2913,60 @@ function makeCodeMarkerRewriter(plugin: NotionFlowPlugin) {
     const [head, tail] = inserts;
     const pair = CODE_TAG_FOR_MARKER[head.text];
     if (!pair || tail.text !== head.text) return tr;
-    // Only the wrap-a-selection shape: both inserts anchored exactly at the
-    // single selection's ends. Two CARETS each typing "*" produce the same
-    // two-insert transaction and must stay literal keystrokes.
+    // Only toggle shapes: both inserts anchored exactly at the single
+    // selection's ends, or — Obsidian's empty-selection toggle expands to
+    // the word around the caret — bracketing that caret. Two CARETS each
+    // typing "*" produce two RANGES, and one caret typing "*" produces one
+    // insert, so literal keystrokes always fall through.
     const startSel = tr.startState.selection;
-    if (
-      startSel.ranges.length !== 1 ||
-      startSel.main.empty ||
-      head.from !== startSel.main.from ||
-      tail.from !== startSel.main.to
-    ) {
-      return tr;
-    }
+    if (startSel.ranges.length !== 1) return tr;
+    const main = startSel.main;
+    const exactWrap =
+      !main.empty && head.from === main.from && tail.from === main.to;
+    const wordWrap =
+      main.empty &&
+      head.from < tail.from &&
+      head.from <= main.head &&
+      main.head <= tail.from;
+    if (!exactWrap && !wordWrap) return tr;
     const doc = tr.startState.doc;
-    if (!fenceBodyRange(doc, head.from, tail.from, cachedFences(doc))) return tr;
     const [open, close] = pair;
+    const inFence = !!fenceBodyRange(doc, head.from, tail.from, cachedFences(doc));
+    if (inFence && !plugin.settings.codeBlockEditing) return tr;
     const before = doc.sliceString(Math.max(0, head.from - open.length), head.from);
     const after = doc.sliceString(tail.from, tail.from + close.length);
+    if (!inFence && !(before === open && after === close)) {
+      // Outside code the markers are real Markdown. Rewrite the hotkey only
+      // when it would wrap HTML-tagged text, where Markdown cannot style
+      // the rendered element (see rangeTouchesHtmlPairIn). A second press
+      // inside an already tag-wrapped region toggles that pair off.
+      const source = doc.toString();
+      const enclosing = enclosingTagPairIn(
+        source,
+        head.from,
+        tail.from,
+        open,
+        close
+      );
+      if (enclosing) {
+        const openingLength = enclosing.open.to - enclosing.open.from;
+        return [
+          {
+            changes: [
+              { from: enclosing.open.from, to: enclosing.open.to },
+              { from: enclosing.close.from, to: enclosing.close.to },
+            ],
+            selection: {
+              anchor: head.from - openingLength,
+              head: tail.from - openingLength,
+            },
+            scrollIntoView: true,
+            userEvent: "input",
+          },
+        ];
+      }
+      if (!rangeTouchesHtmlPairIn(source, head.from, tail.from)) return tr;
+    }
     if (before === open && after === close) {
       // The selection is already wrapped — the hotkey toggles it off.
       return [
@@ -5379,7 +5528,12 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
       selectionToolbar: HTMLElement;
       selectionCount: HTMLElement;
       selectedBlocks: BlockRange[] = [];
-      pendingSelect: { x: number; y: number; line: number } | null = null;
+      pendingSelect: {
+        x: number;
+        y: number;
+        line: number;
+        fromText: boolean;
+      } | null = null;
       selecting = false;
       /** Pushed while blocks are selected. Obsidian's app hotkey scope runs
        * before document-level capture listeners, so Mod+D ("Delete
@@ -5560,6 +5714,34 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         this.selectionCount = this.selectionToolbar.createSpan({
           cls: "nf-block-selection-count",
         });
+        const formatButton = (icon: string, label: string, run: () => void) => {
+          const btn = this.selectionToolbar.createEl("button", {
+            cls: "clickable-icon nf-block-selection-format",
+            attr: { type: "button", "aria-label": label },
+          });
+          setIcon(btn, icon);
+          btn.addEventListener("click", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            run();
+          });
+        };
+        formatButton("bold", t("Bold"), () =>
+          this.formatSelectedBlocks({ marker: "**", open: "<b>", close: "</b>" })
+        );
+        formatButton("italic", t("Italic"), () =>
+          this.formatSelectedBlocks({ marker: "*", open: "<i>", close: "</i>" })
+        );
+        formatButton("underline", t("Underline"), () =>
+          this.formatSelectedBlocks({ open: "<u>", close: "</u>" })
+        );
+        formatButton("strikethrough", t("Strikethrough"), () =>
+          this.formatSelectedBlocks({ marker: "~~", open: "<s>", close: "</s>" })
+        );
+        formatButton("remove-formatting", t("Clear formatting"), () =>
+          this.clearFormattingOnSelectedBlocks()
+        );
+        this.selectionToolbar.createSpan({ cls: "nf-block-selection-divider" });
         const turnInto = this.selectionToolbar.createEl("button", {
           cls: "clickable-icon nf-block-selection-action",
           attr: { type: "button", "aria-label": t("Turn into") },
@@ -5620,9 +5802,13 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
       }
 
       /** Empty editor space starts a Notion-style marquee. Holding Alt/Option
-       * deliberately opts into it even when the pointer starts over text. */
-      canStartBlockSelection(e: MouseEvent): boolean {
-        if (e.button !== 0 || !plugin.settings.dragHandles) return false;
+       * deliberately opts into it even when the pointer starts over text.
+       * "background" starts (empty rows, space below the document, Alt) own
+       * the gesture outright; "text" starts (the margins of a row that has
+       * text) stay pending until the drag proves vertical intent, so ordinary
+       * text selections that begin just past a line's edge remain native. */
+      marqueeStartKind(e: MouseEvent): "background" | "text" | null {
+        if (e.button !== 0 || !plugin.settings.dragHandles) return null;
         const target = e.target as Element | null;
         if (
           !target ||
@@ -5630,7 +5816,7 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
             ".nf-block-controls,.nf-block-selection-toolbar,.nf-block-menu-anchor," +
             "button,input,textarea,select,a,.cm-table-widget,.cm-embed-block"
           )
-        ) return false;
+        ) return null;
         // Code blocks need uninterrupted native text dragging, including
         // selections that begin in indentation or after the last character.
         // A whole code block can still be marquee-selected by starting the
@@ -5639,7 +5825,7 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
           target.closest(
             "pre,code,.HyperMD-codeblock,.cm-preview-code-block,.code-block-flair"
           )
-        ) return false;
+        ) return null;
         const editorPos = this.view.posAtCoords({ x: e.clientX, y: e.clientY });
         if (
           editorPos != null &&
@@ -5647,22 +5833,32 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
             this.fences,
             this.view.state.doc.lineAt(editorPos).number
           )
-        ) return false;
-        if (e.altKey) return true;
+        ) return null;
+        if (e.altKey) return "background";
         const line = target.closest<HTMLElement>(".cm-line");
-        if (!line) return target === this.view.contentDOM || target === this.view.scrollDOM;
+        if (!line) {
+          return target === this.view.contentDOM || target === this.view.scrollDOM
+            ? "background"
+            : null;
+        }
         const range = this.ownerDocument.createRange();
         range.selectNodeContents(line);
         const ink = Array.from(range.getClientRects()).filter(
           (rect) => rect.width > 0 && rect.height > 0
         );
-        // Empty rows and whitespace beyond the rendered text are the natural
-        // drag handles for a marquee; ordinary text dragging remains native.
-        return ink.length === 0 || !ink.some(
-          (rect) =>
-            e.clientX >= rect.left - 3 && e.clientX <= rect.right + 3 &&
-            e.clientY >= rect.top && e.clientY <= rect.bottom
+        if (ink.length === 0) return "background";
+        // Only rects on the pointer's visual row matter: a wrapped line's
+        // other rows shouldn't turn its side margins into text.
+        const row = ink.filter(
+          (rect) => e.clientY >= rect.top - 2 && e.clientY <= rect.bottom + 2
         );
+        // The vertical gap between rows (paragraph spacing, wrap leading) is
+        // where text selections often begin a hair off-glyph — keep native.
+        if (row.length === 0) return null;
+        const onInk = row.some(
+          (rect) => e.clientX >= rect.left - 3 && e.clientX <= rect.right + 8
+        );
+        return onInk ? null : "text";
       }
 
       lineAtSelectionY(y: number, x: number): number {
@@ -5682,7 +5878,8 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
 
       handleSelectionStart(e: MouseEvent) {
         if (this.dragging || this.pendingDrag) return;
-        if (!this.canStartBlockSelection(e)) {
+        const kind = this.marqueeStartKind(e);
+        if (!kind) {
           if (
             this.selectedBlocks.length > 0 &&
             !(e.target as Element | null)?.closest?.(".nf-block-selection-toolbar")
@@ -5698,6 +5895,7 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
           x: e.clientX,
           y: e.clientY,
           line: this.lineAtSelectionY(e.clientY, e.clientX),
+          fromText: kind === "text",
         };
         this.ownerDocument.addEventListener("mousemove", this.onSelectMove, true);
         this.ownerDocument.addEventListener("mouseup", this.onSelectUp, true);
@@ -5710,7 +5908,16 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         if (!this.selecting) {
           const dx = e.clientX - start.x;
           const dy = e.clientY - start.y;
-          if (dx * dx + dy * dy < 16) return;
+          if (start.fromText) {
+            // Starting beside text is ambiguous: only a clearly vertical
+            // sweep becomes a marquee. A horizontal pull is a text
+            // selection — hand the gesture back to CodeMirror for good.
+            if (Math.abs(dx) >= Math.abs(dy) && dx * dx + dy * dy >= 64) {
+              this.clearBlockSelection();
+              return;
+            }
+            if (Math.abs(dy) < 8 || Math.abs(dy) <= Math.abs(dx)) return;
+          } else if (dx * dx + dy * dy < 16) return;
           this.selecting = true;
           this.ownerDocument.body.classList.add("nf-selecting-blocks");
           this.controls.style.display = "none";
@@ -5837,6 +6044,56 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         this.view.focus();
       }
 
+      /** Toolbar formatting: toggle an inline format across every selected
+       * block's text content. The selection survives so formats chain. */
+      formatSelectedBlocks(markers: BatchFormatMarkers) {
+        if (this.selectedBlocks.length === 0) return;
+        const result = batchToggleFormatChanges(
+          this.view.state.doc,
+          this.selectedBlocks,
+          markers,
+          this.fences
+        );
+        if (result.changes.length > 0) {
+          this.view.dispatch({
+            changes: result.changes,
+            userEvent: result.removed ? "delete.format.batch" : "input.format.batch",
+          });
+        }
+        if (result.skipped > 0) {
+          new Notice(
+            t("Skipped {n} structural blocks.").replace(
+              "{n}",
+              String(result.skipped)
+            )
+          );
+        }
+        // Inline wrapping never adds or removes lines, so the line-number
+        // based selection stays valid; only the on-screen rects moved.
+        this.ownerWindow.requestAnimationFrame(() => this.renderBlockSelection());
+      }
+
+      /** Clear-formatting reuses the selection-driven stripper: point the
+       * editor selection at each block's span, strip, then park the caret. */
+      clearFormattingOnSelectedBlocks() {
+        if (this.selectedBlocks.length === 0) return;
+        const doc = this.view.state.doc;
+        const home = doc.line(this.selectedBlocks[0].startLine).from;
+        this.view.dispatch({
+          selection: EditorSelection.create(
+            this.selectedBlocks.map((block) =>
+              EditorSelection.range(
+                doc.line(block.startLine).from,
+                doc.line(block.endLine).to
+              )
+            )
+          ),
+        });
+        clearInlineFormatting(this.view);
+        this.view.dispatch({ selection: { anchor: home } });
+        this.ownerWindow.requestAnimationFrame(() => this.renderBlockSelection());
+      }
+
       armSelectionScope() {
         if (this.keyScope) return;
         const scope = new Scope(plugin.app.scope);
@@ -5848,6 +6105,20 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         });
         scope.register(["Mod"], "A", () => {
           if (idle()) this.selectAllBlocks();
+          return false;
+        });
+        scope.register(["Mod"], "B", () => {
+          if (idle())
+            this.formatSelectedBlocks({ marker: "**", open: "<b>", close: "</b>" });
+          return false;
+        });
+        scope.register(["Mod"], "I", () => {
+          if (idle())
+            this.formatSelectedBlocks({ marker: "*", open: "<i>", close: "</i>" });
+          return false;
+        });
+        scope.register(["Mod"], "U", () => {
+          if (idle()) this.formatSelectedBlocks({ open: "<u>", close: "</u>" });
           return false;
         });
         this.keyScope = scope;
@@ -8794,22 +9065,50 @@ export function toggleWrap(view: EditorView, marker: string, endMarker?: string)
   });
 }
 
-/** The smallest well-formed underline pair whose inner text contains the
- * current selection. Unlike a direct marker check, this also finds underline
- * around nested Markdown such as `<u>**text**</u>`. */
-function enclosingUnderlinePair(state: EditorState): TagPair | null {
+/* Obsidian's Live Preview renders an inline HTML element as ONE widget
+ * built from its RAW source on inactive lines. Markdown inside the element
+ * therefore stays literal (`<u>**x**</u>` shows the asterisks), and
+ * Markdown wrapped around it cannot restyle the widget's interior
+ * (`**<u>x</u>**` is not bold). Combined formats only render when the
+ * whole stack stays in ONE family — and since underline and colors have no
+ * Markdown form, that family must be HTML: `<b><u>x</u></b>`. The helpers
+ * below keep every mixed application inside the HTML family. */
+
+/** Whether [from, to] overlaps any plugin HTML tag pair in `source`. */
+export function rangeTouchesHtmlPairIn(
+  source: string,
+  from: number,
+  to: number
+): boolean {
+  return findColorTagPairs(source).some(
+    (pair) => pair.open.from < to && pair.close.to > from
+  );
+}
+
+function selectionTouchesHtmlPair(state: EditorState): boolean {
   const sel = state.selection.main;
-  if (sel.empty) return null;
-  const source = state.doc.toString();
+  if (sel.empty) return false;
+  return rangeTouchesHtmlPairIn(state.doc.toString(), sel.from, sel.to);
+}
+
+/** The smallest pair written with exactly these tags whose inner text
+ * contains [from, to]. Finds wrappers even when other formats sit between
+ * the text and the tag, e.g. the `<u>` around `<u><b>text</b></u>`. */
+export function enclosingTagPairIn(
+  source: string,
+  from: number,
+  to: number,
+  open: string,
+  close: string
+): TagPair | null {
   return (
     findColorTagPairs(source)
       .filter(
         (pair) =>
-          pair.style === "text-decoration:underline" &&
-          source.slice(pair.open.from, pair.open.to) === "<u>" &&
-          source.slice(pair.close.from, pair.close.to) === "</u>" &&
-          pair.open.to <= sel.from &&
-          sel.to <= pair.close.from
+          source.slice(pair.open.from, pair.open.to) === open &&
+          source.slice(pair.close.from, pair.close.to) === close &&
+          pair.open.to <= from &&
+          to <= pair.close.from
       )
       .sort(
         (a, b) =>
@@ -8818,35 +9117,19 @@ function enclosingUnderlinePair(state: EditorState): TagPair | null {
   );
 }
 
-/** Whether the selection itself or any smallest enclosing HTML pair is
- * underlined. Kept shared with toggleUnderline so button state and action
- * cannot disagree when another inline format sits between text and `<u>`. */
-export function isUnderlineActive(state: EditorState): boolean {
-  return (
-    getWrapState(state, "<u>", "</u>") !== "none" ||
-    enclosingUnderlinePair(state) !== null
-  );
+function enclosingTagPair(
+  state: EditorState,
+  open: string,
+  close: string
+): TagPair | null {
+  const sel = state.selection.main;
+  if (sel.empty) return null;
+  return enclosingTagPairIn(state.doc.toString(), sel.from, sel.to, open, close);
 }
 
-/** Toggle portable HTML underline without nesting a second `<u>` inside an
- * existing underlined region. */
-export function toggleUnderline(view: EditorView) {
+/** Delete a pair's two tags, keeping the selection on the same text. */
+function removeTagPair(view: EditorView, pair: TagPair) {
   const sel = view.state.selection.main;
-  if (sel.empty) return;
-
-  // A Source-mode selection may include both tags. The generic helper
-  // already unwraps that shape and keeps the selected inner text selected.
-  if (getWrapState(view.state, "<u>", "</u>") === "inside") {
-    toggleWrap(view, "<u>", "</u>");
-    return;
-  }
-
-  const pair = enclosingUnderlinePair(view.state);
-  if (!pair) {
-    toggleWrap(view, "<u>", "</u>");
-    return;
-  }
-
   const openingLength = pair.open.to - pair.open.from;
   view.dispatch({
     changes: [
@@ -8858,6 +9141,109 @@ export function toggleUnderline(view: EditorView) {
       head: sel.head - openingLength,
     },
   });
+}
+
+/** Markdown marker layers convertible to HTML equivalents, longest first
+ * so a `***` run peels as `**` then `*`. */
+const MD_LAYER_TAGS: [marker: string, open: string, close: string][] = [
+  ["**", "<b>", "</b>"],
+  ["__", "<b>", "</b>"],
+  ["~~", "<s>", "</s>"],
+  [
+    "==",
+    '<mark style="background:var(--text-highlight-bg);color:inherit">',
+    "</mark>",
+  ],
+  ["*", "<i>", "</i>"],
+  ["_", "<i>", "</i>"],
+];
+
+/** Rewrite Markdown emphasis layers sitting immediately around the
+ * selection (`**`, `*`, `~~`, `==`, `_`) into their HTML tag equivalents,
+ * innermost outward, so that an HTML format applied next never leaves
+ * Markdown wrapped around an HTML element. No-op without such layers. */
+export function convertAdjacentMarkersToTags(view: EditorView) {
+  const sel = view.state.selection.main;
+  if (sel.empty) return;
+  const doc = view.state.doc;
+  const lineFrom = doc.lineAt(sel.from).from;
+  const lineTo = doc.lineAt(sel.to).to;
+  let outerFrom = sel.from;
+  let outerTo = sel.to;
+  const layers: [string, string][] = [];
+  for (;;) {
+    let matched = false;
+    for (const [marker, open, close] of MD_LAYER_TAGS) {
+      if (
+        outerFrom - marker.length < lineFrom ||
+        outerTo + marker.length > lineTo
+      ) continue;
+      if (
+        doc.sliceString(outerFrom - marker.length, outerFrom) === marker &&
+        doc.sliceString(outerTo, outerTo + marker.length) === marker
+      ) {
+        layers.push([open, close]);
+        outerFrom -= marker.length;
+        outerTo += marker.length;
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) break;
+  }
+  if (layers.length === 0) return;
+  const prefix = layers.map(([open]) => open).reverse().join("");
+  const suffix = layers.map(([, close]) => close).join("");
+  view.dispatch({
+    changes: [
+      { from: outerFrom, to: sel.from, insert: prefix },
+      { from: sel.to, to: outerTo, insert: suffix },
+    ],
+    selection: {
+      anchor: outerFrom + prefix.length,
+      head: outerFrom + prefix.length + (sel.to - sel.from),
+    },
+    userEvent: "input",
+  });
+}
+
+/** Toggle an HTML tag pair without nesting a duplicate inside an already
+ * wrapped region and without leaving Markdown markers around HTML. */
+export function toggleHtmlWrap(view: EditorView, open: string, close: string) {
+  const sel = view.state.selection.main;
+  if (sel.empty) return;
+
+  // A Source-mode selection may include both tags, or sit right between
+  // them. The generic helper unwraps both shapes.
+  if (getWrapState(view.state, open, close) !== "none") {
+    toggleWrap(view, open, close);
+    return;
+  }
+
+  const pair = enclosingTagPair(view.state, open, close);
+  if (pair) {
+    removeTagPair(view, pair);
+    return;
+  }
+
+  convertAdjacentMarkersToTags(view);
+  toggleWrap(view, open, close);
+}
+
+/** Whether the selection itself or any smallest enclosing HTML pair is
+ * underlined. Kept shared with toggleUnderline so button state and action
+ * cannot disagree when another inline format sits between text and `<u>`. */
+export function isUnderlineActive(state: EditorState): boolean {
+  return (
+    getWrapState(state, "<u>", "</u>") !== "none" ||
+    enclosingTagPair(state, "<u>", "</u>") !== null
+  );
+}
+
+/** Toggle portable HTML underline without nesting a second `<u>` inside an
+ * existing underlined region. */
+export function toggleUnderline(view: EditorView) {
+  toggleHtmlWrap(view, "<u>", "</u>");
 }
 
 /* ---------- Inline color (rendered by Obsidian as inline HTML) ---------- */
@@ -8918,15 +9304,19 @@ function applyTagColor(
   }
   if (color === null) return;
 
+  // Markdown markers hugging the selection would end up wrapped around an
+  // HTML element, which Live Preview cannot style. Convert them first.
+  convertAdjacentMarkersToTags(view);
+  const wrapSel = view.state.selection.main;
   const openTag = open(color);
   view.dispatch({
     changes: [
-      { from: sel.from, insert: openTag },
-      { from: sel.to, insert: close },
+      { from: wrapSel.from, insert: openTag },
+      { from: wrapSel.to, insert: close },
     ],
     selection: {
-      anchor: sel.from + openTag.length,
-      head: sel.to + openTag.length,
+      anchor: wrapSel.from + openTag.length,
+      head: wrapSel.to + openTag.length,
     },
   });
 }
@@ -9048,8 +9438,51 @@ export function insertLink(view: EditorView) {
   view.focus();
 }
 
-/** Markdown markers everywhere; the equivalent HTML tag pair inside a
- * fenced code block, where Markdown markers stay literal code. */
+/** Markdown markers in plain text; the equivalent HTML tag pair inside a
+ * fenced code block (where Markdown markers stay literal code) and around
+ * any HTML-tagged text (where mixing families breaks Live Preview — see
+ * the note above rangeTouchesHtmlPairIn). Toggling off recognizes both. */
+export function isDualFormatActive(
+  state: EditorState,
+  marker: string,
+  codeOpen: string,
+  codeClose: string
+): boolean {
+  return inFenceBody(state)
+    ? getWrapState(state, codeOpen, codeClose) !== "none"
+    : getWrapState(state, marker) !== "none" ||
+      getWrapState(state, codeOpen, codeClose) !== "none" ||
+      enclosingTagPair(state, codeOpen, codeClose) !== null;
+}
+
+export function toggleDualFormat(
+  v: EditorView,
+  marker: string,
+  codeOpen: string,
+  codeClose: string
+) {
+  if (inFenceBody(v.state)) {
+    toggleWrap(v, codeOpen, codeClose);
+    return;
+  }
+  const state = v.state;
+  if (getWrapState(state, marker) !== "none") {
+    toggleWrap(v, marker);
+    return;
+  }
+  if (getWrapState(state, codeOpen, codeClose) !== "none") {
+    toggleWrap(v, codeOpen, codeClose);
+    return;
+  }
+  const pair = enclosingTagPair(state, codeOpen, codeClose);
+  if (pair) {
+    removeTagPair(v, pair);
+    return;
+  }
+  if (selectionTouchesHtmlPair(state)) toggleWrap(v, codeOpen, codeClose);
+  else toggleWrap(v, marker);
+}
+
 const dualFormatAction = (
   icon: string,
   tooltip: string,
@@ -9060,14 +9493,8 @@ const dualFormatAction = (
   icon,
   tooltip,
   marker,
-  isActive: (state) =>
-    inFenceBody(state)
-      ? getWrapState(state, codeOpen, codeClose) !== "none"
-      : getWrapState(state, marker) !== "none",
-  run: (v) =>
-    inFenceBody(v.state)
-      ? toggleWrap(v, codeOpen, codeClose)
-      : toggleWrap(v, marker),
+  isActive: (state) => isDualFormatActive(state, marker, codeOpen, codeClose),
+  run: (v) => toggleDualFormat(v, marker, codeOpen, codeClose),
 });
 
 const PRIMARY_TOOLBAR_ACTIONS: ToolbarAction[] = [
@@ -9601,7 +10028,13 @@ function makeToolbarPlugin(plugin: NotionFlowPlugin) {
             },
           });
           press(def, () => {
-            toggleWrap(this.view, "==");
+            // == around an HTML element cannot restyle it in Live Preview;
+            // stay in the HTML family with the theme's highlight color.
+            if (selectionTouchesHtmlPair(this.view.state)) {
+              applyHighlightColor(this.view, "var(--text-highlight-bg)");
+            } else {
+              toggleWrap(this.view, "==");
+            }
             this.win.setTimeout(() => this.maybeShow(), 0);
           });
         }
