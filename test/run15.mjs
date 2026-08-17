@@ -10,6 +10,10 @@ import {
   columnFenceBackspacePlan,
   buildQuotedPaste,
   parseCalloutHeader,
+  calloutHeaderVisualRange,
+  calloutActivationCursor,
+  calloutSourceTextAnchor,
+  calloutHeaderKeyPlan,
   setCalloutType,
   toggleCalloutFold,
   quoteToCallout,
@@ -90,10 +94,13 @@ check(
 );
 
 /* ---------- quoteBackspacePlan ---------- */
+/* Row 2 has a sibling row below it, so there is no level to exit here:
+ * shedding one would have left "body" outside the Callout and everything
+ * under it still inside. Backspace at a line start joins upward instead. */
 check(
-  "backspace unwraps at content start",
+  "backspace mid-block joins the row above",
   quoteBackspacePlan(doc, l2.from + 2),
-  { from: l2.from, to: l2.to, insert: "body", cursor: l2.from }
+  { from: l1.to, to: l2.from + 2, insert: "", cursor: l1.to }
 );
 check("backspace mid-content falls back", quoteBackspacePlan(doc, l2.from + 3), null);
 check("backspace at col 0 falls back", quoteBackspacePlan(doc, l2.from), null);
@@ -102,9 +109,18 @@ check(
   quoteBackspacePlan(doc, l3.from + 2),
   { from: l3.from, to: l3.to, insert: "", cursor: l3.from }
 );
+/* On the FIRST row of a nested quote that has more rows below, "remove this
+ * block's marker" can only mean the whole nested quote — dedenting just this
+ * row would leave the next one nested a level deeper than its own header. */
 check(
-  "backspace nested unwraps one level",
+  "backspace on a nested block's first row unwraps the whole block",
   quoteBackspacePlan(nested, nested.line(1).from + 4),
+  { from: 0, to: 13, insert: "> deep\n>", cursor: 2 }
+);
+/* With nothing below it, the same row really is leaving the level. */
+check(
+  "backspace on the last nested row still sheds one level",
+  quoteBackspacePlan(Text.of(["> > deep"]), 4),
   { from: 0, to: 8, insert: "> deep", cursor: 2 }
 );
 
@@ -227,6 +243,110 @@ check("header alias resolves", parseCalloutHeader("> [!error] x")?.type, "danger
 check("header metadata", parseCalloutHeader("> [!note|no-icon]+ x")?.fold, "+");
 check("header nested quote", parseCalloutHeader("> > [!info] x")?.type, "info");
 check("plain quote is not header", parseCalloutHeader("> plain"), null);
+check(
+  "visual header range includes metadata, fold marker, and separator",
+  calloutHeaderVisualRange("> [!note|no-icon]- Title"),
+  { from: 0, to: 19 }
+);
+
+const protectedHeader = Text.of(["> [!note|x]- Title", "> body"]);
+const protectedTitle = calloutHeaderVisualRange(protectedHeader.line(1).text).to;
+check(
+  "Home lands at the visible Callout title",
+  calloutHeaderKeyPlan(protectedHeader, protectedHeader.line(1).to, "Home"),
+  {
+    from: protectedHeader.line(1).to,
+    to: protectedHeader.line(1).to,
+    insert: "",
+    cursor: protectedTitle,
+  }
+);
+check(
+  "Backspace inside the hidden Callout token only restores the title caret",
+  calloutHeaderKeyPlan(protectedHeader, 5, "Backspace"),
+  { from: 5, to: 5, insert: "", cursor: protectedTitle }
+);
+check(
+  "Delete inside the hidden Callout token only restores the title caret",
+  calloutHeaderKeyPlan(protectedHeader, 5, "Delete"),
+  { from: 5, to: 5, insert: "", cursor: protectedTitle }
+);
+check(
+  "Delete at a real title falls through to ordinary text editing",
+  calloutHeaderKeyPlan(protectedHeader, protectedTitle, "Delete"),
+  null
+);
+const emptyHeader = Text.of(["> [!note]"]);
+check(
+  "Delete cannot cross an empty hidden Callout header",
+  calloutHeaderKeyPlan(emptyHeader, emptyHeader.length, "Delete"),
+  {
+    from: emptyHeader.length,
+    to: emptyHeader.length,
+    insert: "",
+    cursor: emptyHeader.length,
+  }
+);
+
+const multiActivation = Text.of(["> [!note] Title", "> body"]);
+check(
+  "a multi-row Callout activates on its first body column",
+  calloutActivationCursor(multiActivation, 1, 2),
+  { anchor: multiActivation.line(2).from + 2, assoc: 1 }
+);
+const titledActivation = Text.of(["> [!note] Title"]);
+check(
+  "a one-row titled Callout activates inside visible title text",
+  calloutActivationCursor(titledActivation, 1, 1),
+  { anchor: calloutHeaderVisualRange(titledActivation.line(1).text).to + 1, assoc: 1 }
+);
+check(
+  "a title-less Callout activates on the visual token's right side",
+  calloutActivationCursor(emptyHeader, 1, 1),
+  { anchor: emptyHeader.length, assoc: 1 }
+);
+
+const renderedAnchorDoc = Text.of([
+  "> [!note] Anchor",
+  "> first repeated value",
+  "> **outer ending.**",
+  "> repeated value",
+]);
+check(
+  "rendered prose maps through Markdown formatting to its source offset",
+  calloutSourceTextAnchor(
+    renderedAnchorDoc,
+    1,
+    4,
+    "outer ending.",
+    6,
+    renderedAnchorDoc.line(3).from
+  ),
+  renderedAnchorDoc.line(3).from + renderedAnchorDoc.line(3).text.indexOf("outer ending.") + 6
+);
+check(
+  "repeated rendered text chooses the occurrence nearest the expected row",
+  calloutSourceTextAnchor(
+    renderedAnchorDoc,
+    1,
+    4,
+    "repeated value",
+    4,
+    renderedAnchorDoc.line(4).from
+  ),
+  renderedAnchorDoc.line(4).from + renderedAnchorDoc.line(4).text.indexOf("repeated value") + 4
+);
+const hiddenTokenAnchor = Text.of(["> [!note] note"]);
+check(
+  "a rendered title never anchors into the hidden Callout token",
+  calloutSourceTextAnchor(hiddenTokenAnchor, 1, 1, "note", 2, 4),
+  hiddenTokenAnchor.line(1).text.lastIndexOf("note") + 2
+);
+check(
+  "blank rendered text keeps the coordinate fallback",
+  calloutSourceTextAnchor(renderedAnchorDoc, 1, 4, "   ", 1, 0),
+  null
+);
 
 /* ---------- setCalloutType / toggleCalloutFold ---------- */
 check("set type", setCalloutType("> [!note] T", "warning"), "> [!warning] T");
@@ -272,6 +392,36 @@ check(
   [{ startLine: 1, endLine: 3, colorVar: "--callout-tip" }]
 );
 check("edit blocks: plain quote has none", calloutEditBlocks(editDoc, 5, 5), []);
+
+const siblingCallouts = Text.of([
+  "> [!note] One",
+  "> first",
+  ">",
+  "> [!warning] Two",
+  "> second",
+]);
+check(
+  "same-depth Callouts separated by a quoted blank stay siblings",
+  calloutEditBlocks(siblingCallouts, 1, 5),
+  [
+    { startLine: 1, endLine: 3, colorVar: "--callout-default" },
+    { startLine: 4, endLine: 5, colorVar: "--callout-warning" },
+  ]
+);
+
+const calloutWithFence = Text.of([
+  "> [!note] Code",
+  "> before",
+  "> ```js",
+  "> const answer = 42",
+  "> ```",
+  "> after",
+]);
+check(
+  "edit blocks: a quoted fence stays inside its Callout chunk",
+  calloutEditBlocks(calloutWithFence, 4, 4),
+  [{ startLine: 1, endLine: 6, colorVar: "--callout-default" }]
+);
 
 check("callout to quote", calloutToQuote("> [!note] Title"), "> Title");
 check("folded callout to quote", calloutToQuote("> [!note]- Title"), "> Title");

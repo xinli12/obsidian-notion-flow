@@ -122,6 +122,164 @@ const check = (name, got, expected) => {
     cursor: opener.to + 2,
   });
 }
+{
+  const doc = Text.of(["```python", "def greet(name):", "```"]);
+  const line = doc.line(2);
+  check("python block header indents", fenceEnterPlan(doc, line.to), {
+    from: line.to,
+    to: line.to,
+    insert: "\n    ",
+    cursor: line.to + 5,
+  });
+}
+{
+  const unit = { width: 2, useTab: false };
+  for (const [name, source] of [
+    ["brace", "if (ready) {"],
+    ["bracket", "const items = ["],
+    ["paren", "call("],
+  ]) {
+    const doc = Text.of(["```ts", source, "```"]);
+    const line = doc.line(2);
+    check(`${name} opener uses vault indent`, fenceEnterPlan(doc, line.to, scanFences(doc), unit), {
+      from: line.to,
+      to: line.to,
+      insert: "\n  ",
+      cursor: line.to + 3,
+    });
+  }
+}
+{
+  for (const [name, opener, source] of [
+    ["json", "```json", '"items": ['],
+    ["css", "```css", ".card {"],
+    ["javascript", "```javascript", "function run() {"],
+  ]) {
+    const doc = Text.of([opener, source, "```"]);
+    const line = doc.line(2);
+    check(`${name} language alias smart-indents`, fenceEnterPlan(doc, line.to), {
+      from: line.to,
+      to: line.to,
+      insert: "\n    ",
+      cursor: line.to + 5,
+    });
+  }
+}
+{
+  const unit = { width: 2, useTab: false };
+  for (const [name, source, caretText] of [
+    ["brace pair", "const value = {};", "const value = {"],
+    ["bracket pair", "const value = [];", "const value = ["],
+    ["paren pair", "call();", "call("],
+  ]) {
+    const doc = Text.of(["```js", source, "```"]);
+    const line = doc.line(2);
+    const pos = line.from + caretText.length;
+    check(`${name} expands to inner and aligned closer rows`, fenceEnterPlan(doc, pos, scanFences(doc), unit), {
+      from: pos,
+      to: pos,
+      insert: "\n  \n",
+      cursor: pos + 3,
+    });
+  }
+}
+{
+  // Structural quote/list columns are copied verbatim; only the code part
+  // receives the vault's tab indent.
+  const doc = Text.of([
+    "> - item",
+    ">   ```python",
+    ">   def greet(name):",
+    ">   ```",
+  ]);
+  const line = doc.line(3);
+  const tabUnit = { width: 4, useTab: true };
+  check(
+    "smart indent keeps quoted-list fence prefix",
+    fenceEnterPlan(doc, line.to, scanFences(doc), tabUnit),
+    {
+      from: line.to,
+      to: line.to,
+      insert: "\n>   \t",
+      cursor: line.to + 6,
+    }
+  );
+
+  const paired = Text.of([
+    "> - item",
+    ">   ```js",
+    ">   const value = {};",
+    ">   ```",
+  ]);
+  const pairLine = paired.line(3);
+  const pairPos = pairLine.from + ">   const value = {".length;
+  const spaceUnit = { width: 2, useTab: false };
+  check(
+    "matching pair repeats quoted-list prefix on both rows",
+    fenceEnterPlan(paired, pairPos, scanFences(paired), spaceUnit),
+    {
+      from: pairPos,
+      to: pairPos,
+      insert: "\n>     \n>   ",
+      cursor: pairPos + 7,
+    }
+  );
+}
+{
+  // Literal punctuation must never trigger semantic indentation.
+  for (const [name, opener, source] of [
+    ["python string colon", "```python", 'print("if ready:")'],
+    ["python comment colon", "```python", "# if ready:"],
+    ["javascript string brace", "```js", 'const text = "{";'],
+    ["javascript comment brace", "```js", "// if (ready) {"],
+    ["javascript regex brace", "```js", "const re = /[{(]/;"],
+    ["css string brace", "```css", 'content: "{";'],
+  ]) {
+    const doc = Text.of([opener, source, "```"]);
+    const line = doc.line(2);
+    check(`${name} stays literal`, fenceEnterPlan(doc, line.to), {
+      from: line.to,
+      to: line.to,
+      insert: "\n",
+      cursor: line.to + 1,
+    });
+  }
+}
+{
+  for (const [name, lines] of [
+    ["python triple string", ["```python", '\"\"\"literal', "if ready:", "```"]],
+    ["javascript block comment", ["```js", "/* literal {", "if (ready) {", "```"]],
+  ]) {
+    const doc = Text.of(lines);
+    const line = doc.line(3);
+    check(`${name} suppresses semantic indent across rows`, fenceEnterPlan(doc, line.to), {
+      from: line.to,
+      to: line.to,
+      insert: "\n",
+      cursor: line.to + 1,
+    });
+  }
+}
+{
+  const doc = Text.of(["```python", "if ready:  # explanation", "```"]);
+  const line = doc.line(2);
+  check("python header before trailing comment indents", fenceEnterPlan(doc, line.to), {
+    from: line.to,
+    to: line.to,
+    insert: "\n    ",
+    cursor: line.to + 5,
+  });
+}
+{
+  const doc = Text.of(["```text", "literal {", "```"]);
+  const line = doc.line(2);
+  check("unknown language keeps legacy indent", fenceEnterPlan(doc, line.to), {
+    from: line.to,
+    to: line.to,
+    insert: "\n",
+    cursor: line.to + 1,
+  });
+}
 
 /* ---------- fenceBackspacePlan ---------- */
 {

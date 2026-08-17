@@ -45,11 +45,14 @@ check(
 
 const blocks = blocksInLineSpan(doc, 1, doc.lines);
 const result = batchTurnIntoChanges(doc, blocks, "# ");
-check("batch conversion skips structural blocks", result.skipped, 3);
+// A fence and a table still have no line prefix that could describe them.
+// A multi-line quote no longer counts: it is retyped as a whole block, all
+// of its rows shedding the quote level in one change.
+check("batch conversion skips structural blocks", result.skipped, 2);
 check(
   "batch conversion changes ordinary block first lines",
   result.changes.map((change) => change.insert),
-  ["# alpha", "# ", "# beta", "# ", "# parent", "# ", "# ", "# "]
+  ["# alpha", "# ", "# beta", "# ", "# parent", "# ", "# ", "# quote\n# continued", "# "]
 );
 
 if (fail) process.exit(1);

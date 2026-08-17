@@ -1,5 +1,13 @@
 import { EditorState, EditorSelection } from "@codemirror/state";
-import { applyTextColor, applyHighlightColor, clearInlineFormatting, TEXT_COLORS } from "./bundle.mjs";
+import {
+  applyTextColor,
+  applyHighlightColor,
+  clearInlineFormatting,
+  findMathRanges,
+  withMathColorClass,
+  BG_COLORS,
+  TEXT_COLORS,
+} from "./bundle.mjs";
 
 let fail = 0;
 const ok = (name, cond, extra = "") => {
@@ -102,7 +110,105 @@ const mk = (text, from, to) => {
   );
 }
 ok("palette has 9 text colors", TEXT_COLORS.length === 9);
-ok("gray text follows Obsidian muted ink", TEXT_COLORS[0] === "var(--text-muted)");
+ok(
+  "every swatch is a plugin var with a hex fallback",
+  TEXT_COLORS.every((c) => /^var\(--nf-[a-z]+, #[0-9a-f]{6}\)$/.test(c)),
+  TEXT_COLORS.join(" ")
+);
+ok(
+  "highlights tint the same ink",
+  BG_COLORS.every((c) => /^rgba\(var\(--nf-[a-z]+-rgb, [\d, ]+\), 0\.\d+\)$/.test(c)),
+  BG_COLORS.join(" ")
+);
+ok(
+  "swatch styles fit the conceal parser's charset",
+  [...TEXT_COLORS, ...BG_COLORS].every(
+    (c) => c.length <= 64 && /^[-\w(),.%# ]+$/.test(c)
+  )
+);
+
+/* ---------- LaTeX ---------- */
+const RED = TEXT_COLORS[1];
+const YELLOW = BG_COLORS[3];
+
+{
+  const found = findMathRanges("a $x^2$ b $$\\int_0^1 f$$ c");
+  ok("finds inline and display math", found.length === 2, JSON.stringify(found));
+  ok("inline body excludes delimiters", found[0].bodyFrom === 3 && found[0].bodyTo === 6);
+  ok("display math is flagged", found[1].display === true && found[0].display === false);
+}
+ok("prices are not formulas", findMathRanges("costs $5 and $7 today").length === 0);
+ok("code spans are literal", findMathRanges("`$x$` plain").length === 0);
+ok(
+  "fenced code is literal",
+  findMathRanges("```\n$x^2$\n```\n").length === 0
+);
+ok("escaped dollars are literal", findMathRanges("\\$x\\$ y").length === 0);
+
+// Coloring a formula rewrites its body instead of wrapping it in a span,
+// which Live Preview would render as literal dollar signs.
+{
+  const v = mk("see $E=mc^2$ ok", 4, 12);
+  applyTextColor(v, RED);
+  ok(
+    "formula takes a class, not a span",
+    v.state.doc.toString() === "see $\\class{mjx-nf-red}{E=mc^2}$ ok",
+    v.state.doc.toString()
+  );
+}
+{
+  const v = mk("$\\class{mjx-nf-blue}{x}$", 0, 23);
+  applyTextColor(v, RED);
+  ok(
+    "recoloring replaces the old class",
+    v.state.doc.toString() === "$\\class{mjx-nf-red}{x}$",
+    v.state.doc.toString()
+  );
+  applyHighlightColor(v, YELLOW);
+  ok(
+    "highlight rides alongside the text color",
+    v.state.doc.toString() === "$\\class{mjx-nf-red mjx-nfbg-yellow}{x}$",
+    v.state.doc.toString()
+  );
+}
+{
+  const v = mk("$\\class{mjx-nf-red}{x}$", 0, 23);
+  applyTextColor(v, null);
+  ok(
+    "removing the color unwraps the formula",
+    v.state.doc.toString() === "$x$",
+    v.state.doc.toString()
+  );
+}
+ok(
+  "a hand-written class survives",
+  withMathColorClass("\\class{tall}{x}", "color", "red") ===
+    "\\class{tall mjx-nf-red}{x}",
+  withMathColorClass("\\class{tall}{x}", "color", "red")
+);
+ok(
+  "a class that is not the whole body is left alone",
+  withMathColorClass("\\class{tall}{x} + y", "color", "red") ===
+    "\\class{mjx-nf-red}{\\class{tall}{x} + y}"
+);
+
+// Prose and formula in one selection: tags for the words, class for the math.
+{
+  const v = mk("see $x^2$ now", 0, 13);
+  applyTextColor(v, RED);
+  ok(
+    "mixed selection keeps the tags off the math",
+    v.state.doc.toString() ===
+      `<span style="color:${RED}">see</span> $\\class{mjx-nf-red}{x^2}$ <span style="color:${RED}">now</span>`,
+    v.state.doc.toString()
+  );
+  clearInlineFormatting(v);
+  ok(
+    "clear formatting also unwraps the formula",
+    v.state.doc.toString() === "see $x^2$ now",
+    v.state.doc.toString()
+  );
+}
 
 console.log(fail === 0 ? "ALL PASS" : `${fail} FAILURES`);
 process.exit(fail);
