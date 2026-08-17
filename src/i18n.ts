@@ -37,6 +37,9 @@ const ZH: Record<string, string> = {
   Columns: "分栏",
   'Notion-style side-by-side layout. Insert with "/columns", pick "Turn into columns" from a block menu, or drag a block to the right edge of another. Written as nested [!nf-cols]/[!nf-col] callouts — plain quotes in any other Markdown app. "[!nf-col|30]" pins a column to 30% width.':
     "Notion 式并排分栏。可通过斜杠命令「/分栏」插入、在块菜单选择「转为分栏」，或将块拖到另一个块的右缘创建。以嵌套的 [!nf-cols]/[!nf-col] 标注语法书写，在其他 Markdown 应用中显示为普通引用；「[!nf-col|30]」可将栏宽固定为 30%。",
+  Toggles: "折叠块",
+  'Notion-style foldable blocks. Insert with "/toggle" or pick "Turn into toggle" from a block menu; click the triangle to fold. Written as a [!nf-toggle] callout whose +/- marker holds the open state, so it is saved in the note and travels with it — a plain quote in any other Markdown app.':
+    "Notion 式折叠块。可通过斜杠命令「/折叠」插入，或在块菜单选择「转为折叠块」；点击三角形收起或展开。以 [!nf-toggle] 标注语法书写，+/- 标记保存展开状态，因此状态随笔记一起保存和同步；在其他 Markdown 应用中显示为普通引用。",
   Comments: "批注",
   'Select text and add a note to it — from the toolbar 💬 button, the "Add comment" command, or Cmd/Ctrl+Shift+M. The anchor highlights in yellow with a 💬 marker; click the marker to read, edit, or resolve. Comments are stored inside the note and stay invisible in other Markdown apps.':
     "选中文本即可添加批注——通过工具栏 💬 按钮、「添加批注」命令或 Cmd/Ctrl+Shift+M。锚文本以黄色高亮并带 💬 标记；点击标记可查看、编辑或解除批注。批注保存在笔记内部，在其他 Markdown 应用中不可见。",
@@ -49,6 +52,8 @@ const ZH: Record<string, string> = {
   "Select some text to comment on.": "先选中要批注的文本。",
   "Comments cover a single line of text.": "批注目前仅支持单行选区。",
   "Code block enhancements": "代码块编辑增强",
+  Code: "代码",
+  "Change callout type": "切换标注类型",
   'In fenced code blocks, Enter keeps the current line\'s indentation (so blocks nested in lists stay aligned), Backspace at the text start removes one indent level, Enter after an unclosed ``` writes the closing fence, and Cmd/Ctrl+Shift+Enter (the "Exit code block" command) exits below the block.':
     "在代码块内：按 Enter 续行时保持当前缩进（列表内嵌套的代码块不再错位）；在代码文本开头按 Backspace 回退一级缩进；在未闭合的 ``` 行按 Enter 自动补全闭合围栏；按 Cmd/Ctrl+Shift+Enter（「跳出代码块」命令）跳出代码块。",
   "Cleaner WYSIWYG rendering": "更简洁的所见即所得渲染",
@@ -96,6 +101,22 @@ const ZH: Record<string, string> = {
   "Conceal inline Markdown syntax": "隐藏行内 Markdown 标记",
   "Hide the non-text markers in **bold**, *italic*, ~~strikethrough~~, `inline code`, and ==highlight==. Links stay fully visible and editable. A marker reappears only when the caret enters its source; Source mode is unchanged.":
     "隐藏 **粗体**、*斜体*、~~删除线~~、`行内代码` 和 ==高亮== 中的非文本标记；链接始终完整显示并可直接编辑。仅当光标进入标记源码时临时显示，源码模式不受影响。",
+  "Conceal heading markers while writing": "书写时隐藏标题标记",
+  'Hide a heading\'s "#" run on the line you are writing, not only after you leave it, so typing "## " makes the line a heading the way Notion does. Move the caret in front of the text to bring the marker back, or press Backspace there to remove the whole marker at once. The Markdown is unchanged.':
+    "在正在书写的那一行也隐藏标题的「#」标记，而不是只在光标离开后才隐藏——于是敲下「## 」的瞬间这一行就成为标题，和 Notion 一样。把光标移到正文之前即可重新看到标记，在正文开头按 Backspace 可一次删除整个标记。Markdown 源码不变。",
+  "Block indentation with Tab": "用 Tab 调整块层级",
+  "Tab and Shift+Tab step the block holding the caret through the same nesting levels a sideways drag offers — a paragraph, heading, quote, or Callout tucks under the list item above it. List items stay with Obsidian's own indent, table cells with table navigation, and code blocks with code indentation; where a block has nowhere to go, Tab keeps its ordinary meaning.":
+    "Tab 与 Shift+Tab 让光标所在的块在「横向拖拽」提供的同一组层级之间移动——段落、标题、引用或 Callout 可以缩进到上方列表项之下。列表项仍由 Obsidian 自己缩进，表格单元格仍用表格导航，代码块仍是代码缩进；当某个块无处可去时，Tab 保持原有含义。",
+  "Type / for commands": "输入 / 插入块",
+  "Empty-line hint": "空行提示",
+  'Show a faint "Type / for commands" on the empty line you are writing on, the way Notion labels an empty block. It is display-only — nothing is written to the note — and it never appears inside a code block or on a line that already has text.':
+    "在正在书写的空行上显示浅色的「输入 / 插入块」，与 Notion 标注空块的方式一致。纯显示效果——不会写入笔记——代码块内以及已有文字的行上都不会出现。",
+  "Shorthand while typing": "输入速记",
+  'Type ">!" and a space for a Callout — ">!tip", ">!warning" pick the type, a trailing "+" or "-" makes it foldable — and "[]" and a space for a to-do. The shorthand only expands at the end of a line you are typing, never inside code, and one undo puts the characters back.':
+    "输入「>!」加空格直接生成标注——「>!tip」「>!warning」「>!提示」可指定类型，结尾加「+」或「-」则可折叠；输入「[]」加空格生成待办。速记只在正在书写的行尾展开，代码块内不生效，按一次撤销即可还原为原字符。",
+  "Select blocks with Escape": "用 Esc 选中块",
+  "Escape selects the block holding the caret; ↑/↓ walk to the block above or below, Shift+↑/↓ extend the selection, and Enter returns to writing at its end. Everything the mouse selection already offers — copy, cut, duplicate, delete, format — works on it.":
+    "按 Esc 选中光标所在的块；↑/↓ 切换到上一个或下一个块，Shift+↑/↓ 扩展选择，Enter 回到该块末尾继续书写。鼠标框选已有的全部操作——复制、剪切、再制、删除、格式化——同样适用。",
   "Help & examples": "帮助与示例",
   "Open documentation and guided example notes in English or Chinese.":
     "打开中英文使用文档和引导示例。",
@@ -133,6 +154,13 @@ const ZH: Record<string, string> = {
   "Move block down": "下移块",
   "Duplicate block": "复制块",
   "Repair nested Callout": "修复列表内 Callout",
+  "Turn into text": "转换为正文",
+  "Turn into Heading 1": "转换为一级标题",
+  "Turn into Heading 2": "转换为二级标题",
+  "Turn into Heading 3": "转换为三级标题",
+  "Turn into to-do": "转换为待办",
+  "Turn into bulleted list": "转换为无序列表",
+  "Turn into numbered list": "转换为有序列表",
 
   // Block menu
   Text: "正文",
@@ -147,6 +175,20 @@ const ZH: Record<string, string> = {
   Duplicate: "创建副本",
   "Copy text": "复制文本",
   "Delete block": "删除块",
+  Image: "图片",
+  Caption: "说明文字",
+  "Add caption": "添加说明文字",
+  "Edit caption": "编辑说明文字",
+  "Write a caption…": "输入说明文字…",
+  "Expand code block": "展开代码块",
+  "Copy code": "复制代码",
+  "Code copied.": "代码已复制。",
+  "Change language": "更改语言",
+  "Code block language": "代码块语言",
+  "No language": "无语言",
+  "Other language…": "其他语言…",
+  "For example: kotlin": "例如：kotlin",
+  "Collapse code block": "折叠代码块",
   "Add row at top": "在顶部添加行",
   "Add row at bottom": "在底部添加行",
   "Add column on left": "在左侧添加列",
@@ -169,6 +211,11 @@ const ZH: Record<string, string> = {
   Foldable: "可折叠",
   "Turn into quote": "转换为引用",
   "Turn into columns": "转为分栏",
+  "Turn into toggle": "转为折叠块",
+  "Turn into Callout": "转为标注",
+  "Turn into code block": "转为代码块",
+  Expand: "展开",
+  Collapse: "收起",
   "Add column": "添加一栏",
   "Two columns": "两栏",
   "Three columns": "三栏",
@@ -178,7 +225,6 @@ const ZH: Record<string, string> = {
   "Narrow right (30%)": "右窄（30%）",
   "Unwrap columns": "拆开分栏",
   "Column options": "分栏选项",
-  "Resize columns": "调整栏宽",
   "Drag to resize; double-click to distribute evenly":
     "拖动调整栏宽；双击恢复均分",
   "Column actions": "当前栏操作",
@@ -202,7 +248,8 @@ const ZH: Record<string, string> = {
   "Tasks with checkboxes": "带复选框的任务",
   "Quoted text with a bar": "带引用条的文本",
   "Colored info box": "彩色信息框",
-  "Collapsible content": "可折叠的内容",
+  "Foldable block behind a triangle": "点三角形收起或展开",
+  "Colored box that folds": "可折叠的彩色标注框",
   "Blocks side by side": "块并排显示",
   "Fenced code with highlighting": "带语法高亮的代码",
   "Rows and columns": "行与列",
@@ -223,6 +270,7 @@ const ZH: Record<string, string> = {
 
   // Drag affordances
   "Insert block below": "在下方插入块",
+  "Insert block above": "在上方插入块",
   "Drag block": "拖拽块",
   "Drag table": "拖拽整张表格",
   "{n} lines": "{n} 行",
@@ -234,6 +282,7 @@ const ZH: Record<string, string> = {
   Copy: "复制",
   Delete: "删除",
   "Copied {n} blocks.": "已复制 {n} 个块。",
+  "Could not write to the clipboard.": "无法写入剪贴板。",
 
   // Floating toolbar
   "Formatting toolbar": "格式工具栏",
@@ -260,7 +309,8 @@ const ZH: Record<string, string> = {
   // Slash menu
   "To-do list": "待办列表",
   Callout: "标注",
-  "Toggle (foldable callout)": "折叠块(可折叠标注)",
+  Toggle: "折叠块",
+  "Foldable callout": "可折叠标注",
   "Code block": "代码块",
   Table: "表格",
   Divider: "分割线",

@@ -1,4 +1,4 @@
-import { EditorState } from "@codemirror/state";
+import { EditorState, Text } from "@codemirror/state";
 import { parser } from "@lezer/markdown";
 import {
   collectListLineStyles,
@@ -10,6 +10,7 @@ import {
   indentCharsForColumns,
   insertBlockBelow,
   inlineListQuoteMarker,
+  quotedListMarker,
   listNestingDepth,
   moveBlock,
   pickIndentByDrag,
@@ -48,6 +49,49 @@ const makeView = (text) => {
   );
   ok("ordinary list item has no quote marker", inlineListQuoteMarker("- item") == null);
   ok("indented child quote is handled normally", inlineListQuoteMarker("  > quote") == null);
+}
+
+/* HyperMD hands a quote line nothing but quote classes, so a list inside a
+   blockquote needs its marker located for the bullet decoration. */
+{
+  const at = (text) => JSON.stringify(quotedListMarker(text));
+  ok(
+    "bullet inside a quote",
+    at("> - item") === JSON.stringify({ from: 2, to: 3, ordered: false }),
+    at("> - item")
+  );
+  ok(
+    "nested bullet keeps its own column",
+    at(">   - item") === JSON.stringify({ from: 4, to: 5, ordered: false }),
+    at(">   - item")
+  );
+  ok(
+    "ordered marker is flagged",
+    at("> > 12) item") === JSON.stringify({ from: 4, to: 7, ordered: true }),
+    at("> > 12) item")
+  );
+  ok("tight quote marker", at(">- item") === JSON.stringify({ from: 1, to: 2, ordered: false }));
+  ok("plain quote text is not a list", quotedListMarker("> item") == null);
+  ok("a dash needs a space after it", quotedListMarker("> -item") == null);
+  ok("a list outside a quote is Obsidian's job", quotedListMarker("- item") == null);
+  ok("a horizontal rule is not a list", quotedListMarker("> ---") == null);
+}
+
+/* A fence inside a blockquote is found with its quote prefix, so the code
+   rows can be painted; an unclosed one still reports the run. */
+{
+  const quoted = scanFences(Text.of(["> ```python", "> x = 1", "> ```", "after"]));
+  ok("quoted fence found", quoted.length === 1, JSON.stringify(quoted));
+  ok(
+    "quoted fence spans only its rows",
+    quoted[0]?.startLine === 1 && quoted[0]?.endLine === 3 && quoted[0]?.closed,
+    JSON.stringify(quoted[0])
+  );
+  ok("quoted fence records its depth", quoted[0]?.quoteDepth === 1);
+  ok(
+    "a closer at another quote depth does not close it",
+    scanFences(Text.of(["> ```", "> > ```", "> x"]))[0]?.closed === false
+  );
 }
 
 /* Ordered labels match native counter semantics, including wide alpha and

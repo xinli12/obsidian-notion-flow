@@ -21,6 +21,89 @@ body {
   --nf-pop-blur: blur(18px);
 }
 
+/* ---------- Writing palette ----------
+   Ink for the text and highlight swatches, list markers, quote bars and
+   inline code. Deliberately NOT Obsidian's --color-* variables: those are
+   UI signal colors (its light-mode red is a near-neon #e93147) and read as
+   shouting inside a sentence. These are one low-chroma step per hue, held
+   at a comparable weight so no swatch jumps out of a paragraph, with a
+   separate set for dark mode where the same ink would go muddy.
+
+   main.ts writes these into the note as var(--nf-NAME, #hex); the hex is
+   the light value, so a color survives an HTML export or a disabled
+   plugin. Keep the two in sync. */
+body {
+  --nf-gray: #7c7b77;
+  --nf-gray-rgb: 124, 123, 119;
+  --nf-red: #b5554d;
+  --nf-red-rgb: 181, 85, 77;
+  --nf-orange: #b87333;
+  --nf-orange-rgb: 184, 115, 51;
+  --nf-yellow: #a9822f;
+  --nf-yellow-rgb: 169, 130, 47;
+  --nf-green: #4e8060;
+  --nf-green-rgb: 78, 128, 96;
+  --nf-cyan: #43868c;
+  --nf-cyan-rgb: 67, 134, 140;
+  --nf-blue: #4a7ca6;
+  --nf-blue-rgb: 74, 124, 166;
+  --nf-purple: #7f62a3;
+  --nf-purple-rgb: 127, 98, 163;
+  --nf-pink: #a85480;
+  --nf-pink-rgb: 168, 84, 128;
+}
+body.theme-dark {
+  --nf-gray: #9a9a95;
+  --nf-gray-rgb: 154, 154, 149;
+  --nf-red: #ce7a73;
+  --nf-red-rgb: 206, 122, 115;
+  --nf-orange: #c98b52;
+  --nf-orange-rgb: 201, 139, 82;
+  --nf-yellow: #c2a45c;
+  --nf-yellow-rgb: 194, 164, 92;
+  --nf-green: #6fa98a;
+  --nf-green-rgb: 111, 169, 138;
+  --nf-cyan: #6ba5a8;
+  --nf-cyan-rgb: 107, 165, 168;
+  --nf-blue: #7b9fc9;
+  --nf-blue-rgb: 123, 159, 201;
+  --nf-purple: #a183c9;
+  --nf-purple-rgb: 161, 131, 201;
+  --nf-pink: #c482a5;
+  --nf-pink-rgb: 196, 130, 165;
+}
+
+/* ---------- Colored formulas ----------
+   A <span> cannot color math: on inactive Live Preview lines Obsidian
+   rebuilds an inline HTML element from its raw source, so the formula
+   would come out as literal dollar signs. main.ts puts the color inside
+   the delimiters instead, as \class{mjx-nf-NAME}{…} — MathJax's `safe`
+   filter only passes class names starting with mjx-, and the class lands
+   on the rendered element, where these rules pick it up in every view. */
+.mjx-nf-gray { color: var(--nf-gray); }
+.mjx-nf-red { color: var(--nf-red); }
+.mjx-nf-orange { color: var(--nf-orange); }
+.mjx-nf-yellow { color: var(--nf-yellow); }
+.mjx-nf-green { color: var(--nf-green); }
+.mjx-nf-cyan { color: var(--nf-cyan); }
+.mjx-nf-blue { color: var(--nf-blue); }
+.mjx-nf-purple { color: var(--nf-purple); }
+.mjx-nf-pink { color: var(--nf-pink); }
+
+[class*="mjx-nfbg-"] {
+  border-radius: 3px;
+  padding: 0 1px;
+}
+.mjx-nfbg-gray { background-color: rgba(var(--nf-gray-rgb), 0.18); }
+.mjx-nfbg-red { background-color: rgba(var(--nf-red-rgb), 0.18); }
+.mjx-nfbg-orange { background-color: rgba(var(--nf-orange-rgb), 0.18); }
+.mjx-nfbg-yellow { background-color: rgba(var(--nf-yellow-rgb), 0.2); }
+.mjx-nfbg-green { background-color: rgba(var(--nf-green-rgb), 0.18); }
+.mjx-nfbg-cyan { background-color: rgba(var(--nf-cyan-rgb), 0.18); }
+.mjx-nfbg-blue { background-color: rgba(var(--nf-blue-rgb), 0.18); }
+.mjx-nfbg-purple { background-color: rgba(var(--nf-purple-rgb), 0.18); }
+.mjx-nfbg-pink { background-color: rgba(var(--nf-pink-rgb), 0.18); }
+
 /* ---------- Drag handle + insert button ---------- */
 .nf-block-controls {
   position: fixed;
@@ -603,6 +686,19 @@ body.nf-selecting-blocks * {
   width: 15px;
   height: 15px;
 }
+/* Notion's empty-block hint, on the empty line holding the caret. It is
+   generated content on the line box itself, so it adds no node the caret
+   can enter, no text the selection can take, and nothing to the note; the
+   string arrives translated as --nf-empty-hint on body. pointer-events are
+   off so a click beside it still lands on the line. */
+.markdown-source-view.mod-cm6.is-live-preview .cm-line.nf-empty-hint::after {
+  content: var(--nf-empty-hint, "Type / for commands");
+  color: var(--text-faint);
+  font-style: normal;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
 .nf-slash-main {
   display: flex;
   flex-direction: column;
@@ -830,6 +926,85 @@ body .markdown-source-view.is-live-preview
   color: var(--list-marker-color-collapsed);
 }
 
+/* ---------- One list column ------------------------------------- */
+/* A list item must not move when the caret lands on its line. Obsidian
+   itself puts the two states on different columns: a rendered item is
+   indented by `li { margin-inline-start: 3ch }`, while an edit row is
+   indented by --list-indent-editing plus the literal "- " it still shows —
+   about 1.45em. Clicking into a list therefore nudged its text, and the
+   rendered side carried a second, larger step of its own, so Reading view
+   sat a full extra indent to the right of the row that replaces it.
+   One column is declared here and BOTH states are held to it: the edit
+   row's marker box is floored at that width, and a rendered item takes it
+   as its margin. Ordered lists are left on 3ch — that is what "1. " already
+   measures in an edit row, and a rendered `::marker` needs the room for
+   wider numbers.
+
+   min-width, not width: a marker box that is naturally wider must keep its
+   own size. A task line's checkbox lives INSIDE this box, and a font with a
+   wide hyphen would otherwise overlap the text that follows it. */
+body.nf-clean {
+  /* The column, the center of the dot, and the same pair for a task line.
+     All four read off what Live Preview already draws, so the edit row
+     barely moves and the rendered item comes to meet it.
+
+     Expressed against --font-text-size rather than in em: the very same
+     lengths are read on a task checkbox, an <input> whose own font-size is
+     the browser's 13.3px default, where an em would quietly resolve to a
+     different number than it does on the item beside it. */
+  --nf-list-col: calc(var(--font-text-size, 16px) * 1.45);
+  --nf-list-dot: calc(var(--font-text-size, 16px) * 0.97);
+  --nf-list-task-col: calc(var(--font-text-size, 16px) * 2.55);
+  --nf-list-check: calc(var(--font-text-size, 16px) * 1.21);
+  --nf-check-size: calc(var(--font-text-size, 16px) * 0.875);
+}
+body.nf-clean .markdown-source-view.is-live-preview .cm-formatting-list-ul {
+  display: inline-block;
+  box-sizing: border-box;
+  min-width: var(--nf-list-col);
+}
+/* Every rendered surface, not just Reading view: Live Preview draws its
+   Callouts, embeds and hover previews through the same markup, and those
+   are exactly the blocks whose rows get swapped for edit rows. */
+body.nf-clean .markdown-rendered ul > li {
+  margin-inline-start: var(--nf-list-col);
+}
+body.nf-clean .markdown-rendered ul > li > .list-bullet {
+  margin-inline-start: calc(var(--nf-list-dot) - var(--nf-list-col));
+}
+/* Nested levels compose differently in the two states, so the margins that
+   restore them are not simply --list-indent. A rendered item is indented
+   RELATIVE to its parent's text column; an edit row is indented absolutely,
+   by a tab stop (--list-indent) plus its own marker. Equal columns therefore
+   need `--list-indent + own column - parent column`, which cancels to plain
+   --list-indent only while marker and parent agree — the same-type case. */
+body.nf-clean .markdown-rendered :is(ul, ol) ul > li {
+  margin-inline-start: var(--list-indent);
+}
+body.nf-clean .markdown-rendered ol ul > li {
+  margin-inline-start: calc(var(--list-indent) + var(--nf-list-col) - 3ch);
+}
+body.nf-clean .markdown-rendered :is(ul, ol) ol > li {
+  margin-inline-start: var(--list-indent);
+}
+body.nf-clean .markdown-rendered ul ol > li {
+  margin-inline-start: calc(var(--list-indent) + 3ch - var(--nf-list-col));
+}
+/* A task item's marker is its checkbox, and the two states place it in
+   opposite ways: an edit row keeps it inside the marker box, while a
+   rendered item hangs it outside its own column with a negative margin. So
+   the checkbox is re-placed against the column instead — start margin puts
+   the box on the edit row's checkbox, end margin puts the text that follows
+   on the edit row's column. Only the checkbox moves; the item keeps the
+   plain bullet margin, which is what lets this hold at every depth. */
+body.nf-clean .markdown-rendered ul > li.task-list-item > .task-list-item-checkbox,
+body.nf-clean .markdown-rendered ul > li.task-list-item > p > .task-list-item-checkbox {
+  margin-inline-start: calc(var(--nf-list-check) - var(--nf-list-col));
+  margin-inline-end: calc(
+    var(--nf-list-task-col) - var(--nf-list-check) - var(--nf-check-size)
+  );
+}
+
 /* ---------- Cleaner WYSIWYG rendering ---------- */
 
 /* Hide ">" only while reading. Restore it on the active source line so
@@ -901,20 +1076,29 @@ body.nf-clean .markdown-source-view.is-live-preview .cm-active .cm-formatting-he
   opacity: 0.15;
 }
 
-/* Task checkboxes: rounder, accent-colored, slightly larger */
-body.nf-clean .markdown-source-view.is-live-preview .task-list-item-checkbox {
+/* Task checkboxes: rounder, accent-colored, slightly larger. Rendered
+   surfaces take the same box, not only the editor: a task line that changed
+   shape as the caret arrived would undo the shared column below, which
+   positions the text by subtracting exactly this width. */
+body.nf-clean
+  :is(.markdown-source-view.is-live-preview, .markdown-rendered)
+  .task-list-item-checkbox {
   border-radius: 5px;
-  width: 1.05em;
-  height: 1.05em;
+  width: var(--nf-check-size);
+  height: var(--nf-check-size);
   border: 1.5px solid var(--text-faint);
   cursor: pointer;
   transition: background-color 0.1s ease, transform 0.08s ease, border-color 0.1s ease;
 }
-body.nf-clean .markdown-source-view.is-live-preview .task-list-item-checkbox:hover {
+body.nf-clean
+  :is(.markdown-source-view.is-live-preview, .markdown-rendered)
+  .task-list-item-checkbox:hover {
   border-color: var(--interactive-accent);
   transform: scale(1.1);
 }
-body.nf-clean .markdown-source-view.is-live-preview .task-list-item-checkbox:checked {
+body.nf-clean
+  :is(.markdown-source-view.is-live-preview, .markdown-rendered)
+  .task-list-item-checkbox:checked {
   background-color: var(--interactive-accent);
   border-color: var(--interactive-accent);
 }
@@ -955,16 +1139,20 @@ body.nf-callout-menu .markdown-source-view.mod-cm6 .cm-embed-block.cm-callout .c
    still receive this treatment. */
 body.nf-callout-menu
   :is(.markdown-source-view.is-live-preview, .markdown-reading-view)
-  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"]) {
+  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"]):not([data-callout="nf-toggle"]) {
   --callout-radius: 10px;
   position: relative;
   overflow: clip;
   padding: 0;
-  border: 1px solid rgba(var(--callout-color, var(--callout-default)), 0.2);
+  border: 1px solid color-mix(
+    in srgb,
+    var(--callout-color, var(--callout-default)) 20%,
+    transparent
+  );
   border-radius: var(--callout-radius);
   background-color: color-mix(
     in srgb,
-    rgb(var(--callout-color, var(--callout-default))) 7%,
+    var(--callout-color, var(--callout-default)) 7%,
     var(--background-primary)
   );
   box-shadow: none;
@@ -972,30 +1160,42 @@ body.nf-callout-menu
 }
 body.nf-callout-menu
   :is(.markdown-source-view.is-live-preview, .markdown-reading-view)
-  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"]):hover {
-  border-color: rgba(var(--callout-color, var(--callout-default)), 0.34);
+  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"]):not([data-callout="nf-toggle"]):hover {
+  border-color: color-mix(
+    in srgb,
+    var(--callout-color, var(--callout-default)) 34%,
+    transparent
+  );
   background-color: color-mix(
     in srgb,
-    rgb(var(--callout-color, var(--callout-default))) 9%,
+    var(--callout-color, var(--callout-default)) 9%,
     var(--background-primary)
   );
 }
 body.nf-callout-menu
   :is(.markdown-source-view.is-live-preview, .markdown-reading-view)
-  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"])
+  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"]):not([data-callout="nf-toggle"])
   > .callout-title {
   align-items: center;
   gap: 7px;
   min-height: 20px;
   padding: 10px 13px 9px;
-  color: rgb(var(--callout-color, var(--callout-default)));
-  border-bottom: 1px solid rgba(var(--callout-color, var(--callout-default)), 0.1);
-  background-color: rgba(var(--callout-color, var(--callout-default)), 0.035);
+  color: var(--callout-color, var(--callout-default));
+  border-bottom: 1px solid color-mix(
+    in srgb,
+    var(--callout-color, var(--callout-default)) 10%,
+    transparent
+  );
+  background-color: color-mix(
+    in srgb,
+    var(--callout-color, var(--callout-default)) 3.5%,
+    transparent
+  );
   line-height: 1.35;
 }
 body.nf-callout-menu
   :is(.markdown-source-view.is-live-preview, .markdown-reading-view)
-  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"])
+  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"]):not([data-callout="nf-toggle"])
   > .callout-title .callout-icon {
   display: inline-flex;
   flex: 0 0 auto;
@@ -1011,7 +1211,7 @@ body.nf-callout-menu
 }
 body.nf-callout-menu
   :is(.markdown-source-view.is-live-preview, .markdown-reading-view)
-  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"])
+  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"]):not([data-callout="nf-toggle"])
   > .callout-title .callout-icon svg {
   width: 18px;
   height: 18px;
@@ -1019,14 +1219,14 @@ body.nf-callout-menu
 }
 body.nf-callout-menu
   :is(.markdown-source-view.is-live-preview, .markdown-reading-view)
-  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"])
+  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"]):not([data-callout="nf-toggle"])
   > .callout-title .callout-title-inner {
   letter-spacing: -0.008em;
   font-weight: 650;
 }
 body.nf-callout-menu
   :is(.markdown-source-view.is-live-preview, .markdown-reading-view)
-  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"])
+  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"]):not([data-callout="nf-toggle"])
   > .callout-title .callout-fold {
   margin-inline-start: auto;
   padding: 3px;
@@ -1036,14 +1236,18 @@ body.nf-callout-menu
 }
 body.nf-callout-menu
   :is(.markdown-source-view.is-live-preview, .markdown-reading-view)
-  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"])
+  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"]):not([data-callout="nf-toggle"])
   > .callout-title .callout-fold:hover {
-  background-color: rgba(var(--callout-color, var(--callout-default)), 0.12);
+  background-color: color-mix(
+    in srgb,
+    var(--callout-color, var(--callout-default)) 12%,
+    transparent
+  );
   opacity: 1;
 }
 body.nf-callout-menu
   :is(.markdown-source-view.is-live-preview, .markdown-reading-view)
-  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"])
+  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"]):not([data-callout="nf-toggle"])
   > .callout-content {
   padding-block: 2px 12px;
   padding-inline: 38px 14px;
@@ -1052,25 +1256,25 @@ body.nf-callout-menu
 }
 body.nf-callout-menu
   :is(.markdown-source-view.is-live-preview, .markdown-reading-view)
-  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"])
+  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"]):not([data-callout="nf-toggle"])
   > .callout-content > :first-child {
   margin-top: 0.25em;
 }
 body.nf-callout-menu
   :is(.markdown-source-view.is-live-preview, .markdown-reading-view)
-  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"])
+  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"]):not([data-callout="nf-toggle"])
   > .callout-content > :last-child {
   margin-bottom: 0;
 }
 body.nf-callout-menu
   :is(.markdown-source-view.is-live-preview, .markdown-reading-view)
-  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"])
+  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"]):not([data-callout="nf-toggle"])
   > .callout-content :is(ul, ol) {
   margin-block: 0.45em;
 }
 body.nf-callout-menu
   :is(.markdown-source-view.is-live-preview, .markdown-reading-view)
-  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"])
+  .callout:not([data-callout="nf-cols"]):not([data-callout="nf-col"]):not([data-callout="nf-toggle"])
   > .callout-content .callout {
   margin-block: 0.75em 0.15em;
 }
@@ -1084,39 +1288,456 @@ body.nf-callout-menu
    16px overhang, resolving to 0 for top-level Callouts. */
 body.nf-callout-menu .markdown-source-view.is-live-preview .cm-line.nf-co-edit {
   isolation: isolate;
+}
+/* The Callout box replaces the quote bar Obsidian would draw for the ">"
+   markers — except on a row that is ALSO inside a plain quote nested in the
+   box, where the rendered Callout does show a bar. Those rows keep the
+   theme's thickness and get the bar put where the rendered one stands. */
+body.nf-callout-menu .markdown-source-view.is-live-preview
+  .cm-line.nf-co-edit:not(.nf-co-quote) {
   --blockquote-border-thickness: 0px;
+}
+body.nf-callout-menu .markdown-source-view.is-live-preview
+  .cm-line.nf-co-edit.nf-co-quote::before {
+  inset-inline-start: calc(
+    var(--nf-nest, 16px) - 16px + var(--nf-co-plain-depth, 0) * 0.7em +
+      var(--nf-co-depth, 1) * var(--nf-co-inset, 39px) +
+      (var(--nf-co-quote-depth, 1) - 1) * var(--nf-co-quote-step, 26px)
+  ) !important;
 }
 body.nf-callout-menu .markdown-source-view.is-live-preview .cm-line.nf-co-edit::after {
   content: "";
   position: absolute;
   z-index: -1;
-  inset-block: 0;
-  inset-inline-start: calc(var(--nf-nest, 16px) - 16px);
-  inset-inline-end: 0;
+  inset-block-start: var(--nf-co-nested-gap-top, 0px);
+  inset-block-end: var(--nf-co-nested-gap-bottom, 0px);
+  inset-inline-start: calc(
+    var(--nf-nest, 16px) - 16px +
+      (var(--nf-co-depth, 1) - 1) * var(--nf-co-inset, 39px) +
+      var(--nf-co-plain-depth, 0) * 0.7em
+  );
+  inset-inline-end: calc(
+    (var(--nf-co-depth, 1) - 1) * var(--nf-co-code-end, 15px)
+  );
+  box-sizing: border-box;
+  border-inline: 1px solid
+    color-mix(
+      in srgb,
+      var(--callout-color, var(--callout-default)) 20%,
+      transparent
+    );
   background-color: color-mix(
     in srgb,
-    rgb(var(--callout-color, var(--callout-default))) 7%,
+    var(--callout-color, var(--callout-default)) 7%,
     var(--background-primary)
   );
   pointer-events: none;
 }
+/* A child Callout does not replace its parent's tint. The child owns ::after;
+   this second layer keeps the immediate parent box continuous through the
+   child's margin and side gutters, matching the nested rendered DOM. */
+body.nf-callout-menu .markdown-source-view.is-live-preview
+  .cm-line.nf-co-edit.nf-co-nested::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inline-size: auto;
+  block-size: auto;
+  width: auto !important;
+  height: auto !important;
+  max-width: none !important;
+  border: 0;
+  margin: 0;
+  opacity: 1;
+  transform: none;
+  inset-block: 0;
+  inset-inline-start: calc(
+    var(--nf-nest, 16px) - 16px +
+      (var(--nf-co-depth, 2) - 2) * var(--nf-co-inset, 39px) +
+      var(--nf-co-plain-depth, 0) * 0.7em
+  );
+  inset-inline-end: calc(
+    (var(--nf-co-depth, 2) - 2) * var(--nf-co-code-end, 15px)
+  ) !important;
+  box-sizing: border-box;
+  border-inline: 1px solid
+    color-mix(
+      in srgb,
+      var(--nf-co-parent-color, var(--callout-default)) 20%,
+      transparent
+    );
+  background-color: color-mix(
+    in srgb,
+    var(--nf-co-parent-color, var(--callout-default)) 7%,
+    var(--background-primary)
+  );
+  pointer-events: none;
+}
+/* Obsidian also owns the quote ::before pseudo-element and some themes
+   constrain it to the quote-rule width. Paint the parent on the line as a
+   reliable base layer too; the child's negative-z pseudo-element remains
+   above this background and supplies its own inset color. */
+body.nf-callout-menu .markdown-source-view.is-live-preview
+  :is(.cm-line.nf-co-edit, .cm-line.nf-co-code).nf-co-nested {
+  background-color: color-mix(
+    in srgb,
+    var(--nf-co-parent-color, var(--callout-default)) 7%,
+    var(--background-primary)
+  ) !important;
+}
+/* A fenced block inside an OPEN Callout needs two backgrounds: the Callout
+   tint across the whole row, and the code card inset within it. The card
+   already owns ::after (see .cm-line.nf-qcode), so the tint takes ::before
+   on a layer behind it. Without this the code rows kept the card but lost
+   the tint, so an edited Callout appeared to break open around its code. */
+body.nf-callout-menu .markdown-source-view.is-live-preview .cm-line.nf-co-code {
+  isolation: isolate;
+  --blockquote-border-thickness: 0px;
+}
+body.nf-callout-menu .markdown-source-view.is-live-preview
+  .cm-line.nf-co-code::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inline-size: auto;
+  block-size: auto;
+  width: auto !important;
+  height: auto !important;
+  max-width: none !important;
+  border: 0;
+  margin: 0;
+  opacity: 1;
+  transform: none;
+  inset-block-start: var(--nf-co-nested-gap-top, 0px);
+  inset-block-end: var(--nf-co-nested-gap-bottom, 0px);
+  inset-inline-start: calc(
+    var(--nf-nest, 16px) - 16px +
+      (var(--nf-co-depth, 1) - 1) * var(--nf-co-inset, 39px) +
+      var(--nf-co-plain-depth, 0) * 0.7em
+  );
+  inset-inline-end: calc(
+    (var(--nf-co-depth, 1) - 1) * var(--nf-co-code-end, 15px)
+  );
+  box-sizing: border-box;
+  border-inline: 1px solid
+    color-mix(
+      in srgb,
+      var(--callout-color, var(--callout-default)) 20%,
+      transparent
+    );
+  background-color: color-mix(
+    in srgb,
+    var(--callout-color, var(--callout-default)) 7%,
+    var(--background-primary)
+  );
+  pointer-events: none;
+}
+/* Code already uses ::after for its card, so both Callout layers share the
+   tint pseudo-element. The parent fills it; the child is a precisely inset
+   background layer above it. */
+body.nf-callout-menu .markdown-source-view.is-live-preview
+  .cm-line.nf-co-code.nf-co-nested::before {
+  inset-block: 0;
+  inset-inline-start: calc(
+    var(--nf-nest, 16px) - 16px +
+      (var(--nf-co-depth, 2) - 2) * var(--nf-co-inset, 39px) +
+      var(--nf-co-plain-depth, 0) * 0.7em
+  );
+  inset-inline-end: calc(
+    (var(--nf-co-depth, 2) - 2) * var(--nf-co-code-end, 15px)
+  ) !important;
+  background:
+    linear-gradient(
+        color-mix(
+          in srgb,
+          var(--callout-color, var(--callout-default)) 7%,
+          var(--background-primary)
+        ),
+        color-mix(
+          in srgb,
+          var(--callout-color, var(--callout-default)) 7%,
+          var(--background-primary)
+        )
+      )
+      var(--nf-co-inset, 39px) var(--nf-co-nested-gap-top, 0px) /
+      calc(100% - var(--nf-co-inset, 39px) - var(--nf-co-code-end, 15px))
+      calc(
+        100% - var(--nf-co-nested-gap-top, 0px) -
+          var(--nf-co-nested-gap-bottom, 0px)
+      )
+      no-repeat,
+    linear-gradient(
+      color-mix(
+        in srgb,
+        var(--nf-co-parent-color, var(--callout-default)) 7%,
+        var(--background-primary)
+      ),
+      color-mix(
+        in srgb,
+        var(--nf-co-parent-color, var(--callout-default)) 7%,
+        var(--background-primary)
+      )
+    );
+}
+body.nf-callout-menu .markdown-source-view.is-live-preview
+  .cm-line.nf-co-code.nf-co-first::before {
+  border-block-start: 1px solid
+    color-mix(
+      in srgb,
+      var(--callout-color, var(--callout-default)) 20%,
+      transparent
+    );
+  border-start-start-radius: var(--callout-radius, 10px);
+  border-start-end-radius: var(--callout-radius, 10px);
+}
+body.nf-callout-menu .markdown-source-view.is-live-preview
+  .cm-line.nf-co-code.nf-co-last::before {
+  border-block-end: 1px solid
+    color-mix(
+      in srgb,
+      var(--callout-color, var(--callout-default)) 20%,
+      transparent
+    );
+  border-end-start-radius: var(--callout-radius, 10px);
+  border-end-end-radius: var(--callout-radius, 10px);
+}
+/* Card box. In a rendered Callout the nested block's leading edge sits on
+   the very same column as the body text, so the card is expressed with the
+   content inset rather than with its own measured offset — one number, and
+   the one already proven to line the two states up. Only the trailing inset
+   needs its own value, since nothing else establishes it. */
+body.nf-callout-menu .markdown-source-view.is-live-preview
+  .cm-line.nf-co-code.nf-qcode::after {
+  inset-inline-start: calc(
+    var(--nf-nest, 16px) - 16px +
+      var(--nf-co-depth, 1) * var(--nf-co-inset, 39px) +
+      var(--nf-co-plain-depth, 0) * 0.7em
+  );
+  inset-inline-end: calc(
+    var(--nf-co-depth, 1) * var(--nf-co-code-end, 15px)
+  );
+}
+/* The fence's opener row has no prefix gap — the language chip replaces the
+   whole `> ```lang` token — so the chip itself carries the indent that puts
+   it on the card's text column, matching the body rows above. */
+body.nf-callout-menu .markdown-source-view.is-live-preview
+  .cm-line.nf-co-code .nf-visual-code-fence {
+  margin-inline-start: calc(
+    (var(--nf-co-depth, 1) - 1) * var(--nf-co-inset, 39px) +
+      var(--nf-co-plain-depth, 0) * 0.7em +
+      var(--nf-co-inset, 39px) + var(--nf-co-code-pad, 16px)
+  );
+}
+/* Vertical air inside an open Callout comes from two independent sources, and
+   a rendered box STACKS them: the Callout's own padding, and the first/last
+   block's own margin (a nested code block contributes --nf-co-code-gap). A row
+   can need both at once — the last row of "> [!note]" + fence is the Callout's
+   last row AND the fence's closer — and two padding declarations cannot add
+   up, the more specific one just replaces the other. So the components are
+   declared as custom properties and summed once, below. Getting this wrong is
+   invisible in the common case and wrong by exactly one gap in the shape users
+   write most.
+   Padding, not margin: CodeMirror derives line heights from these rows, and
+   collapsing margins would desync its height estimates from what is drawn.
+   The `.mod-cm6` in the selector is load-bearing, not decoration: the code-card
+   rules further down style a fence opener with `padding-block: 5px 2px` at the
+   same weight this rule would otherwise have, and being later in the file they
+   would win and drop the gap. */
+body.nf-callout-menu .markdown-source-view.mod-cm6.is-live-preview
+  :is(.cm-line.nf-co-edit, .cm-line.nf-co-code) {
+  padding-block-start: calc(
+    var(--nf-co-nested-gap-top, 0px) + var(--nf-co-air-top, 0px) +
+      var(--nf-co-gap-top, 0px) + var(--nf-co-content-gap-top, 0px)
+  );
+  padding-block-end: calc(
+    var(--nf-co-nested-gap-bottom, 0px) + var(--nf-co-air-bottom, 0px) +
+      var(--nf-co-gap-bottom, 0px) + var(--nf-co-title-bottom, 0px)
+  );
+}
+/* Match the rendered content's trailing inset too. Without it, long text
+   rewrapped only after the click, invalidating pointer-to-caret mapping even
+   though the leading column stayed aligned. */
+body.nf-callout-menu .markdown-source-view.mod-cm6.is-live-preview
+  .cm-line.nf-co-edit {
+  box-sizing: border-box;
+  padding-inline-end: calc(
+    var(--nf-co-depth, 1) * var(--nf-co-code-end, 15px)
+  );
+}
+/* ---------- The text column a wrapped row resumes at ---------------- */
+/* Prose inside an open Callout starts where the gap widget standing in for
+   the quote markers ends — but that widget is an inline box, invisible to
+   wrapping, so a second visual row would resume at the line's own left
+   edge, OUTSIDE the Callout. Obsidian has a pass that measures exactly this
+   column and writes `text-indent`/`padding-inline-start` inline, which is
+   why the shape looked solved; its cache is keyed by line NUMBER plus the
+   structural prefix, and every row of every Callout in the note presents
+   the same "> ", so a row can be handed a column that was measured for a
+   different row entirely — leaving wrapped text indented by an arbitrary
+   amount.
+
+   Declare the column rather than inheriting a measurement: pay it as
+   padding and cancel it for the first row with a negative text-indent, so
+   only wrapped rows move. `text-indent: <length> hanging` would say this
+   in one declaration and without any padding, but Obsidian ships
+   Chromium 142 and the keyword only arrives later — there the whole
+   declaration is dropped and wrapped rows fall out of the box, so it is
+   not available to us.
+
+   `!important` on both is what makes this authoritative — what it
+   overrides arrives as an inline style, and only an important declaration
+   outranks that. The formula mirrors `.nf-callout-prefix`'s width, so
+   text, wrap and widget share one column by construction.
+
+   Padding is safe for the row's painted layers: an absolutely positioned
+   child resolves against the PADDING BOX, whose edge is the border edge —
+   the padding area sits inside it, so the card and the tint do not move.
+   (Verified; assuming otherwise cost this fix two wrong iterations.) */
+body.nf-callout-menu .markdown-source-view.mod-cm6.is-live-preview
+  .cm-line.nf-co-edit.nf-co-hang {
+  --nf-row-hang: calc(
+    var(--nf-co-plain-depth, 0) * 0.7em +
+      var(--nf-co-depth, 1) * var(--nf-co-inset, 39px) +
+      var(--nf-co-quote-depth, 0) * var(--nf-co-quote-step, 26px)
+  );
+  padding-inline-start: var(--nf-row-hang) !important;
+  text-indent: calc(var(--nf-row-hang) * -1) !important;
+}
+/* The Callout's own air, measured off the rendered box for the same reason its
+   horizontal insets are: the value is theme-defined (Obsidian's default is 12px
+   via --callout-padding, not the 8px this once assumed), so an opened Callout
+   used to sit tighter than the box it replaced. The measurement deliberately
+   excludes the first/last block's own margin, which arrives as a gap below. */
 body.nf-callout-menu .markdown-source-view.is-live-preview .cm-line.nf-co-first {
-  padding-top: var(--size-4-2, 8px);
+  --nf-co-air-top: var(--nf-co-top, 11px);
+  --nf-co-title-bottom: 10px;
+  line-height: 1.35;
 }
 body.nf-callout-menu .markdown-source-view.is-live-preview .cm-line.nf-co-last {
-  padding-bottom: var(--size-4-2, 8px);
+  --nf-co-air-bottom: var(--nf-co-bottom, 13px);
+}
+/* A title-only Callout has no content padding below it; keep only the
+   outside bottom border instead of adding a full body inset. */
+body.nf-callout-menu .markdown-source-view.is-live-preview
+  .cm-line.nf-co-first.nf-co-last {
+  --nf-co-air-bottom: 1px;
+}
+/* The rendered content owns 2px of padding before its first child. Ordinary
+   prose/table rows also have the shared first-child 0.25em margin; a list,
+   nested Callout and code card supply their own block margin separately. */
+body.nf-callout-menu .markdown-source-view.is-live-preview
+  .cm-line.nf-co-content-first {
+  --nf-co-content-gap-top: calc(2px + 0.25em);
+}
+body.nf-callout-menu .markdown-source-view.is-live-preview
+  .cm-line.nf-co-content-first:is(.nf-co-first, .nf-qcode) {
+  --nf-co-content-gap-top: 2px;
+}
+body.nf-callout-menu .markdown-source-view.is-live-preview
+  .cm-line.nf-co-content-first.nf-qlist {
+  --nf-co-content-gap-top: calc(2px + 0.45em);
+}
+/* A rendered Callout nested inside another Callout carries its own block
+   margin. Keep that air while the outer widget has expanded to source rows,
+   otherwise the inner title jumps upward and every following row follows it. */
+body.nf-callout-menu .markdown-source-view.is-live-preview
+  .cm-line.nf-co-nested.nf-co-first {
+  --nf-co-nested-gap-top: 0.75em;
+}
+body.nf-callout-menu .markdown-source-view.is-live-preview
+  .cm-line.nf-co-nested.nf-co-last {
+  --nf-co-nested-gap-bottom: 0.15em;
+}
+/* A toggle is prose behind a triangle: the rendered box sets padding:0, so its
+   edit rows take none of the Callout's air either. A nested block's own gap
+   still applies, exactly as it does in the rendered toggle. */
+body.nf-callout-menu .markdown-source-view.is-live-preview
+  :is(.cm-line.nf-co-edit.nf-co-toggle, .cm-line.nf-co-code.nf-co-toggle) {
+  --nf-co-air-top: 0px;
+  --nf-co-air-bottom: 0px;
+}
+/* The block's own margin, on the rows that stand for its edges. */
+body.nf-callout-menu .markdown-source-view.is-live-preview
+  .cm-line.nf-co-code.nf-visual-fence-open {
+  --nf-co-gap-top: var(--nf-co-code-gap, 17px);
+}
+/* No counterpart for the closer: with code-block enhancements on (the default)
+   that row is deliberately collapsed to a 4px sliver standing for the card's
+   bottom edge — `padding-block: 0 !important` — so a gap declared here could
+   never be honored. The card's lower air is expressed by the sliver itself. */
+
+/* ...but when the sliver is ALSO the Callout's last row, the Callout's own
+   bottom padding still has to follow it, or the tint ends flush against the
+   card. This is the one place that has to out-weigh the collapse's
+   `!important`, which exists to stop the sliver being inflated — not to stop
+   the Callout from closing properly. */
+body.nf-callout-menu .markdown-source-view.mod-cm6.is-live-preview
+  .cm-line.nf-co-code.nf-visual-fence-close.nf-co-last {
+  /* Through the air variable, not --nf-co-bottom directly, so a toggle — which
+     zeroes that variable because its rendered box has no padding — is not
+     handed air here by the back door. */
+  padding-block-end: var(--nf-co-air-bottom, 0px) !important;
+}
+/* The card layer spans inset-block:0, so the padding above would just make the
+   card taller. Pulling it in by exactly the row's padding turns that space into
+   Callout tint above and below the card — which is what the rendered block
+   shows — and keeps card and padding from drifting apart. */
+body.nf-callout-menu .markdown-source-view.is-live-preview
+  .cm-line.nf-co-code.nf-qcode::after {
+  inset-block-start: calc(
+    var(--nf-co-air-top, 0px) + var(--nf-co-gap-top, 0px)
+  );
+  inset-block-end: calc(
+    var(--nf-co-air-bottom, 0px) + var(--nf-co-gap-bottom, 0px)
+  );
 }
 body.nf-callout-menu .markdown-source-view.is-live-preview .cm-line.nf-co-first::after {
-  border-start-start-radius: var(--callout-radius, var(--radius-s, 4px));
-  border-start-end-radius: var(--callout-radius, var(--radius-s, 4px));
+  border-block-start: 1px solid
+    color-mix(
+      in srgb,
+      var(--callout-color, var(--callout-default)) 20%,
+      transparent
+    );
+  border-start-start-radius: var(--callout-radius, 10px);
+  border-start-end-radius: var(--callout-radius, 10px);
+  background:
+    linear-gradient(
+      color-mix(
+        in srgb,
+        var(--callout-color, var(--callout-default)) 3.5%,
+        transparent
+      ),
+      color-mix(
+        in srgb,
+        var(--callout-color, var(--callout-default)) 3.5%,
+        transparent
+      )
+    ),
+    color-mix(
+      in srgb,
+      var(--callout-color, var(--callout-default)) 7%,
+      var(--background-primary)
+    );
+  box-shadow: inset 0 -1px
+    color-mix(
+      in srgb,
+      var(--callout-color, var(--callout-default)) 10%,
+      transparent
+    );
 }
 body.nf-callout-menu .markdown-source-view.is-live-preview .cm-line.nf-co-last::after {
-  border-end-start-radius: var(--callout-radius, var(--radius-s, 4px));
-  border-end-end-radius: var(--callout-radius, var(--radius-s, 4px));
+  border-block-end: 1px solid
+    color-mix(
+      in srgb,
+      var(--callout-color, var(--callout-default)) 20%,
+      transparent
+    );
+  border-end-start-radius: var(--callout-radius, 10px);
+  border-end-end-radius: var(--callout-radius, 10px);
 }
 /* Title row reads like the rendered title: type color, semibold. */
 body.nf-callout-menu .markdown-source-view.is-live-preview .cm-line.nf-co-first span.cm-quote {
-  color: rgb(var(--callout-color, var(--callout-default)));
+  color: var(--callout-color, var(--callout-default));
   font-weight: var(--callout-title-weight, 600);
 }
 /* Column scaffolding rows ("> [!nf-cols]", "> > [!nf-col]") are structure,
@@ -1129,6 +1750,488 @@ body.nf-callout-menu .markdown-source-view.is-live-preview .cm-line.nf-co-edit.n
   font-weight: 400;
   opacity: 0.75;
   font-size: 0.78em;
+}
+
+/* Structural Markdown stays in the document but never becomes the editing
+   surface. Replacement widgets reserve a stable text column, so switching
+   between rendered and editable blocks does not produce a horizontal jump. */
+body.nf-callout-menu .markdown-source-view.is-live-preview .nf-visual-prefix {
+  display: inline-block;
+  box-sizing: border-box;
+  height: 1px;
+  vertical-align: baseline;
+  pointer-events: none;
+  user-select: none;
+}
+/* One quote level costs a different amount depending on which side of the
+   Callout it is on. OUTSIDE the box it is a Live-Preview quote marker, which
+   Obsidian keeps narrow (the 0.7em gap below matches its own editor look).
+   INSIDE the box the rendered Callout shows a real blockquote — bar plus
+   `--size-4-6` of padding — and the edit rows have to spend the same, or the
+   text shifts the moment the caret arrives. */
+body.nf-callout-menu .markdown-source-view.is-live-preview {
+  --nf-co-quote-step: calc(
+    var(--blockquote-border-thickness, 2px) + var(--size-4-6, 24px)
+  );
+}
+/* Prefix gap = the rendered Callout's own content inset, measured rather
+   than guessed, so the body text column is identical in both states. The
+   39px fallback matches Obsidian's stock Callout until a themed box is
+   available to measure. */
+body.nf-callout-menu .markdown-source-view.is-live-preview .nf-callout-prefix {
+  width: calc(
+    var(--nf-prefix-outer-depth, 0) * 0.7em +
+      var(--nf-prefix-callout-depth, 1) * var(--nf-co-inset, 39px) +
+      var(--nf-prefix-inner-depth, 0) * var(--nf-co-quote-step, 26px)
+  );
+}
+/* A code row inside an open Callout must clear the content inset AND the
+   code card's own text padding — the rendered block indents its code by
+   both. Widening the gap is what actually moves the text: the widget is the
+   line's first inline box, so padding on the line does not shift it. */
+body.nf-callout-menu .markdown-source-view.is-live-preview
+  .nf-callout-prefix.is-code {
+  width: calc(
+    var(--nf-prefix-outer-depth, 0) * 0.7em +
+      var(--nf-prefix-callout-depth, 1) * var(--nf-co-inset, 39px) +
+      var(--nf-prefix-inner-depth, 0) * var(--nf-co-quote-step, 26px) +
+      var(--nf-co-code-pad, 16px)
+  );
+}
+body.nf-callout-menu .markdown-source-view.is-live-preview .nf-quote-prefix {
+  width: calc(0.7em * var(--nf-prefix-depth, 1));
+}
+
+body.nf-callout-menu .markdown-source-view.is-live-preview .nf-visual-callout-lead {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 25px;
+  color: var(--callout-color, var(--callout-default));
+  vertical-align: text-bottom;
+  user-select: none;
+  margin-inline-start: calc(
+    max(0px, calc(var(--nf-co-inset, 39px) - 25px)) +
+      (var(--nf-prefix-callout-depth, 1) - 1) * var(--nf-co-inset, 39px) +
+      var(--nf-prefix-outer-depth, 0) * 0.7em
+  );
+}
+body.nf-callout-menu .markdown-source-view.is-live-preview
+  .nf-visual-callout-lead > .callout-icon {
+  display: inline-flex;
+  flex: 0 0 18px;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  cursor: pointer;
+  opacity: 1;
+}
+body.nf-callout-menu .markdown-source-view.is-live-preview
+  .nf-visual-callout-lead > .callout-icon:hover {
+  opacity: 0.78;
+  transform: scale(1.08);
+}
+body.nf-callout-menu .markdown-source-view.is-live-preview
+  .nf-visual-callout-lead > .callout-icon svg {
+  width: 18px;
+  height: 18px;
+  stroke-width: 2;
+}
+body.nf-callout-menu .markdown-source-view.is-live-preview
+  .nf-visual-callout-default-title {
+  padding-inline-end: 2px;
+  font-weight: var(--callout-title-weight, 600);
+  letter-spacing: -0.008em;
+}
+
+/* Active fenced code stays a code card. The opening fence becomes a quiet
+   language chip; the closing fence collapses to the card's rounded edge. */
+body.nf-code-block-edit .markdown-source-view.is-live-preview
+  .cm-line.nf-visual-fence-open {
+  min-height: 28px;
+  padding-block: 5px 2px;
+}
+body.nf-code-block-edit .markdown-source-view.is-live-preview
+  .cm-line.nf-visual-fence-open .code-block-flair {
+  display: none;
+}
+/* Obsidian positions the language flair absolutely (top/right a few px).
+   Inside a rendered Callout the nearest positioned ancestor is the Callout
+   box, so the flair escaped to the Callout's top-right corner instead of
+   labelling the code block it belongs to. Giving the block its own
+   containing block puts the label back on the block. */
+.callout pre {
+  position: relative;
+}
+/* The chip is the code card's header row, not a badge sitting on top of it:
+   it reads as quiet chrome — no border, no fill — and firms up only under
+   the pointer, so a note full of code blocks is not a column of boxes. */
+body.nf-code-block-edit .markdown-source-view.is-live-preview
+  .nf-visual-code-fence {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-height: 20px;
+  padding: 1px 3px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--text-muted);
+  background: transparent;
+  font-family: var(--font-interface);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.2;
+  vertical-align: middle;
+  user-select: none;
+  transition: background-color 120ms ease;
+}
+body.nf-code-block-edit .markdown-source-view.is-live-preview
+  .nf-visual-code-fence:hover {
+  background: color-mix(
+    in srgb,
+    var(--background-modifier-hover) 70%,
+    transparent
+  );
+}
+/* The language label is a button: the chip replaces the whole "```lang"
+   token, so this is the only place the language can be changed without
+   leaving Live Preview. It has to read as the plain text it replaced until
+   the pointer is on it, hence no resting background or border. */
+body.nf-code-block-edit .markdown-source-view.is-live-preview
+  button.nf-visual-code-language {
+  margin: 0;
+  padding: 0 3px;
+  border: 0;
+  border-radius: 4px;
+  color: inherit;
+  background: transparent;
+  box-shadow: none;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  cursor: pointer;
+}
+body.nf-code-block-edit .markdown-source-view.is-live-preview
+  button.nf-visual-code-language:hover {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+body.nf-code-block-edit .markdown-source-view.is-live-preview
+  .nf-code-fold-toggle,
+.nf-rendered-code-fold {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  color: var(--text-faint);
+  background: transparent;
+  box-shadow: none;
+  cursor: pointer;
+}
+body.nf-code-block-edit .markdown-source-view.is-live-preview
+  .nf-code-fold-toggle:hover,
+.nf-rendered-code-fold:hover {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+body.nf-code-block-edit .markdown-source-view.is-live-preview
+  .nf-code-fold-toggle svg,
+.nf-rendered-code-fold svg {
+  width: 14px;
+  height: 14px;
+  transition: transform 120ms ease;
+}
+body.nf-code-block-edit .markdown-source-view.is-live-preview
+  .nf-visual-code-fence.is-collapsed .nf-code-fold-toggle svg,
+.nf-rendered-code-fold.is-collapsed svg {
+  transform: rotate(-90deg);
+}
+/* Always visible, never loud: a hover-revealed control on a code block is
+   both undiscoverable and unreliable to click, so it rests at low opacity
+   and comes up to full ink under the pointer. */
+body.nf-code-block-edit .markdown-source-view.is-live-preview
+  .nf-code-copy {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  opacity: 0.45;
+  color: inherit;
+  background: transparent;
+  box-shadow: none;
+  cursor: pointer;
+  transition: opacity 120ms ease, background-color 120ms ease;
+}
+body.nf-code-block-edit .markdown-source-view.is-live-preview
+  .nf-code-copy:hover {
+  opacity: 1;
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+body.nf-code-block-edit .markdown-source-view.is-live-preview
+  .nf-code-copy.is-copied {
+  opacity: 1;
+  color: var(--text-success, var(--interactive-accent));
+}
+body.nf-code-block-edit .markdown-source-view.is-live-preview
+  .nf-code-copy svg {
+  width: 13px;
+  height: 13px;
+}
+body.nf-code-block-edit .markdown-source-view.is-live-preview
+  .nf-visual-code-icon {
+  display: inline-flex;
+}
+body.nf-code-block-edit .markdown-source-view.is-live-preview
+  .nf-visual-code-icon svg {
+  width: 13px;
+  height: 13px;
+}
+body.nf-code-block-edit .markdown-source-view.is-live-preview
+  .cm-line.nf-visual-fence-close {
+  min-height: 4px !important;
+  height: 4px;
+  padding-block: 0 !important;
+  font-size: 0;
+  line-height: 4px;
+}
+body.nf-code-block-edit .markdown-source-view.is-live-preview
+  .nf-visual-code-fence-end {
+  display: inline-block;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+/* Collapsing is a visual line decoration only; the Markdown and editor
+   selection remain intact. If a cursor is restored inside the body, the
+   view plugin temporarily reveals it so keyboard input can never disappear
+   into a hidden row. */
+body.nf-code-block-edit .markdown-source-view.is-live-preview
+  .cm-line.nf-code-folded-row {
+  display: none !important;
+}
+/* A folded block collapses to exactly one row: the caption chip, which
+   already carries the fold arrow, the language and the caption. The opener
+   row is only marked collapsed while its body is genuinely hidden, so this
+   never swallows the header of a block being edited. */
+body.nf-code-block-edit .markdown-source-view.is-live-preview
+  .cm-line.nf-code-is-collapsed {
+  display: none !important;
+}
+
+/* Caption source is a portable <small> row. In Live Preview the row stays
+   visually attached to its owner and the HTML itself becomes a clickable
+   caption instead of exposing markup. */
+.markdown-source-view.is-live-preview .cm-line.nf-caption-line {
+  min-height: 24px;
+  /* Aligned with the owner block's text column, so a caption reads as that
+     block's label rather than as a stray line at the editor edge. A code
+     card insets its text by 16px; an image has no padding, so its caption
+     starts at the content edge instead. */
+  padding-inline-start: var(--nf-caption-inset, 16px);
+  padding-block: 3px 6px;
+  color: var(--text-muted);
+  font-family: var(--font-interface);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.35;
+}
+.markdown-source-view.is-live-preview
+  .cm-line.nf-caption-line.nf-caption-line-image {
+  --nf-caption-inset: 0px;
+}
+/* A table has no inner text padding either: its caption starts at the
+   content edge, under the table's leading border. */
+.markdown-source-view.is-live-preview
+  .cm-line.nf-caption-line.nf-caption-line-table {
+  --nf-caption-inset: 0px;
+}
+/* Obsidian may render the portable <small> row as its own inline-HTML
+   embed instead of handing the range to our widget. That path reaches
+   neither the widget nor the Markdown postprocessor, leaving a bare
+   <small> that the UA shrinks to ~10px in the editor's text font. Style
+   the element itself so the caption looks identical either way. */
+.markdown-source-view.is-live-preview .cm-line.nf-caption-line small.nf-caption {
+  color: var(--text-muted);
+  font-family: var(--font-interface);
+  /* Explicit: <small> would otherwise apply `font-size: smaller` on top of
+     the inherited row size. */
+  font-size: var(--font-ui-smaller);
+  line-height: 1.35;
+}
+.markdown-source-view.is-live-preview .nf-block-caption {
+  display: inline-block;
+  max-width: 100%;
+  border-radius: 4px;
+  color: var(--text-muted);
+  cursor: text;
+  user-select: text;
+}
+/* The hover pill needs horizontal padding, but padding here would push the
+   caption's glyphs out of line with the code text above it. Cancel it with
+   a matching negative margin: the pill still extends past the text, while
+   the first glyph stays exactly on the block's own text column. */
+.markdown-source-view.is-live-preview .nf-block-caption .nf-caption-text {
+  display: inline-block;
+  margin-inline-start: -6px;
+  padding-inline: 6px;
+  border-radius: 4px;
+}
+.markdown-source-view.is-live-preview .nf-block-caption .nf-caption-text:hover,
+.markdown-source-view.is-live-preview .nf-block-caption .nf-caption-text:focus-visible {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+  outline: none;
+}
+.markdown-source-view.is-live-preview .nf-block-caption .nf-caption-text.is-empty {
+  color: var(--text-faint);
+  font-style: italic;
+}
+.markdown-source-view.is-live-preview
+  .nf-block-caption.nf-code-caption.is-code-collapsed {
+  display: inline-flex;
+  box-sizing: border-box;
+  align-items: center;
+  gap: 6px;
+  min-width: min(100%, 280px);
+  padding: 5px 7px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--code-radius, var(--radius-s));
+  color: var(--text-muted);
+  background: var(--code-background);
+}
+.markdown-source-view.is-live-preview
+  .nf-block-caption.nf-code-caption.is-code-collapsed
+  .nf-caption-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Reading view and rendered widgets keep the same understated caption.
+   The element is valid HTML even without the plugin, so the text remains
+   readable in exports and other Markdown applications. */
+.nf-rendered-caption {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  margin: 4px 0 12px;
+  padding-inline: 8px;
+  color: var(--text-muted);
+  font-family: var(--font-interface);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.35;
+}
+.markdown-source-view.is-live-preview
+  .nf-rendered-caption[role="button"] {
+  cursor: text;
+}
+.markdown-source-view.is-live-preview
+  .nf-rendered-caption[role="button"]:hover {
+  color: var(--text-normal);
+}
+.markdown-source-view.is-live-preview
+  .nf-rendered-caption.nf-inline-code-caption-collapsed {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: min(100%, 320px);
+  min-height: 32px;
+  margin-block-start: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--code-radius, var(--radius-s));
+  background: var(--code-background);
+}
+/* Some Live Preview HTML widgets do not expose their child DOM to the
+   postprocessor. The persisted data attribute is still present, so this
+   fallback keeps a collapsed block visibly identifiable and discoverable
+   from its block handle. */
+.markdown-source-view.is-live-preview
+  .nf-rendered-caption[data-nf-kind="code"][data-nf-collapsed="true"]:not(
+    .nf-inline-code-caption-collapsed
+  ) {
+  width: min(100%, 320px);
+  min-height: 32px;
+  padding: 7px 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--code-radius, var(--radius-s));
+  background: var(--code-background);
+}
+.markdown-source-view.is-live-preview
+  .nf-rendered-caption[data-nf-kind="code"][data-nf-collapsed="true"]:not(
+    .nf-inline-code-caption-collapsed
+  )::before {
+  content: "▸  Code · ";
+  color: var(--text-faint);
+}
+.markdown-source-view.is-live-preview
+  .nf-inline-code-caption-collapsed
+  .nf-inline-caption-code {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  font-size: var(--font-ui-smaller);
+}
+.markdown-source-view.is-live-preview
+  .nf-inline-code-caption-collapsed
+  .nf-inline-caption-code::after {
+  content: "·";
+  margin-inline-start: 7px;
+}
+.nf-code-caption-block,
+.nf-image-caption-block,
+.nf-table-caption-block {
+  margin-block: 0;
+}
+/* Reading view puts the caption directly under the table, and the table's
+   own bottom margin would otherwise push it away from what it labels. */
+table.nf-captioned-table {
+  margin-block-end: 4px;
+}
+.nf-captioned-image {
+  display: block;
+}
+pre.nf-captioned-code {
+  position: relative;
+}
+pre.nf-captioned-code > .nf-rendered-code-fold {
+  position: absolute;
+  z-index: 2;
+  inset-block-start: 7px;
+  inset-inline-start: 7px;
+}
+pre.nf-captioned-code > code {
+  transition: opacity 100ms ease;
+}
+pre.nf-captioned-code.nf-rendered-code-collapsed {
+  min-height: 34px;
+}
+pre.nf-captioned-code.nf-rendered-code-collapsed > code {
+  display: none;
+}
+
+.nf-caption-modal .nf-caption-input {
+  box-sizing: border-box;
+  width: 100%;
+  margin-block: 8px 16px;
+}
+.nf-caption-modal .nf-caption-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 /* ---------- Columns (Notion-style side-by-side layout) ---------- */
@@ -1620,6 +2723,121 @@ body.nf-columns .nf-columns-editor .nf-col-resizer {
   }
 }
 
+/* ---------- Toggles (Notion-style foldable blocks) ---------- */
+/* A "[!nf-toggle]" Callout sheds every box: no tint, no border, no icon,
+   no title color. What remains is Notion's shape — a triangle, a line of
+   prose, and content that folds away under it. Obsidian already renders
+   the fold chevron and rotates it, and in Live Preview clicking it
+   rewrites the +/- marker, so the open state lives in the note.
+   Live Preview and Reading view share this DOM, so one rule set serves
+   both; direct-child selectors keep real Callouts nested INSIDE a toggle
+   fully styled. */
+body.nf-toggles .callout[data-callout="nf-toggle"] {
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  margin-block: 2px;
+  overflow: visible;
+}
+body.nf-toggles .callout[data-callout="nf-toggle"] > .callout-title {
+  gap: 0;
+  padding: 0;
+  border: none;
+  align-items: flex-start;
+  color: var(--text-normal);
+  font-size: inherit;
+  line-height: var(--line-height-normal);
+}
+/* The type icon is Callout furniture; the triangle IS the affordance, so
+   it moves to the front where Notion puts it. */
+body.nf-toggles .callout[data-callout="nf-toggle"] > .callout-title > .callout-icon {
+  display: none;
+}
+body.nf-toggles .callout[data-callout="nf-toggle"] > .callout-title > .callout-fold {
+  order: -1;
+  flex: 0 0 auto;
+  align-items: flex-start;
+  justify-content: center;
+  width: 1.45em;
+  padding: 0;
+  color: var(--text-faint);
+  cursor: var(--cursor);
+  transition: color 0.1s ease;
+}
+body.nf-toggles .callout[data-callout="nf-toggle"] > .callout-title > .callout-fold .svg-icon {
+  width: 0.95em;
+  height: 0.95em;
+  margin-block-start: calc((1em * var(--line-height-normal) - 0.95em) / 2);
+}
+body.nf-toggles .callout[data-callout="nf-toggle"]:hover > .callout-title > .callout-fold,
+body.nf-toggles .callout[data-callout="nf-toggle"] > .callout-title > .callout-fold:hover {
+  color: var(--text-muted);
+}
+body.nf-toggles .callout[data-callout="nf-toggle"] > .callout-title > .callout-title-inner {
+  font-weight: inherit;
+  color: inherit;
+}
+/* Content hangs under the title text, not under the triangle. */
+body.nf-toggles .callout[data-callout="nf-toggle"] > .callout-content {
+  margin: 0;
+  padding: 0 0 0 1.45em;
+  background: none;
+  overflow-x: visible;
+}
+body.nf-toggles .callout[data-callout="nf-toggle"] > .callout-content > :first-child {
+  margin-block-start: 2px;
+}
+body.nf-toggles .callout[data-callout="nf-toggle"] > .callout-content > :last-child {
+  margin-block-end: 0;
+}
+/* An empty open toggle is a real state (you just made one): show where
+   the content goes instead of a blank gap. */
+body.nf-toggles
+  .callout[data-callout="nf-toggle"]:not(.is-collapsed)
+  > .callout-content:not(:has(*)) {
+  min-height: 1.4em;
+}
+
+/* While the caret is inside, the source rows keep the toggle's look:
+   no colored Callout box, and the "[!nf-toggle]±" token reads as the
+   scaffolding it is rather than as part of the title. */
+body.nf-callout-menu .markdown-source-view.is-live-preview .cm-line.nf-co-edit.nf-co-toggle {
+  background: none;
+  border-color: transparent;
+}
+body.nf-callout-menu .markdown-source-view.is-live-preview
+  .cm-line.nf-co-edit.nf-co-toggle.nf-co-first span.cm-quote {
+  color: var(--text-normal);
+  font-weight: 400;
+}
+/* The stand-in triangle for the concealed "[!nf-toggle]±" token. Same
+   size, color, and rotation as Obsidian's rendered .callout-fold, so the
+   block does not visibly change shape when the caret moves into it. */
+body.nf-toggles .markdown-source-view.is-live-preview .nf-toggle-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.45em;
+  vertical-align: text-bottom;
+  color: var(--text-faint);
+  cursor: var(--cursor);
+}
+body.nf-toggles .markdown-source-view.is-live-preview .nf-toggle-mark:hover {
+  color: var(--text-muted);
+}
+body.nf-toggles .markdown-source-view.is-live-preview .nf-toggle-mark .svg-icon {
+  width: 0.95em;
+  height: 0.95em;
+  transition: transform 100ms ease-in-out;
+}
+body.nf-toggles
+  .markdown-source-view.is-live-preview
+  .nf-toggle-mark.is-collapsed
+  .svg-icon {
+  transform: rotate(calc(var(--direction, 1) * -1 * 90deg));
+}
+
 /* ---------- Comments (Notion-style annotations) ---------- */
 /* Anchored text reads like Notion's commented text: a soft yellow wash
    with a firmer underline. Three rendering paths share the look:
@@ -1629,8 +2847,8 @@ body.nf-columns .nf-columns-editor .nf-col-resizer {
    callout content, same raw element). */
 body.nf-comments .nf-cmt-anchor,
 body.nf-comments span.nf-cmt[data-nf-cmt] {
-  background-color: rgba(var(--color-yellow-rgb), 0.14);
-  border-bottom: 2px solid rgba(var(--color-yellow-rgb), 0.55);
+  background-color: rgba(var(--nf-yellow-rgb), 0.16);
+  border-bottom: 2px solid rgba(var(--nf-yellow-rgb), 0.6);
   border-radius: 2px 2px 0 0;
 }
 
@@ -1732,7 +2950,7 @@ body.nf-clean
   --nf-prose-leading: 1.68;
 }
 body.nf-clean .markdown-source-view.is-live-preview
-  .cm-line:not(.HyperMD-header):not(.HyperMD-codeblock),
+  .cm-line:not(.HyperMD-header):not(.HyperMD-codeblock):not(.nf-co-first),
 body.nf-clean .markdown-reading-view :is(p, li) {
   line-height: var(--nf-prose-leading);
 }
@@ -1767,9 +2985,12 @@ body.nf-clean
 body.nf-clean .markdown-reading-view p {
   margin-block: 0.65em;
 }
+/* Spacing only. The horizontal column is NOT set here: Obsidian indents a
+   rendered list item with `li { margin-inline-start }`, not with padding on
+   the list, so a padding declared here used to stack on top of that margin
+   and indent Reading view by a whole extra step. See "One list column". */
 body.nf-clean .markdown-reading-view :is(ul, ol) {
   margin-block: 0.65em;
-  padding-inline-start: 1.65em;
 }
 body.nf-clean .markdown-reading-view li + li {
   margin-top: 0.16em;
@@ -1876,32 +3097,38 @@ body.nf-code-theme-obsidian .markdown-reading-view {
   --code-value: var(--color-cyan);
 }
 
+/* Values taken from the current `@primer/primitives` prettylights tokens, the
+   same ones github.com renders Markdown code blocks with. Note that GitHub
+   ships no color for punctuation (`.pl-kos`) or plain identifiers (`.pl-s1`) —
+   both fall through to the block's foreground — so `--code-punctuation` and
+   `--code-property` deliberately repeat `--code-normal` rather than tinting
+   every brace and variable name. */
 body.nf-code-theme-github .markdown-source-view,
 body.nf-code-theme-github .markdown-reading-view {
   --code-background: #f6f8fa;
-  --code-normal: #24292f;
-  --code-comment: #6e7781;
-  --code-function: #8250df;
+  --code-normal: #1f2328;
+  --code-comment: #59636e;
+  --code-function: #6639ba;
   --code-important: #cf222e;
   --code-keyword: #cf222e;
   --code-operator: #0550ae;
-  --code-property: #953800;
-  --code-punctuation: #57606a;
+  --code-property: #1f2328;
+  --code-punctuation: #1f2328;
   --code-string: #0a3069;
-  --code-tag: #116329;
+  --code-tag: #0550ae;
   --code-value: #0550ae;
 }
 body.theme-dark.nf-code-theme-github .markdown-source-view,
 body.theme-dark.nf-code-theme-github .markdown-reading-view {
-  --code-background: #161b22;
-  --code-normal: #c9d1d9;
-  --code-comment: #8b949e;
+  --code-background: #151b23;
+  --code-normal: #f0f6fc;
+  --code-comment: #9198a1;
   --code-function: #d2a8ff;
   --code-important: #ff7b72;
   --code-keyword: #ff7b72;
   --code-operator: #79c0ff;
-  --code-property: #ffa657;
-  --code-punctuation: #8b949e;
+  --code-property: #f0f6fc;
+  --code-punctuation: #f0f6fc;
   --code-string: #a5d6ff;
   --code-tag: #7ee787;
   --code-value: #79c0ff;
@@ -2138,29 +3365,90 @@ body.nf-clean .markdown-reading-view {
 
 /* Code fence rows read like the block's own padding: the ``` markers and
    info string stay transparent until the caret visits their row, so an
-   idle code block shows no fence syntax — only Obsidian's language flair
-   (top right, with its own color) keeps naming the block. */
+   idle code block shows no fence syntax. The language chip is exempt — it
+   is the deliberate replacement for that syntax, not the syntax itself, so
+   hiding it would leave the block unnamed and its fold control unlabelled. */
 body.nf-clean .markdown-source-view.is-live-preview
   .cm-line.HyperMD-codeblock-begin.hmd-inactive-line,
 body.nf-clean .markdown-source-view.is-live-preview
   .cm-line.HyperMD-codeblock-end.hmd-inactive-line,
 body.nf-clean .markdown-source-view.is-live-preview
-  .cm-line.HyperMD-codeblock-begin.hmd-inactive-line > span:not(.code-block-flair),
+  .cm-line.HyperMD-codeblock-begin.hmd-inactive-line
+  > span:not(.code-block-flair):not(.nf-visual-code-fence),
 body.nf-clean .markdown-source-view.is-live-preview
-  .cm-line.HyperMD-codeblock-end.hmd-inactive-line > span:not(.code-block-flair) {
+  .cm-line.HyperMD-codeblock-end.hmd-inactive-line
+  > span:not(.code-block-flair):not(.nf-visual-code-fence) {
   color: transparent;
 }
 
 /* Code rows only pad their inline start natively; long lines run into the
    right edge of the painted block. Match the 16px start padding. */
-body.nf-clean .markdown-source-view.is-live-preview .cm-line.HyperMD-codeblock {
+body.nf-clean .markdown-source-view.is-live-preview .cm-line.HyperMD-codeblock,
+body.nf-clean .markdown-source-view.is-live-preview .cm-line.nf-qcode {
   padding-inline-end: var(--size-4-4, 16px);
+}
+
+/* ---------- Wrapped rows inside a nested code block ---------------- */
+/* Obsidian deliberately skips its hanging-indent pass inside code blocks —
+   a code line's leading whitespace is content, not structure — so a wrapped
+   row resumes at the line's own padding-inline-start. Only a TOP-LEVEL card
+   has one (the 16px above); every nested block places its text with
+   something the wrap cannot see: literal list indentation, or the inline
+   widget that stands in for the quote markers. Their continuation rows
+   therefore fell out of the painted card to the editor's left edge as soon
+   as the pane got narrow.
+
+   State the text column as a hanging indent: it moves wrapped rows only,
+   the source column is untouched (CodeMirror keeps measuring the same
+   coordinates), and — unlike the padding this once used — it cannot carry
+   the row's painted layers with it. Those layers are absolutely positioned
+   children of a `position: relative` line, so they are laid out from its
+   PADDING box; Obsidian's own hanging-indent pass writes padding inline on
+   these rows (a fence inside a quote is invisible to the code-block guard
+   that would otherwise skip them), which pushed the code card and the
+   Callout tint sideways and left a bare gutter down the left of the block.
+   Zeroing that padding is what pins them back. */
+body.nf-clean .markdown-source-view.is-live-preview .cm-line.nf-qcode {
+  /* Mirrors .nf-quote-prefix's width — the gap widget IS the text column. */
+  --nf-code-hang: calc(0.7em * var(--nf-prefix-depth, 1));
+}
+body.nf-clean .markdown-source-view.is-live-preview
+  .cm-line.nf-qcode.nf-co-code {
+  /* Mirrors .nf-callout-prefix.is-code. */
+  --nf-code-hang: calc(
+    var(--nf-co-plain-depth, 0) * 0.7em +
+      var(--nf-co-depth, 1) * var(--nf-co-inset, 39px) +
+      var(--nf-co-quote-depth, 0) * var(--nf-co-quote-step, 26px) +
+      var(--nf-co-code-pad, 16px)
+  );
+  padding-inline-end: calc(
+    var(--nf-co-depth, 1) * var(--nf-co-code-end, 15px) +
+      var(--nf-co-code-pad, 16px)
+  );
+}
+/* Inside a list the column is measured rather than derived (syncLineLayers),
+   because literal indentation resolves against each row's own font. Listed
+   last, and spelled out per combination, so the measured value wins over the
+   formulas above for a block that is both quoted and inside a list. */
+body.nf-clean .markdown-source-view.is-live-preview
+  .cm-line.nf-nested-block.HyperMD-codeblock,
+body.nf-clean .markdown-source-view.is-live-preview
+  .cm-line.nf-nested-block.nf-qcode,
+body.nf-clean .markdown-source-view.is-live-preview
+  .cm-line.nf-nested-block.nf-qcode.nf-co-code {
+  --nf-code-hang: var(--nf-nest, 0px);
+}
+body.nf-clean .markdown-source-view.is-live-preview
+  .cm-line:is(.nf-qcode, .nf-nested-block.HyperMD-codeblock) {
+  --nf-row-hang: var(--nf-code-hang, 0px);
+  padding-inline-start: var(--nf-row-hang) !important;
+  text-indent: calc(var(--nf-row-hang) * -1) !important;
 }
 
 /* Code always owns text-selection gestures. This explicit rule also wins
    over themes that treat rendered code previews as atomic UI widgets. */
 body.nf-clean .markdown-source-view.is-live-preview
-  :is(.cm-line.HyperMD-codeblock, .cm-preview-code-block pre, .cm-preview-code-block code) {
+  :is(.cm-line.HyperMD-codeblock, .cm-line.nf-qcode, .cm-preview-code-block pre, .cm-preview-code-block code) {
   -webkit-user-select: text;
   user-select: text;
   cursor: text;
@@ -2502,65 +3790,65 @@ body.nf-tables .markdown-reading-view table :is(th, td):focus-within {
    tinted table. */
 
 .markdown-source-view.is-live-preview table:has(span.nf-tbl-red) th,
-.markdown-reading-view table:has(span.nf-tbl-red) th { background-color: rgba(var(--color-red-rgb), 0.22); }
+.markdown-reading-view table:has(span.nf-tbl-red) th { background-color: rgba(var(--nf-red-rgb), 0.22); }
 .markdown-source-view.is-live-preview table:has(span.nf-tbl-red) td,
-.markdown-reading-view table:has(span.nf-tbl-red) td { background-color: rgba(var(--color-red-rgb), 0.07); }
+.markdown-reading-view table:has(span.nf-tbl-red) td { background-color: rgba(var(--nf-red-rgb), 0.07); }
 .markdown-source-view.is-live-preview table:has(span.nf-tbl-orange) th,
-.markdown-reading-view table:has(span.nf-tbl-orange) th { background-color: rgba(var(--color-orange-rgb), 0.22); }
+.markdown-reading-view table:has(span.nf-tbl-orange) th { background-color: rgba(var(--nf-orange-rgb), 0.22); }
 .markdown-source-view.is-live-preview table:has(span.nf-tbl-orange) td,
-.markdown-reading-view table:has(span.nf-tbl-orange) td { background-color: rgba(var(--color-orange-rgb), 0.07); }
+.markdown-reading-view table:has(span.nf-tbl-orange) td { background-color: rgba(var(--nf-orange-rgb), 0.07); }
 .markdown-source-view.is-live-preview table:has(span.nf-tbl-yellow) th,
-.markdown-reading-view table:has(span.nf-tbl-yellow) th { background-color: rgba(var(--color-yellow-rgb), 0.22); }
+.markdown-reading-view table:has(span.nf-tbl-yellow) th { background-color: rgba(var(--nf-yellow-rgb), 0.22); }
 .markdown-source-view.is-live-preview table:has(span.nf-tbl-yellow) td,
-.markdown-reading-view table:has(span.nf-tbl-yellow) td { background-color: rgba(var(--color-yellow-rgb), 0.07); }
+.markdown-reading-view table:has(span.nf-tbl-yellow) td { background-color: rgba(var(--nf-yellow-rgb), 0.07); }
 .markdown-source-view.is-live-preview table:has(span.nf-tbl-green) th,
-.markdown-reading-view table:has(span.nf-tbl-green) th { background-color: rgba(var(--color-green-rgb), 0.22); }
+.markdown-reading-view table:has(span.nf-tbl-green) th { background-color: rgba(var(--nf-green-rgb), 0.22); }
 .markdown-source-view.is-live-preview table:has(span.nf-tbl-green) td,
-.markdown-reading-view table:has(span.nf-tbl-green) td { background-color: rgba(var(--color-green-rgb), 0.07); }
+.markdown-reading-view table:has(span.nf-tbl-green) td { background-color: rgba(var(--nf-green-rgb), 0.07); }
 .markdown-source-view.is-live-preview table:has(span.nf-tbl-cyan) th,
-.markdown-reading-view table:has(span.nf-tbl-cyan) th { background-color: rgba(var(--color-cyan-rgb), 0.22); }
+.markdown-reading-view table:has(span.nf-tbl-cyan) th { background-color: rgba(var(--nf-cyan-rgb), 0.22); }
 .markdown-source-view.is-live-preview table:has(span.nf-tbl-cyan) td,
-.markdown-reading-view table:has(span.nf-tbl-cyan) td { background-color: rgba(var(--color-cyan-rgb), 0.07); }
+.markdown-reading-view table:has(span.nf-tbl-cyan) td { background-color: rgba(var(--nf-cyan-rgb), 0.07); }
 .markdown-source-view.is-live-preview table:has(span.nf-tbl-blue) th,
-.markdown-reading-view table:has(span.nf-tbl-blue) th { background-color: rgba(var(--color-blue-rgb), 0.22); }
+.markdown-reading-view table:has(span.nf-tbl-blue) th { background-color: rgba(var(--nf-blue-rgb), 0.22); }
 .markdown-source-view.is-live-preview table:has(span.nf-tbl-blue) td,
-.markdown-reading-view table:has(span.nf-tbl-blue) td { background-color: rgba(var(--color-blue-rgb), 0.07); }
+.markdown-reading-view table:has(span.nf-tbl-blue) td { background-color: rgba(var(--nf-blue-rgb), 0.07); }
 .markdown-source-view.is-live-preview table:has(span.nf-tbl-purple) th,
-.markdown-reading-view table:has(span.nf-tbl-purple) th { background-color: rgba(var(--color-purple-rgb), 0.22); }
+.markdown-reading-view table:has(span.nf-tbl-purple) th { background-color: rgba(var(--nf-purple-rgb), 0.22); }
 .markdown-source-view.is-live-preview table:has(span.nf-tbl-purple) td,
-.markdown-reading-view table:has(span.nf-tbl-purple) td { background-color: rgba(var(--color-purple-rgb), 0.07); }
+.markdown-reading-view table:has(span.nf-tbl-purple) td { background-color: rgba(var(--nf-purple-rgb), 0.07); }
 .markdown-source-view.is-live-preview table:has(span.nf-tbl-pink) th,
-.markdown-reading-view table:has(span.nf-tbl-pink) th { background-color: rgba(var(--color-pink-rgb), 0.22); }
+.markdown-reading-view table:has(span.nf-tbl-pink) th { background-color: rgba(var(--nf-pink-rgb), 0.22); }
 .markdown-source-view.is-live-preview table:has(span.nf-tbl-pink) td,
-.markdown-reading-view table:has(span.nf-tbl-pink) td { background-color: rgba(var(--color-pink-rgb), 0.07); }
+.markdown-reading-view table:has(span.nf-tbl-pink) td { background-color: rgba(var(--nf-pink-rgb), 0.07); }
 .markdown-source-view.is-live-preview table:has(span.nf-tbl-gray) th,
 .markdown-reading-view table:has(span.nf-tbl-gray) th {
-  background-color: color-mix(in srgb, var(--text-muted) 22%, transparent);
+  background-color: rgba(var(--nf-gray-rgb), 0.22);
 }
 .markdown-source-view.is-live-preview table:has(span.nf-tbl-gray) td,
 .markdown-reading-view table:has(span.nf-tbl-gray) td {
-  background-color: color-mix(in srgb, var(--text-muted) 7%, transparent);
+  background-color: rgba(var(--nf-gray-rgb), 0.07);
 }
 
 .markdown-source-view.is-live-preview table :is(td, th):has(span.nf-cell-red),
-.markdown-reading-view table :is(td, th):has(span.nf-cell-red) { background-color: rgba(var(--color-red-rgb), 0.25); }
+.markdown-reading-view table :is(td, th):has(span.nf-cell-red) { background-color: rgba(var(--nf-red-rgb), 0.25); }
 .markdown-source-view.is-live-preview table :is(td, th):has(span.nf-cell-orange),
-.markdown-reading-view table :is(td, th):has(span.nf-cell-orange) { background-color: rgba(var(--color-orange-rgb), 0.25); }
+.markdown-reading-view table :is(td, th):has(span.nf-cell-orange) { background-color: rgba(var(--nf-orange-rgb), 0.25); }
 .markdown-source-view.is-live-preview table :is(td, th):has(span.nf-cell-yellow),
-.markdown-reading-view table :is(td, th):has(span.nf-cell-yellow) { background-color: rgba(var(--color-yellow-rgb), 0.28); }
+.markdown-reading-view table :is(td, th):has(span.nf-cell-yellow) { background-color: rgba(var(--nf-yellow-rgb), 0.28); }
 .markdown-source-view.is-live-preview table :is(td, th):has(span.nf-cell-green),
-.markdown-reading-view table :is(td, th):has(span.nf-cell-green) { background-color: rgba(var(--color-green-rgb), 0.25); }
+.markdown-reading-view table :is(td, th):has(span.nf-cell-green) { background-color: rgba(var(--nf-green-rgb), 0.25); }
 .markdown-source-view.is-live-preview table :is(td, th):has(span.nf-cell-cyan),
-.markdown-reading-view table :is(td, th):has(span.nf-cell-cyan) { background-color: rgba(var(--color-cyan-rgb), 0.25); }
+.markdown-reading-view table :is(td, th):has(span.nf-cell-cyan) { background-color: rgba(var(--nf-cyan-rgb), 0.25); }
 .markdown-source-view.is-live-preview table :is(td, th):has(span.nf-cell-blue),
-.markdown-reading-view table :is(td, th):has(span.nf-cell-blue) { background-color: rgba(var(--color-blue-rgb), 0.25); }
+.markdown-reading-view table :is(td, th):has(span.nf-cell-blue) { background-color: rgba(var(--nf-blue-rgb), 0.25); }
 .markdown-source-view.is-live-preview table :is(td, th):has(span.nf-cell-purple),
-.markdown-reading-view table :is(td, th):has(span.nf-cell-purple) { background-color: rgba(var(--color-purple-rgb), 0.25); }
+.markdown-reading-view table :is(td, th):has(span.nf-cell-purple) { background-color: rgba(var(--nf-purple-rgb), 0.25); }
 .markdown-source-view.is-live-preview table :is(td, th):has(span.nf-cell-pink),
-.markdown-reading-view table :is(td, th):has(span.nf-cell-pink) { background-color: rgba(var(--color-pink-rgb), 0.25); }
+.markdown-reading-view table :is(td, th):has(span.nf-cell-pink) { background-color: rgba(var(--nf-pink-rgb), 0.25); }
 .markdown-source-view.is-live-preview table :is(td, th):has(span.nf-cell-gray),
 .markdown-reading-view table :is(td, th):has(span.nf-cell-gray) {
-  background-color: color-mix(in srgb, var(--text-muted) 25%, transparent);
+  background-color: rgba(var(--nf-gray-rgb), 0.25);
 }
 
 /* ---------- List-contained block layers ---------------------------- */
@@ -2614,6 +3902,151 @@ body.nf-tables .markdown-reading-view table :is(th, td):focus-within {
 .markdown-source-view.is-live-preview
   .cm-line.nf-nested-quote::before {
   inset-inline-start: calc(var(--nf-nest, 0px) - 16px) !important;
+}
+
+/* ---------- Code blocks and lists INSIDE a blockquote ----------
+   HyperMD hands a quote line nothing but quote classes: a fence inside a
+   blockquote gets no HyperMD-codeblock-* rows and a list gets no
+   HyperMD-list-line or cm-formatting-list, so Live Preview shows raw ```
+   markers and a literal dash while Reading view renders both properly.
+   The editor decorations tag those rows; these rules give them the chrome
+   Obsidian paints everywhere else.
+
+   The block background is ::after — Obsidian draws the quote rule itself
+   with ::before on .HyperMD-quote, and taking that pseudo-element would
+   erase the rule. */
+body.nf-clean .markdown-source-view.is-live-preview .cm-line.nf-qcode {
+  position: relative;
+  isolation: isolate;
+  font-family: var(--font-monospace);
+  font-size: var(--code-size);
+  color: var(--code-normal);
+  direction: ltr;
+}
+body.nf-clean .markdown-source-view.is-live-preview .cm-line.nf-qcode::after {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset-block: 0;
+  inset-inline-start: calc(
+    var(--blockquote-border-thickness, 2px) + 5px
+  );
+  inset-inline-end: 0;
+  background: var(--code-background);
+  pointer-events: none;
+}
+body.nf-clean .markdown-source-view.is-live-preview
+  .cm-line.nf-qcode-begin::after {
+  border-start-start-radius: var(--code-radius, var(--radius-s));
+  border-start-end-radius: var(--code-radius, var(--radius-s));
+}
+body.nf-clean .markdown-source-view.is-live-preview
+  .cm-line.nf-qcode-end::after {
+  border-end-start-radius: var(--code-radius, var(--radius-s));
+  border-end-end-radius: var(--code-radius, var(--radius-s));
+}
+/* HyperMD reads the fenced run as one long inline-code span. Strip the
+   pill (background, border, padding, ink) so the rows read as code inside
+   the block, not as nine inline-code chips. */
+body.nf-clean .markdown-source-view.is-live-preview
+  .cm-line.nf-qcode .cm-inline-code,
+body.nf-code-color .markdown-source-view.is-live-preview
+  .cm-line.nf-qcode .cm-inline-code:not(.cm-formatting) {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: inherit;
+  font-style: normal;
+  color: var(--code-normal);
+}
+/* ---------- Token colors for quoted code -------------------------- */
+/* The plugin tokenizes these rows itself (Obsidian's parser never sees a
+   fence inside a quote) and emits the same `cm-*` token classes a native
+   code block carries, so the vault's own `--code-*` palette — including
+   this plugin's code themes — colors both alike.
+
+   The mapping is restated here rather than left to Obsidian's global token
+   rules because those weigh (0,1,0) and the inline-code reset just above
+   weighs more: a merged span would read as plain code text. Stated on the
+   row, our tokens win wherever CodeMirror puts them. `cm-def` and `cm-atom`
+   are deliberately included though Obsidian styles neither — the legacy
+   modes use them for definitions and for literals like True/None, which
+   would otherwise be the only colorless words in a highlighted block. */
+body.nf-clean .markdown-source-view.is-live-preview
+  .cm-line.nf-qcode :is(.cm-comment, .cm-meta) {
+  color: var(--code-comment);
+}
+body.nf-clean .markdown-source-view.is-live-preview
+  .cm-line.nf-qcode .cm-tag {
+  color: var(--code-tag);
+}
+body.nf-clean .markdown-source-view.is-live-preview
+  .cm-line.nf-qcode :is(.cm-punctuation, .cm-bracket) {
+  color: var(--code-punctuation);
+}
+body.nf-clean .markdown-source-view.is-live-preview
+  .cm-line.nf-qcode :is(.cm-number, .cm-atom) {
+  color: var(--code-value);
+}
+body.nf-clean .markdown-source-view.is-live-preview
+  .cm-line.nf-qcode :is(.cm-string, .cm-string-2, .cm-qualifier) {
+  color: var(--code-string);
+}
+body.nf-clean .markdown-source-view.is-live-preview
+  .cm-line.nf-qcode .cm-operator {
+  color: var(--code-operator);
+}
+body.nf-clean .markdown-source-view.is-live-preview
+  .cm-line.nf-qcode :is(.cm-variable, .cm-variable-2, .cm-variable-3, .cm-link) {
+  color: var(--code-property);
+}
+body.nf-clean .markdown-source-view.is-live-preview
+  .cm-line.nf-qcode
+  :is(.cm-builtin, .cm-property, .cm-attribute, .cm-type, .cm-def) {
+  color: var(--code-function);
+}
+body.nf-clean .markdown-source-view.is-live-preview
+  .cm-line.nf-qcode .cm-keyword {
+  color: var(--code-keyword);
+}
+/* The ``` rows are the block's padding, exactly as outside a quote —
+   until the caret visits them and the source has to be editable. */
+body.nf-clean .markdown-source-view.is-live-preview
+  :is(.cm-line.nf-qcode-begin, .cm-line.nf-qcode-end):not(.cm-active)
+  span:not(.cm-formatting-quote) {
+  color: transparent;
+}
+/* Two separate rules fade fence syntax by making a row's spans transparent
+   — the HyperMD pair earlier and the quoted-row rule just above — and both
+   reach descendants. The language chip sits on those same rows, but it is
+   the deliberate replacement for the syntax, not the syntax itself: faded,
+   a code block inside a Callout shows a bare fold arrow with no language.
+   Declared !important on purpose. The two fade selectors carry different
+   weights, so out-specifying both would mean duplicating this rule per
+   context and re-deriving the arithmetic whenever either one changes;
+   "the chip is never faded" is the actual invariant, so state it once. */
+body.nf-clean .markdown-source-view.is-live-preview .nf-visual-code-fence,
+body.nf-clean .markdown-source-view.is-live-preview .nf-visual-code-fence span {
+  color: var(--text-muted) !important;
+}
+
+/* Indent guides resolve against the monospace font and fragment inside a
+   painted block — the block itself already shows the containment, exactly
+   as for a fence nested in a list. */
+body.nf-clean .markdown-source-view.is-live-preview
+  .cm-line.nf-qcode .cm-indent::before {
+  display: none;
+}
+
+body.nf-clean .markdown-source-view.is-live-preview
+  .cm-line.nf-qlist .nf-qlist-marker {
+  color: var(--list-marker-color);
+}
+/* .list-bullet (Obsidian's own) hides the marker text and paints the dot;
+   the ink above would make the dash visible again. */
+body.nf-clean .markdown-source-view.is-live-preview
+  .cm-line.nf-qlist .nf-qlist-marker.list-bullet {
+  color: transparent;
 }
 
 /* Callout widgets are direct children of .cm-content in Live Preview; the
