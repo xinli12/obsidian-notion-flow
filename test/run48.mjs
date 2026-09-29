@@ -231,10 +231,12 @@ const at = (lines, lineNo, ch) => docOf(lines).line(lineNo).from + ch;
   const view = makeView(lines, at(lines, 1, 3));
   const doc = view.state.doc;
   insertBlockAbove(view, getBlockRange(doc, 1, scanFences(doc)), false);
+  // w1c-block-insert-above-seam: the new row comes with the blank seam its
+  // text will need, so words typed there never join the Callout.
   eq(
-    "a note that opens with a Callout gains a row above it",
+    "a note that opens with a Callout gains a row (and its seam) above it",
     rows(view),
-    ["", "> [!note] Title", "> body", "", "after"]
+    ["", "", "> [!note] Title", "> body", "", "after"]
   );
   eq("the caret is in the new row", caretOf(view), [1, 0]);
 }
@@ -272,6 +274,37 @@ eq("inside a quote the to-do keeps the markers", rule("> []"), "> - [ ] ");
 eq("an indented to-do keeps its column", rule("    []"), "    - [ ] ");
 ok('"[]" after text is prose', rule("see []") === null);
 
+/* item 20: what a Chinese keyboard types — 【】, ！ and 》 */
+eq('"【】" writes a to-do', rule("【】"), "- [ ] ");
+eq('"【 】" too', rule("【 】"), "- [ ] ");
+eq('"【x】" writes a checked to-do', rule("【x】"), "- [x] ");
+eq('"- 【】" keeps the typed bullet', rule("- 【】"), "- [ ] ");
+eq('"> 【】" inside a quote', rule("> 【】"), "> - [ ] ");
+ok('mid-line "a 【】" is prose', rule("a 【】") === null);
+ok('"【】" mixed with "[" is not a to-do', rule("【]") === null && rule("[】") === null);
+eq('">！提示" (full-width !) picks the type', rule(">！提示"), "> [!tip] ");
+eq('"》！" (the Chinese > key) opens a note Callout', rule("》！"), "> [!note] ");
+eq('"》!warning" with an ASCII !', rule("》!warning"), "> [!warning] ");
+eq('"》 >！" counts both markers', rule("》 >！"), "> > [!note] ");
+ok('"》" only as the first marker', rule("> 》！") === null);
+eq('an indented "》！" keeps its column', rule("  》！"), "  > [!note] ");
+eq('a lone "》" is a quote', rule("》"), "> ");
+eq('an indented lone "》" too', rule("  》"), "  > ");
+ok('">!foo" stays literal', rule(">!foo") === null);
+ok('">！foo" stays literal', rule(">！foo") === null);
+ok('"》》" is not a quote', rule("》》") === null);
+ok('text then "》" is prose', rule("x》") === null);
+const ruleAbove = (before, above) => inputRuleExpansion(before, { toggles: true, above })?.insert ?? null;
+eq("item 20: a paragraph above → a leading blank line", ruleAbove(">!", "para text"), "\n> [!note] ");
+eq("item 20: a quote row above → none", ruleAbove(">!", "> quote"), "> [!note] ");
+eq("item 20: a blank row above → none", ruleAbove(">!", ""), "> [!note] ");
+eq("item 20: whitespace-only above → none", ruleAbove(">!", "   "), "> [!note] ");
+eq("item 20: first line (no above) → none", ruleAbove(">!", undefined), "> [!note] ");
+eq("item 20: a nested shorthand gets no seam", ruleAbove("> >!", "para"), "> > [!note] ");
+eq("item 20: an indented shorthand gets no seam", ruleAbove("  >!", "para"), "  > [!note] ");
+eq("item 20: a to-do gets no seam", ruleAbove("[]", "para"), "- [ ] ");
+eq("item 20: a Chinese Callout under a paragraph gets the seam too", ruleAbove("》！提示", "段落"), "\n> [!tip] ");
+
 /* ------------------------------------------------------------------ */
 /* The rule as a transaction filter: WHEN it is allowed to fire        */
 /* ------------------------------------------------------------------ */
@@ -307,9 +340,29 @@ eq(
   "> [!note] "
 );
 eq(
-  "the expansion replaces only its own line",
+  "the expansion replaces only its own line (a blank row parts it from the paragraph above, item 20)",
   typed(["above", ">!", "below"], space(docOf(["above", ">!", "below"]).line(2).to)),
-  "above\n> [!note] \nbelow"
+  "above\n\n> [!note] \nbelow"
+);
+eq(
+  "item 20: para text, Enter, >! + space starts after a blank line",
+  typed(["para text", ">!"], space(docOf(["para text", ">!"]).line(2).to)),
+  "para text\n\n> [!note] "
+);
+{
+  const lines = ["para text", ">!"];
+  const next = stateAt(lines, docOf(lines).line(2).to).update(space(docOf(lines).line(2).to)).state;
+  eq("item 20: the caret lands after the seamed Callout marker", next.selection.main.head, next.doc.length);
+}
+eq(
+  "item 20: under a quote row no seam (the Callout joins nothing new)",
+  typed(["> quote", ">!"], space(docOf(["> quote", ">!"]).line(2).to)),
+  "> quote\n> [!note] "
+);
+eq(
+  "item 20: an IME composition is never rewritten",
+  typed([">!"], { ...space(2), userEvent: "input.type.compose" }),
+  ">! "
 );
 eq(
   "a space typed mid-line is just a space",
@@ -417,9 +470,9 @@ eq(
   const doc = docOf(lines);
   const plan = blockInsertAbovePlan(doc, getBlockRange(doc, 1, scanFences(doc)));
   eq(
-    "a Callout opening the note gets a plain row above it",
+    "a Callout opening the note gets a plain row and a blank seam above it",
     [plan.from, plan.insert, plan.caret],
-    [0, "\n", 0]
+    [0, "\n\n", 0]
   );
 }
 
@@ -430,8 +483,8 @@ eq(
   const block = innerBlockAt(doc, 4, fences);
   const plan = blockInsertAbovePlan(doc, block);
   ok(
-    "a row inside a Callout gets a row with the container's markers",
-    plan.insert === "> \n",
+    "a row inside a Callout gets a row with the container's markers, then a marker seam",
+    plan.insert === "> \n>\n",
     JSON.stringify(plan)
   );
   ok(

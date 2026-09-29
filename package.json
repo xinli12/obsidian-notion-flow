@@ -1,11 +1,12 @@
 {
   "name": "notion-flow",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "Notion-style editing for Obsidian: drag-and-drop blocks, table editing, slash commands, floating toolbar with colors, cleaner WYSIWYG. English & 中文.",
   "scripts": {
     "build": "esbuild src/main.ts --bundle --external:obsidian --external:@codemirror/view --external:@codemirror/state --external:@codemirror/language --format=cjs --target=es2020 --outfile=main.js",
     "typecheck": "tsc -noEmit",
-    "test": "esbuild src/main.ts --bundle --alias:obsidian=./test/obsidian-stub.mjs --alias:@codemirror/view=./test/view-stub.mjs --alias:@codemirror/language=./test/language-stub.mjs --alias:@codemirror/lang-markdown=./test/lang-markdown-stub.mjs --alias:@codemirror/autocomplete=./test/autocomplete-stub.mjs --external:@codemirror/state --format=esm --outfile=test/bundle.mjs && for t in test/run*.mjs; do node $t || exit 1; done"
+    "test": "node test/test.mjs",
+    "gen:styles": "node scripts/style-presets/gen.mjs"
   },
   "keywords": [
     "obsidian",

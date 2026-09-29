@@ -7,6 +7,9 @@ import {
   withMathColorClass,
   BG_COLORS,
   TEXT_COLORS,
+  enclosingLinkOnLine,
+  linkRewriteChange,
+  linkUnlinkChange,
 } from "./bundle.mjs";
 
 let fail = 0;
@@ -208,6 +211,124 @@ ok(
     v.state.doc.toString() === "see $x^2$ now",
     v.state.doc.toString()
   );
+}
+
+// Link popover helpers: the link the selection sits in, and the changes
+// that rewrite or unlink it touching only the link's own span.
+{
+  const text = "intro\nsee [docs](https://ex.com/a \"Docs\") here\ntail";
+  const lineFrom = "intro\n".length;
+  const lineText = "see [docs](https://ex.com/a \"Docs\") here";
+  const inside = mk(text, lineFrom + 6, lineFrom + 6);
+  const link = enclosingLinkOnLine(inside.state);
+  ok("caret inside the link finds it", link != null && link.text === "docs" && link.dest === "https://ex.com/a", JSON.stringify(link));
+  ok("caret outside the link finds nothing", enclosingLinkOnLine(mk(text, lineFrom + 1, lineFrom + 1).state) == null);
+  ok("a selection spanning lines finds nothing", enclosingLinkOnLine(mk(text, 2, lineFrom + 6).state) == null);
+
+  const rewrite = linkRewriteChange(lineFrom, lineText, link, { text: "the docs", dest: "my note.md" });
+  ok("rewrite spans exactly the link", rewrite.from === lineFrom + 4 && rewrite.to === lineFrom + 4 + '[docs](https://ex.com/a "Docs")'.length, JSON.stringify(rewrite));
+  ok("rewrite wraps a spaced destination and keeps the title", rewrite.insert === '[the docs](<my note.md> "Docs")', rewrite.insert);
+  ok("rewrite caret lands after the link", rewrite.caret === rewrite.from + rewrite.insert.length);
+  inside.dispatch({ changes: { from: rewrite.from, to: rewrite.to, insert: rewrite.insert } });
+  ok(
+    "rewritten document keeps the rest of the line",
+    inside.state.doc.toString() === 'intro\nsee [the docs](<my note.md> "Docs") here\ntail',
+    inside.state.doc.toString()
+  );
+
+  const v2 = mk(text, lineFrom + 6, lineFrom + 6);
+  const unlink = linkUnlinkChange(lineFrom, lineText, enclosingLinkOnLine(v2.state));
+  ok("unlink replaces the link with its text", unlink.insert === "docs" && unlink.from === lineFrom + 4, JSON.stringify(unlink));
+  v2.dispatch({ changes: { from: unlink.from, to: unlink.to, insert: unlink.insert } });
+  ok("unlinked document", v2.state.doc.toString() === "intro\nsee docs here\ntail", v2.state.doc.toString());
+  ok("unlink caret covers the text end", unlink.caret === unlink.from + 4);
+}
+
+// Mid-run recolour / removal: the selection sits inside a colour run but
+// does not hug its tags, so the run is split around the selected words.
+{
+  const red = TEXT_COLORS[1];
+  const blue = TEXT_COLORS[6];
+  const text = `<span style="color:${red}">hello big world</span> tail`;
+  const open = `<span style="color:${red}">`;
+  const from = open.length + "hello ".length;
+  const to = from + "big".length;
+  const v = mk(text, from, to);
+  applyTextColor(v, null);
+  ok(
+    "remove mid-run splits the span",
+    v.state.doc.toString() === `${open}hello </span>big${open} world</span> tail`,
+    v.state.doc.toString()
+  );
+  const sel = v.state.selection.main;
+  ok("remove mid-run keeps the words selected", v.state.sliceDoc(sel.from, sel.to) === "big", v.state.sliceDoc(sel.from, sel.to));
+
+  const v2 = mk(text, from, to);
+  applyTextColor(v2, blue);
+  const blueOpen = `<span style="color:${blue}">`;
+  ok(
+    "recolor mid-run splits the span around the new colour",
+    v2.state.doc.toString() === `${open}hello </span>${blueOpen}big</span>${open} world</span> tail`,
+    v2.state.doc.toString()
+  );
+  const sel2 = v2.state.selection.main;
+  ok("recolor mid-run keeps the words selected", v2.state.sliceDoc(sel2.from, sel2.to) === "big", v2.state.sliceDoc(sel2.from, sel2.to));
+
+  // At the run's start: the empty left half is dropped, so the original
+  // open tag simply becomes the new colour and the run resumes after.
+  const v3 = mk(text, open.length, open.length + "hello".length);
+  applyTextColor(v3, blue);
+  ok(
+    "recolor at run start drops the empty left half",
+    v3.state.doc.toString() === `${blueOpen}hello</span>${open} big world</span> tail`,
+    v3.state.doc.toString()
+  );
+  const sel3 = v3.state.selection.main;
+  ok("recolor at run start keeps the words selected", v3.state.sliceDoc(sel3.from, sel3.to) === "hello", v3.state.sliceDoc(sel3.from, sel3.to));
+
+  // At the run's end: nothing is reopened after the selection.
+  const endFrom = open.length + "hello big ".length;
+  const v4 = mk(text, endFrom, endFrom + "world".length);
+  applyTextColor(v4, blue);
+  ok(
+    "recolor at run end drops the empty right half",
+    v4.state.doc.toString() === `${open}hello big </span>${blueOpen}world</span> tail`,
+    v4.state.doc.toString()
+  );
+  const v5 = mk(text, endFrom, endFrom + "world".length);
+  applyTextColor(v5, null);
+  ok(
+    "remove at run end closes the run before the words",
+    v5.state.doc.toString() === `${open}hello big </span>world tail`,
+    v5.state.doc.toString()
+  );
+}
+// The <mark> variant follows the same rules.
+{
+  const yellow = BG_COLORS[3];
+  const green = BG_COLORS[4];
+  const open = `<mark style="background:${yellow};color:inherit">`;
+  const greenOpen = `<mark style="background:${green};color:inherit">`;
+  const text = `${open}one two three</mark>`;
+  const from = open.length + "one ".length;
+  const v = mk(text, from, from + "two".length);
+  applyHighlightColor(v, green);
+  ok(
+    "mark recolor mid-run",
+    v.state.doc.toString() === `${open}one </mark>${greenOpen}two</mark>${open} three</mark>`,
+    v.state.doc.toString()
+  );
+  const v2 = mk(text, from, from + "two".length);
+  applyHighlightColor(v2, null);
+  ok(
+    "mark remove mid-run",
+    v2.state.doc.toString() === `${open}one </mark>two${open} three</mark>`,
+    v2.state.doc.toString()
+  );
+  // A selection outside any run still wraps as before.
+  const v3 = mk("plain words", 0, 5);
+  applyHighlightColor(v3, green);
+  ok("no run → wrap", v3.state.doc.toString() === `${greenOpen}plain</mark> words`, v3.state.doc.toString());
 }
 
 console.log(fail === 0 ? "ALL PASS" : `${fail} FAILURES`);

@@ -34,6 +34,8 @@ import {
   quoteInnerBlocks,
   scanFences,
   turnQuoteBlockInto,
+  turnBlockChange,
+  turnContainerInto,
   visualAnalysisWindow,
 } from "./bundle.mjs";
 
@@ -688,9 +690,9 @@ const applyAt = (lines, plan) => {
     ["> [!note] A", "> one", "", ""]
   );
   eq(
-    "Backspace on the trailing empty row still sheds a level",
+    "Backspace on the trailing empty row still sheds a level, sealed like Enter",
     applyAt(tail, quoteBackspacePlan(tailDoc, tailDoc.line(3).from + 1)),
-    ["> [!note] A", "> one", ""]
+    ["> [!note] A", "> one", "", ""]
   );
 
   // Backspace at a content start: shedding a level is an EXIT, so it only
@@ -707,10 +709,12 @@ const applyAt = (lines, plan) => {
     applyAt(body, quoteBackspacePlan(bodyDoc, bodyDoc.line(1).from + 2)),
     ["A", "one", "two", "three"]
   );
+  // …behind a blank seam: flush under "> two" it would be a lazy
+  // continuation of that paragraph, still drawn inside the box.
   eq(
     "Backspace on the last row still sheds one level",
     applyAt(body, quoteBackspacePlan(bodyDoc, bodyDoc.line(4).from + 2)),
-    ["> [!note] A", "> one", "> two", "three"]
+    ["> [!note] A", "> one", "> two", "", "three"]
   );
   eq(
     "…and a nested quote unwraps only its own level",
@@ -955,6 +959,16 @@ const turn = (lines, prefix, at = 1) => {
   const text = doc.toString();
   return (text.slice(0, change.from) + change.insert + text.slice(change.to)).split("\n");
 };
+/** The same block through the change the menu, the chords and the batch
+ *  share: a Callout, toggle or multi-line quote goes by its title. */
+const turnAs = (lines, prefix, at = 1) => {
+  const doc = docOf(lines);
+  const block = innerBlockAt(doc, at) ?? getBlockRange(doc, at);
+  const change = turnBlockChange(doc, block, prefix, scanFences(doc));
+  if (!change) return null;
+  const text = doc.toString();
+  return (text.slice(0, change.from) + change.insert + text.slice(change.to)).split("\n");
+};
 
 {
   const callout = ["> [!note] Title", "> body", "> more"];
@@ -963,21 +977,85 @@ const turn = (lines, prefix, at = 1) => {
     "body",
     "more",
   ]);
-  eq("Callout → Heading 1 retypes every row", turn(callout, "# "), [
+  // A heading or list target retypes the TITLE; the body sheds its quote
+  // level and follows it (as the item's children under a list target).
+  eq("Callout → Heading 1 retypes its title, the body follows", turnAs(callout, "# "), [
     "# Title",
-    "# body",
-    "# more",
+    "",
+    "body",
+    "more",
   ]);
   eq("Callout → Quote drops only the token", turn(callout, "> "), [
     "> Title",
     "> body",
     "> more",
   ]);
-  eq("Callout → To-do", turn(callout, "- [ ] "), [
+  eq("…through the shared change too", turnAs(callout, "> "), turn(callout, "> "));
+  eq("Callout → Text through the shared change is the plain unwrap", turnAs(callout, ""), turn(callout, ""));
+  eq("Callout → To-do retypes its title, the body becomes its child", turnAs(callout, "- [ ] "), [
     "- [ ] Title",
-    "- [ ] body",
-    "- [ ] more",
+    "",
+    "  body",
+    "  more",
   ]);
+  eq("Callout → Heading 2 (the acceptance note)", turnAs(["> [!note] Title", "> body one", "> body two"], "## "), [
+    "## Title",
+    "",
+    "body one",
+    "body two",
+  ]);
+  eq("Callout → bulleted list indents the body under the item", turnAs(["> [!note] Title", "> body one", "> body two"], "- "), [
+    "- Title",
+    "",
+    "  body one",
+    "  body two",
+  ]);
+  eq("a one-row Callout → Heading 2 is just its title", turnAs(["> [!note] Title"], "## "), ["## Title"]);
+  eq("…and → Text is its title, not \"[!note] Title\"", turnAs(["> [!note] Title"], ""), ["Title"]);
+  eq("…and → Quote relabels it", turnAs(["> [!note] Title"], "> "), ["> Title"]);
+  eq("a toggle → bulleted list keeps its child nested", turnAs(["> [!nf-toggle]+ Tog", "> - child"], "- "), [
+    "- Tog",
+    "  - child",
+  ]);
+  eq("a plain multi-line quote → Heading 2 goes by its first row", turnAs(["> one", "> two"], "## "), [
+    "## one",
+    "",
+    "two",
+  ]);
+  eq("…and → Text is still the plain unwrap", turnAs(["> one", "> two"], ""), ["one", "two"]);
+  eq("a title-less Callout is named the way Obsidian renders it", turnAs(["> [!info]", "> only"], "# "), [
+    "# Info",
+    "",
+    "only",
+  ]);
+  eq("Callout → Quote keeps a list body as a list", turnAs(["> [!note] T", "> - a", "> - b"], "> "), [
+    "> T",
+    "> - a",
+    "> - b",
+  ]);
+  eq("…and a title-less one leaves no empty first row", turnAs(["> [!note]", "> - a"], "> "), ["> - a"]);
+  eq("a table under a list title gets its blank row", turnAs(["> [!note] T", "> | a |", "> | - |"], "- "), [
+    "- T",
+    "",
+    "  | a |",
+    "  | - |",
+  ]);
+  eq("a fence under a list title needs none", turnAs(["> [!note] T", "> ```js", "> x", "> ```"], "- "), [
+    "- T",
+    "  ```js",
+    "  x",
+    "  ```",
+  ]);
+  eq(
+    "a nested Callout goes by its title and keeps the outer markers",
+    turnAs(["> [!note] O", "> > [!tip] I", "> > deep", "> tail"], "## ", 2),
+    ["> [!note] O", "> ## I", ">", "> deep", "> tail"]
+  );
+  ok(
+    "a columns row is still refused",
+    turnContainerInto(docOf(["> [!nf-cols]", "> > [!nf-col]", "> > a"]), { startLine: 1, endLine: 3 }, "## ") === null &&
+      turnAs(["> [!nf-cols]", "> > [!nf-col]", "> > a", ">", "> > [!nf-col]", "> > b"], "## ") === null
+  );
 
   eq(
     "a title-less Callout leaves no empty first row",
@@ -1103,6 +1181,35 @@ const turn = (lines, prefix, at = 1) => {
     }
   }
 }
+{
+  // The title path must leave a parseable document too, and keep every
+  // word: only markers and the Callout token go.
+  const shapes = [
+    ["> [!note] T", "> body", "> ```js", "> code", "> ```", "> tail"],
+    ["> [!nf-toggle]+ T", "> body", "> > [!nf-toggle]- I", "> > deep"],
+    ["> a", "> > b", "> > > c", "> a2"],
+    ["> [!note] T", "> | a |", "> | - |", ">", "> after"],
+    ["> [!note] T", "> - one", ">   - two", "> para"],
+    ["> [!note] O", "> > [!tip] I", "> > deep", "> tail"],
+  ];
+  for (const [index, lines] of shapes.entries()) {
+    for (const prefix of ["# ", "## ", "- ", "1. ", "- [ ] ", "> "]) {
+      const result = turnAs(lines, prefix);
+      if (!result) continue;
+      const bad = structureViolations(docOf(result));
+      ok(
+        `title turn of shape ${index} into ${JSON.stringify(prefix)} stays parseable`,
+        bad.length === 0,
+        bad.slice(0, 2).join(" | ") + "\n" + result.join("\n")
+      );
+      const words = (rows) => rows
+        .map((line) => line.replace(/^[ \t>]*/, "").replace(RE_TOKEN, "").trim())
+        .filter(Boolean)
+        .sort();
+      eq(`title turn of shape ${index} into ${JSON.stringify(prefix)} keeps its text`, words(result), words(lines));
+    }
+  }
+}
 pass("whole-block Turn into never splits a container or drops text");
 
 /* ------------------------------------------------------------------ */
@@ -1124,6 +1231,8 @@ pass("whole-block Turn into never splits a container or drops text");
     caption: "Q3 figures",
     collapsed: false,
     prefix: "",
+    bodyFrom: 47,
+    bodyTo: 57,
   });
   eq("buildBlockCaption writes one", buildBlockCaption("table", "Q3 figures"), cap("Q3 figures"));
   ok("an empty table caption is dropped", buildBlockCaption("table", "  ") === null);
@@ -1133,6 +1242,8 @@ pass("whole-block Turn into never splits a container or drops text");
     caption: "Q3 figures",
     collapsed: false,
     prefix: "",
+    bodyFrom: 47,
+    bodyTo: 57,
     lineNo: 6,
   });
   ok("…and only from the last row", tableCaptionMeta(doc, 4) === null);

@@ -19,6 +19,7 @@ import {
   resolveLegacyMode,
   scanFences,
   tokenizeCodeLines,
+  visibleLineNumbers,
 } from "./bundle.mjs";
 import { Text } from "@codemirror/state";
 
@@ -311,11 +312,12 @@ ok(
   JSON.stringify([...quoted])
 );
 
-// A toggle strips the Callout box, so its rows have no inset to hang from.
+// A toggle has no box, but its rows hide their "> " too and resume at the
+// toggle's content column, which the rows declare as a toggle hang.
 const toggle = classesAt(["> [!nf-toggle]+ T", "> body"], 20);
 ok(
-  "a toggle declares no column",
-  ![...toggle.values()].some((cls) => cls.includes("nf-co-hang")),
+  "a toggle declares its toggle column",
+  [...toggle.values()].every((cls) => cls.includes("nf-co-toggle-hang")),
   JSON.stringify([...toggle])
 );
 pass("wrapped-row column");
@@ -326,11 +328,13 @@ pass("wrapped-row column");
 
 /** One pass of the nested-block decoration builder, with the editor's
  * CodeMirror shim stood in for. */
-const paint = (lines) => {
+const paint = (lines, visible) => {
   const state = EditorState.create({ doc: lines.join("\n") });
   const view = {
     state,
-    visibleRanges: [{ from: 0, to: state.doc.length }],
+    visibleRanges: visible
+      ? visible(state.doc)
+      : [{ from: 0, to: state.doc.length }],
     dom: { ownerDocument: { defaultView: { CodeMirror: CM } } },
   };
   const Cls = makeNestedIndentPlugin({ settings: ALL_ON, app: {} });
@@ -480,6 +484,49 @@ ok(
   JSON.stringify([...quotedBox])
 );
 pass("quote levels inside vs outside the box");
+
+/* ------------------------------------------------------------------ */
+/* 8. A line the viewport is split across                              */
+/* ------------------------------------------------------------------ */
+
+// CodeMirror splits `visibleRanges` around whatever a decoration replaces:
+// a rendered link, concealed syntax, the widget standing in for a row's
+// "> " markers. A line carrying one of those appears in TWO ranges, and
+// building it twice re-adds its line decoration behind the marker already
+// added for the same line. RangeSetBuilder rejects that, and CodeMirror
+// answers by disabling the plugin — so a single quoted link used to take
+// quoted bullets, code cards and nested indents down with it.
+{
+  const doc = Text.of(["> quote", "> - item with a link", "> - plain"]);
+  const second = doc.line(2);
+  eq(
+    "a split line is visited once",
+    visibleLineNumbers(doc, [
+      { from: 0, to: second.from + 8 },
+      { from: second.from + 12, to: doc.length },
+    ]),
+    [1, 2, 3]
+  );
+  eq("nothing visible, nothing built", visibleLineNumbers(doc, []), []);
+}
+
+const SPLIT = ["> quote", "> - item with a link", "> - plain"];
+const split = paint(SPLIT, (doc) => [
+  { from: 0, to: doc.line(2).from + 8 },
+  { from: doc.line(2).from + 12, to: doc.length },
+]);
+const splitBullets = split.ranges.filter((r) =>
+  (r.spec?.class ?? "").includes("nf-qlist-marker")
+);
+eq("both quoted bullets survive a split viewport", splitBullets.length, 2);
+eq(
+  "the split line keeps exactly one line decoration",
+  split.ranges.filter(
+    (r) => r.kind === "line" && r.from === split.state.doc.line(2).from
+  ).length,
+  1
+);
+pass("split visible ranges");
 
 console.log(fail === 0 ? `ALL PASS (${checks} checks)` : `${fail} FAILED`);
 process.exit(fail ? 1 : 0);

@@ -40,6 +40,7 @@ const noteText = [
     "# Notion Flow Test",
     "",
     "First paragraph.",
+    "",                   // one blank row at the top level (item 9)
     "```js",              // de-indented to top level
     "const x = 1;",
     "",
@@ -114,13 +115,14 @@ const noteText = [
   const out = v.state.doc.toString();
   ok(
     "fence dragged into quote gets quote markers",
-    out === "\n> ```js\n> const x = 1;\n> ```\n> quoted text",
+    // The first block leaves no leading blank row behind (item 9).
+    out === "> ```js\n> const x = 1;\n> ```\n> quoted text",
     JSON.stringify(out)
   );
   const moved = scanFences(v.state.doc);
   ok(
     "dragged quoted fence remains a code block",
-    moved.length === 1 && moved[0].startLine === 2 && moved[0].endLine === 4,
+    moved.length === 1 && moved[0].startLine === 1 && moved[0].endLine === 3,
     JSON.stringify(moved)
   );
 }
@@ -143,7 +145,7 @@ const noteText = [
   const out = v.state.doc.toString();
   ok(
     "quoted fence can be dragged back out",
-    out === "> before\n> after\n\n```js\n> literal code character\n```\nplain",
+    out === "> before\n> after\n\n```js\n> literal code character\n```\n\nplain",
     JSON.stringify(out)
   );
 }

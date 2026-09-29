@@ -5,6 +5,7 @@ import {
   fenceEnterPlan,
   fenceBackspacePlan,
   fenceExitPlan,
+  quoteEnterPlan,
   findColorTagPairs,
   extractHtmlTitle,
   buildTitledLink,
@@ -330,10 +331,12 @@ const check = (name, got, expected) => {
   const doc = Text.of(["- item", "\t```", "\tcode", "\t```", "next"]);
   const body = doc.line(3);
   const closer = doc.line(4);
+  // "next" follows at once, so a blank seam keeps the new row from merging
+  // into it (lazily, into the list item's paragraph).
   check("exit inserts indented line after closer", fenceExitPlan(doc, body.from + 2), {
     from: closer.to,
     to: closer.to,
-    insert: "\n\t",
+    insert: "\n\t\n",
     cursor: closer.to + 2,
   });
 }
@@ -499,5 +502,111 @@ check(
   buildTitledLink("https://a.b", "t".repeat(200))?.length,
   1 + 160 + 2 + 11 + 1
 );
+
+/* ---------- code rows inside a Callout keep their "> " markers ---------- */
+{
+  // The markers are hidden behind a widget in Live Preview, so a Backspace
+  // that eats them one character at a time looks like nothing happening —
+  // and then drops the row out of the Callout, cutting the block in half.
+  const doc = Text.of([
+    "> [!note] T",
+    "> ```js",
+    "> const a = 1;",
+    "> ",
+    "> ```",
+  ]);
+  const fences = scanFences(doc);
+  const unit = { width: 4, useTab: false };
+  const empty = doc.line(4);
+  const previous = doc.line(3);
+  check(
+    "empty quoted code row joins the row above",
+    fenceBackspacePlan(doc, empty.from + 2, fences, unit),
+    { from: previous.to, to: empty.from + 2, insert: "", cursor: previous.to }
+  );
+  check(
+    "caret inside the markers falls through",
+    fenceBackspacePlan(doc, empty.from + 1, fences, unit),
+    null
+  );
+  const indented = Text.of([
+    "> [!note] T",
+    "> ```js",
+    "> const a = 1;",
+    ">     ",
+    "> ```",
+  ]);
+  const wide = indented.line(4);
+  check(
+    "indentation still dedents first",
+    fenceBackspacePlan(indented, wide.from + 6, scanFences(indented), unit),
+    { from: wide.from + 2, to: wide.from + 6, insert: "", cursor: wide.from + 2 }
+  );
+}
+{
+  // The row above the first body row is the block's own opener: joining onto
+  // its hidden "```js" token would turn the opener into text.
+  const doc = Text.of(["> [!note] T", "> ```js", "> ", "> code", "> ```"]);
+  const fences = scanFences(doc);
+  const first = doc.line(3);
+  const next = doc.line(4);
+  check(
+    "empty first body row is removed, not merged into the opener",
+    fenceBackspacePlan(doc, first.from + 2, fences),
+    { from: first.from, to: next.from, insert: "", cursor: first.from + 2 }
+  );
+  const only = Text.of(["> [!note] T", "> ```js", "> ", "> ```"]);
+  const solo = only.line(3);
+  check(
+    "the only body row holds still",
+    fenceBackspacePlan(only, solo.from + 2, scanFences(only)),
+    { from: solo.from + 2, to: solo.from + 2, insert: "", cursor: solo.from + 2 }
+  );
+}
+{
+  // Enter at the end of the closing "```" is how a new line after the code
+  // block gets written; unprefixed it would land outside the Callout.
+  const doc = Text.of(["> [!note] T", "> ```js", "> code", "> ```"]);
+  const fences = scanFences(doc);
+  const closer = doc.line(4);
+  check(
+    "Enter after a quoted code block stays in the Callout",
+    fenceEnterPlan(doc, closer.to, fences) ?? quoteEnterPlan(doc, closer.to, fences),
+    { from: closer.to, to: closer.to, insert: "\n> ", cursor: closer.to + 3 }
+  );
+  check(
+    "Enter inside the closing marker falls through",
+    fenceEnterPlan(doc, closer.from + 3, fences) ??
+      quoteEnterPlan(doc, closer.from + 3, fences),
+    null
+  );
+  const plain = Text.of(["```js", "code", "```"]);
+  check(
+    "an unquoted closer keeps the default Enter",
+    fenceEnterPlan(plain, plain.line(3).to, scanFences(plain)) ??
+      quoteEnterPlan(plain, plain.line(3).to, scanFences(plain)),
+    null
+  );
+}
+
+{
+  // "Exit code block" inside a Callout must land after the block but still
+  // inside the card. A bare blank row below is already outside it.
+  const doc = Text.of(["> [!note] T", "> ```js", "> code", "> ```", "", "x"]);
+  const body = doc.line(3);
+  const closer = doc.line(4);
+  check(
+    "exit from a quoted fence stays in the Callout",
+    fenceExitPlan(doc, body.from + 6, scanFences(doc)),
+    { from: closer.to, to: closer.to, insert: "\n> ", cursor: closer.to + 3 }
+  );
+  const waiting = Text.of(["> [!note] T", "> ```js", "> code", "> ```", "> ", "> tail"]);
+  const row = waiting.line(5);
+  check(
+    "a quoted blank row below is reused",
+    fenceExitPlan(waiting, waiting.line(3).from + 6, scanFences(waiting)),
+    { from: row.to, to: row.to, insert: "", cursor: row.to }
+  );
+}
 
 process.exit(fail ? 1 : 0);

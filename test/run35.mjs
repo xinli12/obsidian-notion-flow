@@ -265,11 +265,14 @@ pass("an open Callout never exposes the quote markers it is made of");
 /* 4. No widget ever swallows prose                                    */
 /*                                                                     */
 /* A replacement may only cover structure: quote markers, a "[!type]"  */
-/* token, fence markers and their info string, or a caption's HTML.    */
-/* Anything else means text disappearing as the user types.            */
+/* token, fence markers and their info string, or a caption row —      */
+/* either whole (the caret is elsewhere and the row is displayed as    */
+/* one widget) or one of its two tags (the caret is on the row and the */
+/* text between them is being edited in place). Anything else means    */
+/* text disappearing as the user types.                                */
 /* ------------------------------------------------------------------ */
 
-const STRUCTURE = /^(?:[ \t>]*|[ \t>]*\[![^\]]*\][+-]?[ \t]?|[ \t>]*(?:`{3,}|~{3,})[^\n]*|<small class="nf-caption"[^>]*>.*<\/small>)$/;
+const STRUCTURE = /^(?:[ \t>]*|[ \t>]*\[![^\]]*\][+-]?[ \t]?|[ \t>]*(?:`{3,}|~{3,})[^\n]*|<small class="nf-caption"[^>]*>(?:.*<\/small>[ \t]*)?|<\/small>[ \t]*)$/;
 
 for (const [name, lines] of Object.entries(SHAPES)) {
   const text = lines.join("\n");
@@ -287,6 +290,109 @@ for (const [name, lines] of Object.entries(SHAPES)) {
   }
 }
 pass("no widget hides anything but structural markers");
+
+/* ------------------------------------------------------------------ */
+/* 5. A caption is edited in place                                     */
+/*                                                                     */
+/* The row is portable HTML, but the caret has to reach every position */
+/* of the TEXT and none outside it: a keystroke landing past the       */
+/* closing tag writes outside the caption and silently unmakes it.     */
+/* ------------------------------------------------------------------ */
+
+{
+  const lines = [
+    "```js",
+    "const a = 1;",
+    "```",
+    '<small class="nf-caption" data-nf-kind="code">A caption</small>',
+  ];
+  const doc = lines.join("\n");
+  const captionLine = doc.length - lines[3].length;
+  const bodyFrom = captionLine + '<small class="nf-caption" data-nf-kind="code">'.length;
+  const bodyTo = bodyFrom + "A caption".length;
+  const { ranges } = buildAt(lines, bodyFrom + 2);
+  const replaced = ranges.filter(
+    (range) => range.kind === "replace" && range.to > captionLine
+  );
+  ok(
+    "the opening tag is hidden",
+    replaced.some((r) => r.from === captionLine && r.to === bodyFrom),
+    JSON.stringify(replaced)
+  );
+  ok(
+    "the closing tag is hidden",
+    replaced.some((r) => r.from === bodyTo && r.to === doc.length),
+    JSON.stringify(replaced)
+  );
+  ok(
+    "no replacement touches the caption text",
+    replaced.every((r) => r.to <= bodyFrom || r.from >= bodyTo),
+    JSON.stringify(replaced)
+  );
+  ok(
+    "the caption text is marked, not replaced",
+    ranges.some(
+      (r) =>
+        r.kind === "mark" &&
+        r.from === bodyFrom &&
+        r.to === bodyTo &&
+        (r.spec?.class ?? "").includes("nf-caption-text")
+    ),
+    JSON.stringify(ranges.filter((r) => r.kind === "mark"))
+  );
+  // Caret elsewhere: the row is displayed as one widget. Obsidian renders
+  // a row that is nothing but HTML through its own atomic inline embed, so
+  // leaving the row to it would make a click select the whole line.
+  const atRest = buildAt(lines, 0);
+  ok(
+    "a caption at rest is one widget over the whole row",
+    atRest.ranges.some(
+      (r) =>
+        r.kind === "replace" &&
+        r.from === captionLine &&
+        r.to === doc.length &&
+        r.spec?.widget?.constructor?.name === "VisualBlockCaptionWidget"
+    ),
+    JSON.stringify(atRest.ranges.filter((r) => r.kind === "replace"))
+  );
+  ok(
+    "a caption at rest leaves no editable text behind",
+    !atRest.ranges.some(
+      (r) => r.kind === "mark" && (r.spec?.class ?? "").includes("nf-caption-text")
+    )
+  );
+  // An empty caption is a row that is being written: nothing to mark, and
+  // the two tags still have to be out of the caret's way.
+  const emptyLines = [
+    "```js",
+    "const a = 1;",
+    "```",
+    '<small class="nf-caption" data-nf-kind="code"></small>',
+  ];
+  const emptyDoc = emptyLines.join("\n");
+  const emptyBody =
+    emptyDoc.length -
+    emptyLines[3].length +
+    '<small class="nf-caption" data-nf-kind="code">'.length;
+  const empty = buildAt(emptyLines, emptyBody);
+  ok(
+    "an empty caption still hides both tags",
+    empty.ranges.filter(
+      (r) => r.kind === "replace" && r.from >= emptyBody - 46 && r.to > emptyBody - 46
+    ).length >= 2,
+    JSON.stringify(empty.ranges.filter((r) => r.kind === "replace"))
+  );
+  ok(
+    "an empty caption line advertises itself",
+    empty.ranges.some(
+      (r) =>
+        r.kind === "line" &&
+        (r.spec?.attributes?.class ?? "").includes("nf-caption-line") &&
+        (r.spec?.attributes?.class ?? "").includes("is-empty")
+    )
+  );
+}
+pass("captions are edited in place");
 
 console.log(fail === 0 ? `ALL PASS (${checks} checks)` : `${fail} FAILED`);
 process.exit(fail ? 1 : 0);

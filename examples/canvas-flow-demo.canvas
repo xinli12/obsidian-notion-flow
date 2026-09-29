@@ -1,0 +1,309 @@
+{
+	"nodes": [
+		{
+			"id": "root",
+			"type": "text",
+			"text": "# 知识画布\n像思维导图一样展开，\n用自由关系连接想法。",
+			"x": 0,
+			"y": 0,
+			"width": 300,
+			"height": 150,
+			"nfLayout": "balanced"
+		},
+		{
+			"id": "grow",
+			"type": "text",
+			"text": "## ① 快速展开",
+			"x": 372,
+			"y": -46,
+			"width": 200,
+			"height": 56,
+			"color": "5"
+		},
+		{
+			"id": "grow-tab",
+			"type": "text",
+			"text": "Tab：新建子主题",
+			"x": 644,
+			"y": -101,
+			"width": 180,
+			"height": 42,
+			"color": "5"
+		},
+		{
+			"id": "grow-enter",
+			"type": "text",
+			"text": "Enter：新建同级主题",
+			"x": 644,
+			"y": -39,
+			"width": 200,
+			"height": 42,
+			"color": "5"
+		},
+		{
+			"id": "grow-fit",
+			"type": "text",
+			"text": "写完自动贴合文字",
+			"x": 644,
+			"y": 23,
+			"width": 180,
+			"height": 42,
+			"color": "5"
+		},
+		{
+			"id": "drag",
+			"type": "text",
+			"text": "## ② 拖动与折叠",
+			"x": 372,
+			"y": 140,
+			"width": 220,
+			"height": 56,
+			"color": "4"
+		},
+		{
+			"id": "drag-branch",
+			"type": "text",
+			"text": "拖动卡片，整个分支随行",
+			"x": 664,
+			"y": 85,
+			"width": 230,
+			"height": 42,
+			"color": "4"
+		},
+		{
+			"id": "drag-drop",
+			"type": "text",
+			"text": "放到另一张卡片上即改挂",
+			"x": 664,
+			"y": 147,
+			"width": 230,
+			"height": 42,
+			"color": "4"
+		},
+		{
+			"id": "drag-fold",
+			"type": "text",
+			"text": "点分支线上的圆点折叠",
+			"x": 664,
+			"y": 209,
+			"width": 220,
+			"height": 42,
+			"color": "4",
+			"nfCollapsed": true
+		},
+		{
+			"id": "drag-fold-hidden",
+			"type": "text",
+			"text": "折叠的内容仍在文件里",
+			"x": 664,
+			"y": 209,
+			"width": 220,
+			"height": 42,
+			"color": "4"
+		},
+		{
+			"id": "outline",
+			"type": "text",
+			"text": "## ③ 大纲进出",
+			"x": -272,
+			"y": -3,
+			"width": 200,
+			"height": 56,
+			"color": "2"
+		},
+		{
+			"id": "outline-paste",
+			"type": "text",
+			"text": "粘贴 Markdown 列表生成分支",
+			"x": -644,
+			"y": -27,
+			"width": 300,
+			"height": 42,
+			"color": "2"
+		},
+		{
+			"id": "outline-copy",
+			"type": "text",
+			"text": "复制分支为大纲",
+			"x": -524,
+			"y": 35,
+			"width": 180,
+			"height": 42,
+			"color": "2"
+		},
+		{
+			"id": "focus",
+			"type": "text",
+			"text": "## ④ 聚焦思考",
+			"x": -272,
+			"y": 97,
+			"width": 200,
+			"height": 56,
+			"color": "6"
+		},
+		{
+			"id": "focus-dim",
+			"type": "text",
+			"text": "淡化其余内容，Esc 退出",
+			"x": -574,
+			"y": 104,
+			"width": 230,
+			"height": 42,
+			"color": "6"
+		},
+		{
+			"id": "keys",
+			"type": "text",
+			"text": "### 键盘\n- ↑↓←→：在导图内移动\n- Alt+Shift+方向键：调整顺序\n- Mod+/：折叠\n- F2：编辑",
+			"x": 1274,
+			"y": -161,
+			"width": 300,
+			"height": 210
+		},
+		{
+			"id": "idea",
+			"type": "text",
+			"text": "## 灵感暂存\n选中我，在「更多」中选择\n「列表展开为分支」：\n- 读书\n\t- 历史\n\t- 哲学\n- 旅行",
+			"x": -644,
+			"y": 371,
+			"width": 300,
+			"height": 310
+		}
+	],
+	"edges": [
+		{
+			"id": "e-grow",
+			"fromNode": "root",
+			"toNode": "grow",
+			"toEnd": "none",
+			"color": "5",
+			"fromSide": "right",
+			"toSide": "left"
+		},
+		{
+			"id": "e-grow-tab",
+			"fromNode": "grow",
+			"toNode": "grow-tab",
+			"toEnd": "none",
+			"color": "5",
+			"fromSide": "right",
+			"toSide": "left"
+		},
+		{
+			"id": "e-grow-enter",
+			"fromNode": "grow",
+			"toNode": "grow-enter",
+			"toEnd": "none",
+			"color": "5",
+			"fromSide": "right",
+			"toSide": "left"
+		},
+		{
+			"id": "e-grow-fit",
+			"fromNode": "grow",
+			"toNode": "grow-fit",
+			"toEnd": "none",
+			"color": "5",
+			"fromSide": "right",
+			"toSide": "left"
+		},
+		{
+			"id": "e-drag",
+			"fromNode": "root",
+			"toNode": "drag",
+			"toEnd": "none",
+			"color": "4",
+			"fromSide": "right",
+			"toSide": "left"
+		},
+		{
+			"id": "e-drag-branch",
+			"fromNode": "drag",
+			"toNode": "drag-branch",
+			"toEnd": "none",
+			"color": "4",
+			"fromSide": "right",
+			"toSide": "left"
+		},
+		{
+			"id": "e-drag-drop",
+			"fromNode": "drag",
+			"toNode": "drag-drop",
+			"toEnd": "none",
+			"color": "4",
+			"fromSide": "right",
+			"toSide": "left"
+		},
+		{
+			"id": "e-drag-fold",
+			"fromNode": "drag",
+			"toNode": "drag-fold",
+			"toEnd": "none",
+			"color": "4",
+			"fromSide": "right",
+			"toSide": "left"
+		},
+		{
+			"id": "e-drag-hidden",
+			"fromNode": "drag-fold",
+			"toNode": "drag-fold-hidden",
+			"toEnd": "none",
+			"color": "4",
+			"fromSide": "right",
+			"toSide": "left"
+		},
+		{
+			"id": "e-outline",
+			"fromNode": "root",
+			"toNode": "outline",
+			"toEnd": "none",
+			"color": "2",
+			"fromSide": "left",
+			"toSide": "right"
+		},
+		{
+			"id": "e-outline-paste",
+			"fromNode": "outline",
+			"toNode": "outline-paste",
+			"toEnd": "none",
+			"color": "2",
+			"fromSide": "left",
+			"toSide": "right"
+		},
+		{
+			"id": "e-outline-copy",
+			"fromNode": "outline",
+			"toNode": "outline-copy",
+			"toEnd": "none",
+			"color": "2",
+			"fromSide": "left",
+			"toSide": "right"
+		},
+		{
+			"id": "e-focus",
+			"fromNode": "root",
+			"toNode": "focus",
+			"toEnd": "none",
+			"color": "6",
+			"fromSide": "left",
+			"toSide": "right"
+		},
+		{
+			"id": "e-focus-dim",
+			"fromNode": "focus",
+			"toNode": "focus-dim",
+			"toEnd": "none",
+			"color": "6",
+			"fromSide": "left",
+			"toSide": "right"
+		},
+		{
+			"id": "relation",
+			"fromNode": "grow-fit",
+			"toNode": "keys",
+			"label": "带标签的连线是关系线",
+			"color": "3",
+			"toEnd": "arrow"
+		}
+	]
+}

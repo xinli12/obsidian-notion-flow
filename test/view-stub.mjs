@@ -1,5 +1,8 @@
 export const ViewPlugin = { fromClass: (c) => c };
-export class EditorView {}
+export class EditorView {
+  /* Tests hang a fake view on a fake element to be found again. */
+  static findFromDOM(dom) { return dom?.__nfView ?? null; }
+}
 export class WidgetType {}
 export class ViewUpdate {}
 /* Decorations are recorded rather than rendered. The ranges a build pass
@@ -26,3 +29,4 @@ export const Decoration = {
 export class DecorationSet {}
 export const keymap = { of: (bindings) => bindings };
 export function runScopeHandlers() { return false; }
+export const tooltips = () => [];

@@ -139,6 +139,29 @@ const rowsOf = (text) => text.split("\n");
     "center"
   );
 
+  // Emoji, escaped pipes and joiner sequences are measured as they
+  // render, so the padding lines the columns up.
+  eq("an emoji cell is two columns wide", rowsOf(formatTable(["| ✅ | a |", "| --- | --- |", "| abc | b |"].join("\n"))), [
+    "| ✅  | a   |",
+    "| --- | --- |",
+    "| abc | b   |",
+  ]);
+  eq("an escaped pipe counts once", rowsOf(formatTable(["| a\\|b | c |", "| --- | --- |", "| xyz | d |"].join("\n"))), [
+    "| a\\|b | c   |",
+    "| --- | --- |",
+    "| xyz | d   |",
+  ]);
+  eq("a ZWJ family is one glyph", rowsOf(formatTable(["| 👨‍👩‍👧 | x |", "| --- | --- |", "| abc | y |"].join("\n"))), [
+    "| 👨‍👩‍👧  | x   |",
+    "| --- | --- |",
+    "| abc | y   |",
+  ]);
+  eq("a text check mark stays narrow", rowsOf(formatTable(["| ✓ | y |", "| --- | --- |", "| abc | z |"].join("\n"))), [
+    "| ✓   | y   |",
+    "| --- | --- |",
+    "| abc | z   |",
+  ]);
+
   const indented = ["  > | a | b |", "  > | --- | --- |"].join("\n");
   eq("an indented Callout's table keeps both prefixes", rowsOf(formatTable(indented)), [
     "  > | a   | b   |",
@@ -215,10 +238,18 @@ const runSlash = (lines, lineNo, id, start) => {
     runSlash(["> [!note] T", "> - item /"], 1, "table", 9).slice(3, 5),
     [">   |     |     |     |", ">   | --- | --- | --- |"]
   );
+  // A bare bullet gives way to the block (item 14): no empty bullet is left
+  // beside the code, which sits under the parent item at the bullet's own
+  // column, every row alike, after a marker seam row.
   eq(
-    "a deeper quoted item gets its own column",
+    "a deeper bare quoted bullet gives way to the block at its column",
     runSlash(["> [!note] T", "> - a", ">   - /"], 2, "code", 6),
-    ["> [!note] T", "> - a", ">   - ", ">     ```", ">     ", ">     ```"]
+    ["> [!note] T", "> - a", ">", ">   ```", ">   ", ">   ```"]
+  );
+  eq(
+    "…and a deeper quoted item with text still nests the block under it",
+    runSlash(["> [!note] T", "> - a", ">   - b /"], 2, "code", 8),
+    ["> [!note] T", "> - a", ">   - b ", ">     ```", ">     ", ">     ```"]
   );
   // Directly in the Callout — no list — the block stays at the box column.
   eq(
@@ -226,11 +257,12 @@ const runSlash = (lines, lineNo, id, start) => {
     runSlash(["> [!note] T", "> body /"], 1, "code", 7),
     ["> [!note] T", "> body ", "> ```", "> ", "> ```"]
   );
-  // Outside a quote the existing list behaviour is untouched.
+  // Outside a quote the block nests under the item, its empty body row
+  // included: a blank row there would end the list and leave the fence open.
   eq(
-    "/code in a plain list item is unchanged",
+    "/code in a plain list item keeps every row in the item",
     runSlash(["- item /"], 0, "code", 7),
-    ["- item ", "  ```", "", "  ```"]
+    ["- item ", "  ```", "  ", "  ```"]
   );
 }
 

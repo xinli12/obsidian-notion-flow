@@ -15,13 +15,15 @@ import {
   PluginSettingTab,
   Scope,
   Setting,
+  SettingGroup,
   TFile,
   editorLivePreviewField,
   htmlToMarkdown,
-  requestUrl,
+  normalizePath,
   setIcon,
 } from "obsidian";
-import type { EventRef } from "obsidian";
+import type { Command, DropdownComponent, EventRef, Hotkey, MarkdownPostProcessorContext, MarkdownRenderChild, MenuItem, Modifier } from "obsidian";
+import * as obsidianApi from "obsidian";
 import {
   Decoration,
   DecorationSet,
@@ -31,8 +33,10 @@ import {
   WidgetType,
   keymap,
   runScopeHandlers,
+  tooltips,
 } from "@codemirror/view";
 import {
+  ChangeSet,
   EditorSelection,
   EditorState,
   Prec,
@@ -44,18 +48,138 @@ import {
   Transaction,
   findClusterBreak,
 } from "@codemirror/state";
+import type { Extension, TransactionSpec } from "@codemirror/state";
+import type { KeyBinding } from "@codemirror/view";
 import { syntaxTree } from "@codemirror/language";
 import { markdown } from "@codemirror/lang-markdown";
 import { autocompletion } from "@codemirror/autocomplete";
-import type { Completion, CompletionContext } from "@codemirror/autocomplete";
+import type { Completion, CompletionContext, CompletionResult, CompletionSection } from "@codemirror/autocomplete";
 import type { SyntaxNode, Tree } from "@lezer/common";
 import { t } from "./i18n";
+import { buildPasteLink, RE_HTTP_URL, urlPasteContextAllowed } from "./core/url-links";
+export { buildPasteLink, buildTitledLink, extractHtmlTitle, urlPasteContextAllowed } from "./core/url-links";
+import { findColorTagPairs, cachedColorTagPairs, sourceOffsetFromVisibleOffset, concealedTagPairs, shouldConcealTagPair, concealBoundaryProtectionEnabled, clampRangeOutOfTags, type TagPair } from "./core/inline-tags";
+import { guard } from "./editor/safe-build";
+export { findColorTagPairs, sourceOffsetFromVisibleOffset, concealedTagPairs, shouldConcealTagPair, concealBoundaryProtectionEnabled, clampRangeOutOfTags } from "./core/inline-tags";
+import { encodeCommentAttr, decodeCommentAttr } from "./core/comments";
+export { encodeCommentAttr, decodeCommentAttr, buildCommentWrap } from "./core/comments";
+import { CommentController, CommentIconWidget } from "./features/comments";
+import { LinkPopover } from "./ui/link-popover";
+import {
+  canWriteWikiLink,
+  enclosingMarkdownLink,
+  enclosingWikiLink,
+  escapeLinkLabelPipes,
+  isValidLinkDest,
+  linkCardTarget,
+  normalizeLinkDest,
+  rewriteMarkdownLink,
+  rewriteWikiLink,
+  unlinkMarkdownLink,
+  unlinkWikiLink,
+  unwrapLinkDest,
+  wikiLinkFields,
+  wikiLinkToMarkdown,
+  type MarkdownLink,
+  type WikiLink,
+} from "./core/markdown-links";
+import { EditorOperationScope, operationLifecycle } from "./editor/operation-scope";
+import { BlockClipboard } from "./editor/block-clipboard";
+import { PastedUrlTitles } from "./features/pasted-url-titles";
+import { searchSlashCommands, slashCommandEnabled } from "./core/slash-search";
+import { listMarkerBackspacePlan } from "./core/list-backspace";
+import { preferTsvOverHtml, tsvToMarkdownTable } from "./core/tsv-table";
+import { chordLabel, commandHotkey, commandShortcut, expandProseChords } from "./core/keys";
+export { commandHotkey, expandProseChords } from "./core/keys";
+import { ShortcutsModal } from "./ui/shortcuts-modal";
+import type { HelpRow, HelpSection } from "./ui/help-sections";
+
+import { buildLineDepthIndexRange } from "./core/line-depth-index";
+import { createCaptionEditingExtensions } from "./editor/caption-lifecycle";
+import { CanvasEnhancements } from "./canvas/enhancements";
+import type { CanvasSettings } from "./canvas/enhancements";
+import {
+  COLOR_KEYS,
+  COMPONENT_KEYS,
+  NOTE_STYLE_DEFAULTS,
+  applyBodyStyle,
+  canvasPaletteFor,
+  clearBodyStyle,
+  computeBodyStyle,
+  migrateStyleSettings,
+  normalizeStyleSettings,
+  type BodyStyle,
+  type NoteStyleSettings,
+  type StyleEnv,
+} from "./features/style-presets";
+import { renderNoteStyleSection, type NoteStyleHost } from "./ui/style-gallery";
+import { codeThemeGallery, colorDot, renderSettingsPreview, type DotKey } from "./ui/settings-preview";
+import { StyleSwitcherModal } from "./ui/style-switcher";
+import { TOC_SLASH_ENTRY, applyTocRefresh, findTocBlocks, scanHeadings, tocSnippet, type TocBlock, type TocOptions } from "./features/toc";
+import { runTemplateEntry, templateSlashEntries } from "./features/slash-templates";
+import { CODE_LANGUAGE_LIST, languageLabel } from "./core/code-languages";
+import { openLanguagePicker } from "./ui/language-picker";
+import { registerCommentsList } from "./features/comments-list";
+import { registerPageStyle } from "./features/page-style";
+import { PageHeader } from "./features/page-header";
+import { WhatsNewModal, createTourNote, noticeLink } from "./ui/whats-new";
+import {
+  COLOR_LABEL_KEYS,
+  blockColorSupport,
+  blockTextColorChanges,
+  currentBlockColors,
+  findBlockBgMarker,
+  makeBlockBackgroundPlugin,
+  setBlockBgMarker,
+} from "./features/block-color";
+import {
+  NOTE_EMOJI,
+  NOTE_EMOJI_RECENT_KEY,
+  calloutIconFromMeta,
+  currentCalloutIcon,
+  openIconPicker,
+  setCalloutIconToken,
+} from "./ui/callout-icon-picker";
+import { TOGGLE_FOLD_USER_EVENT, planToggleFold, registerToggleFoldCommands } from "./features/toggle-fold-all";
+export { normalizeStyleSettings } from "./features/style-presets";
+export { GATE_SETTING } from "./ui/style-gallery";
+export { createCaptionEditingExtensions } from "./editor/caption-lifecycle";
+export { preferTsvOverHtml } from "./core/tsv-table";
 
 /* ------------------------------------------------------------------ */
 /* Settings                                                            */
 /* ------------------------------------------------------------------ */
 
 interface NotionFlowSettings {
+  canvasEnhancements: boolean;
+  canvasAppearance: boolean;
+  canvasKeyboard: boolean;
+  /** While typing a topic: Enter finishes it and adds a sibling, Tab a child. */
+  canvasEditorKeys: boolean;
+  /** Mind maps re-arrange themselves after edits, drags, and deletions. */
+  canvasAutoLayout: boolean;
+  /** Mind-map text cards shrink or grow to their text when editing ends. */
+  canvasAutoFit: boolean;
+  canvasComfortableEdit: boolean;
+  canvasCardSize: string;
+  /** Cards glide to where a mind-map layout puts them. */
+  canvasAnimation: boolean;
+  /** An overview of the canvas appears when part of it is off screen. */
+  canvasMinimap: boolean;
+  /** Default look for maps without their own: "clean", "cards", "vivid", "minimal", "pastel", or "gradient". */
+  canvasMapStyle: string;
+  /** Default branch lines: "auto" (by structure), "organic", "curve", "elbow", or "straight". */
+  canvasLineStyle: string;
+  /** Default typeface for maps without their own: "default" (note font), "sans", "serif", or "kai". */
+  canvasFont: string;
+  /** Card outline, line weight and text size of maps without their own. */
+  canvasShape: string;
+  canvasLineWeight: string;
+  canvasTextScale: string;
+  /** The dot pattern behind the canvas: dots, faint, or plain. */
+  canvasBackground: string;
+  /** Branch cards show how many of their tasks are done. */
+  canvasTaskProgress: boolean;
   dragHandles: boolean;
   slashCommands: boolean;
   floatingToolbar: boolean;
@@ -63,6 +187,8 @@ interface NotionFlowSettings {
   pasteUrlLinks: boolean;
   /** Pasting a bare URL fetches the page title → [Title](url). */
   pasteUrlTitles: boolean;
+  /** Tab-separated text pasted on an empty line becomes a table. */
+  pasteTableFromTsv: boolean;
   tableEditing: boolean;
   /** Quote/Callout QoL: smart Enter/Backspace, quoted pastes, type menu. */
   calloutEditing: boolean;
@@ -89,6 +215,11 @@ interface NotionFlowSettings {
   /** Notion-style comments: selection-anchored notes stored in a span's
    *  data attribute, shown as a yellow anchor + 💬 icon. */
   commenting: boolean;
+  /** Hovering commented text shows a card with the note, Edit and Resolve. */
+  commentHoverCard: boolean;
+  /** Hovering above a note's title offers an emoji icon and a cover
+   *  (frontmatter icon / cover / cover-style), Notion-style. */
+  pageHeader: boolean;
   /** Notion-like table chrome: rounded border, header wash, row hover. */
   tableStyle: boolean;
   /** Hide the plugin's own inline HTML color tags while editing. */
@@ -98,28 +229,105 @@ interface NotionFlowSettings {
   /** Conceal a heading's "#" run on the active line too, so a heading
    *  looks like one the moment it is typed. */
   concealHeadings: boolean;
-  /** "default" (theme), "none", or a theme palette color name (red …). */
+  /** Backspace at the start of a list or to-do item removes its marker
+   *  in one step, back to plain text at the same depth. */
+  markerBackspace: boolean;
+  /** Slash commands used lately, most recent first, so the empty menu
+   *  leads with them across sessions. */
+  slashRecent: string[];
+  /** The palette name (or "default" for the theme highlight) picked last
+   *  from the toolbar, re-applied by the last-used commands and swatches. */
+  lastTextColor: string | null;
+  lastHighlightColor: string | null;
+  /** moment.js formats the slash menu's date and time entries write. */
+  dateFormat: string;
+  timeFormat: string;
+  /** "auto" (the default) follows the note palette; "default" (theme),
+   *  "none", or a theme palette color name (red …) pins it. */
   tableHeaderColor: string;
   tableStripes: boolean;
-  /** "accent", "default" (theme), or a theme palette color name. */
+  /** "auto" (the default) follows the note palette — the accent under
+   *  Classic; "accent", "default" (theme), or a palette color pin it. */
   listMarkerColor: string;
-  /** "text" (neutral ink), "accent", "default" (theme), or a palette color. */
+  /** "auto" (the default) follows the note palette — neutral ink under
+   *  Classic; "text", "accent", "default" (theme), or a palette color pin it. */
   quoteBarColor: string;
-  /** "default" (theme) or a theme palette color name. Notion inks `code`
-   *  red, so red is the default. */
+  /** "auto" (the default) follows the note palette — Notion's red ink
+   *  under Classic; "default" (theme) or a palette color name pins it. */
   inlineCodeColor: string;
-  /** "default" keeps the active Obsidian theme; the other values apply a
-   *  bundled syntax palette to fenced code blocks only. */
+  /** "auto" (the default) follows the note palette — the theme's own
+   *  colors under Classic; "default" keeps the active Obsidian theme; the
+   *  other values apply a bundled syntax palette to fenced code blocks. */
   codeTheme: string;
+  /** "auto" (the default) follows the note look; "header" keeps
+   *  Obsidian's colored title strip on Callouts, "flat" is the Notion-like
+   *  box whose title sits inside the body, and the rest are the look
+   *  recipes' shapes (COMPONENTS.calloutStyle in style-presets). */
+  calloutStyle: string;
+  /** Note style (DESIGN-SPEC §4): a palette id and a look id — unknown ids
+   *  read as "classic" — plus the palette's paper surface ("theme", "page",
+   *  "app") and whether headings and links take its inks. */
+  palette: string;
+  look: string;
+  paletteSurface: string;
+  paletteHeadings: boolean;
+  paletteLinks: boolean;
+  /** Per-component overrides of the look's recipe; "auto" follows it. */
+  headingStyle: string;
+  highlightStyle: string;
+  tableLook: string;
+  quoteStyle: string;
+  bulletStyle: string;
+  checkboxStyle: string;
+  dividerStyle: string;
+  toggleStyle: string;
+  columnStyle: string;
+  inlineCodeStyle: string;
+  decorColor: string;
+  /** Mind maps without a palette of their own use the one paired with the
+   *  note palette. */
+  canvasFollowPalette: boolean;
+  /** The note-style settings schema data.json was migrated to (state). */
+  styleSchema: number;
+  /** Canvas color schemes the user saved (state, user-made content). */
+  canvasUserSchemes: CanvasUserSchemes;
+  /** Derived from palette + canvasFollowPalette for the canvas planner;
+   *  never written to data.json. */
+  canvasFallbackPalette?: string | null;
 }
 
-const DEFAULT_SETTINGS: NotionFlowSettings = {
+/** The canvas package owns the scheme type; until it declares the key the
+ *  list is opaque. Either way `settings` stays assignable to CanvasSettings. */
+type CanvasUserSchemes = CanvasSettings extends { canvasUserSchemes?: infer T }
+  ? unknown extends T ? unknown[] : NonNullable<T>
+  : unknown[];
+
+export const DEFAULT_SETTINGS: NotionFlowSettings = {
+  canvasEnhancements: true,
+  canvasAppearance: true,
+  canvasKeyboard: true,
+  canvasEditorKeys: true,
+  canvasAutoLayout: true,
+  canvasAutoFit: true,
+  canvasComfortableEdit: true,
+  canvasCardSize: "comfortable",
+  canvasAnimation: true,
+  canvasMinimap: true,
+  canvasMapStyle: "clean",
+  canvasLineStyle: "auto",
+  canvasFont: "default",
+  canvasShape: "rounded",
+  canvasLineWeight: "normal",
+  canvasTextScale: "normal",
+  canvasBackground: "dots",
+  canvasTaskProgress: true,
   dragHandles: true,
   slashCommands: true,
   floatingToolbar: true,
   cleanRendering: true,
   pasteUrlLinks: true,
   pasteUrlTitles: true,
+  pasteTableFromTsv: true,
   tableEditing: true,
   calloutEditing: true,
   codeBlockEditing: true,
@@ -130,17 +338,134 @@ const DEFAULT_SETTINGS: NotionFlowSettings = {
   columnLayout: true,
   toggleBlocks: true,
   commenting: true,
+  commentHoverCard: true,
+  pageHeader: true,
   tableStyle: true,
   concealHtml: true,
   concealMarkdown: true,
   concealHeadings: true,
-  tableHeaderColor: "default",
+  markerBackspace: true,
+  slashRecent: [],
+  lastTextColor: null,
+  lastHighlightColor: null,
+  dateFormat: "YYYY-MM-DD",
+  timeFormat: "HH:mm",
   tableStripes: false,
-  listMarkerColor: "accent",
-  quoteBarColor: "text",
-  inlineCodeColor: "red",
-  codeTheme: "default",
+  // Palette, look, the component overrides and the five colour keys
+  // (all "auto"), canvasFollowPalette and styleSchema.
+  ...NOTE_STYLE_DEFAULTS,
+  canvasUserSchemes: [],
 };
+
+/**
+ * Keys of DEFAULT_SETTINGS that are remembered state rather than a
+ * preference: they never make the settings tab read as customised.
+ * `slashRecent` is the slash menu's recency list and `canvasUserSchemes`
+ * the schemes a user saved — both fresh arrays after every change and
+ * every load (so never `===` their default), both kept by a reset;
+ * `styleSchema` records the settings migration.
+ */
+const SETTINGS_STATE_KEYS: ReadonlySet<keyof NotionFlowSettings> = new Set([
+  "slashRecent",
+  "styleSchema",
+  "canvasUserSchemes",
+]);
+
+/**
+ * The settings a data.json object loads as, and whether the load changed
+ * what must be stored (the one-shot note-style migration, DESIGN-SPEC
+ * §4.4). The migration looks at the RAW saved object — merged with the
+ * defaults it would already read `styleSchema: 1` and never run. Invalid
+ * style values then resolve to "auto" / "classic" in memory only, and the
+ * array keys are always fresh copies (never DEFAULT_SETTINGS' own).
+ */
+export function loadedSettings(
+  data: Record<string, unknown> | null | undefined
+): { settings: NotionFlowSettings; persist: boolean } {
+  const saved: Record<string, unknown> = { ...(data ?? {}) };
+  delete saved.lastSeenVersion;
+  const patch = data ? migrateStyleSettings(saved) : {};
+  const settings = { ...DEFAULT_SETTINGS, ...saved, ...patch } as NotionFlowSettings;
+  Object.assign(settings, normalizeStyleSettings(settings as unknown as Record<string, unknown>));
+  settings.canvasUserSchemes = (
+    Array.isArray(saved.canvasUserSchemes) ? [...saved.canvasUserSchemes] : []
+  ) as CanvasUserSchemes;
+  return { settings, persist: Object.keys(patch).length > 0 };
+}
+
+/** Whether every preference still has its default value. */
+export function settingsAtDefaults(settings: NotionFlowSettings): boolean {
+  return (Object.keys(DEFAULT_SETTINGS) as Array<keyof NotionFlowSettings>)
+    .filter((key) => !SETTINGS_STATE_KEYS.has(key))
+    .every((key) => settings[key] === DEFAULT_SETTINGS[key]);
+}
+
+/** The note-style keys. Only applyCleanClass reads them (body classes and
+ *  variables), never an editor extension. */
+const NOTE_STYLE_KEYS: ReadonlySet<string> = new Set([
+  "palette",
+  "look",
+  "paletteSurface",
+  "paletteHeadings",
+  "paletteLinks",
+  ...COMPONENT_KEYS,
+  ...COLOR_KEYS,
+]);
+
+/**
+ * Keys no editor extension reads while it is configured: the toolbar and
+ * the slash menu read the remembered colours and recents when they act,
+ * the note style lives on <body>, the page header is DOM of its own that
+ * saveSettings refreshes, and every `canvas…` key belongs to the canvas
+ * manager, which refresh() updates. Changing only these must not run
+ * `workspace.updateOptions()`, which reconfigures every open editor.
+ */
+const LIVE_SETTING_KEYS: ReadonlySet<string> = new Set([
+  "lastTextColor",
+  "lastHighlightColor",
+  "slashRecent",
+  "styleSchema",
+  "canvasFallbackPalette",
+  "pageHeader",
+  ...NOTE_STYLE_KEYS,
+]);
+
+/** `[key, value]` pairs of the kept keys, sorted, as one comparable string. */
+function settingsKeyOf(settings: NotionFlowSettings, keep: (key: string) => boolean): string {
+  const values = settings as unknown as Record<string, unknown>;
+  return JSON.stringify(
+    Object.keys(values)
+      .filter(keep)
+      .sort()
+      .map((key) => [key, values[key]])
+  );
+}
+
+/** The settings the Markdown editors are configured from: saveSettings
+ *  reconfigures them only when this changes. */
+export function editorSensitiveKey(settings: NotionFlowSettings): string {
+  return settingsKeyOf(
+    settings,
+    (key) => !LIVE_SETTING_KEYS.has(key) && !key.startsWith("canvas")
+  );
+}
+
+/** The note-style settings alone: a change re-measures the editors, since
+ *  the body classes it swaps change line heights. */
+export function noteStyleKey(settings: NotionFlowSettings): string {
+  return settingsKeyOf(settings, (key) => NOTE_STYLE_KEYS.has(key));
+}
+
+/** What data.json stores: the settings, stamped with the version writing
+ *  them, without the derived canvasFallbackPalette. */
+export function persistedSettings(
+  settings: NotionFlowSettings,
+  version: string
+): Record<string, unknown> {
+  const data: Record<string, unknown> = { ...settings, lastSeenVersion: version };
+  delete data.canvasFallbackPalette;
+  return data;
+}
 
 /** The writing palette. */
 const PALETTE_COLORS = [
@@ -203,18 +528,13 @@ const CODE_THEMES = [
   "nord",
   "solarized",
 ] as const;
-const CODE_THEME_LABELS: Record<(typeof CODE_THEMES)[number], string> = {
-  default: "Theme default",
-  obsidian: "Obsidian adaptive",
-  github: "GitHub",
-  vscode: "VS Code",
-  "one-dark": "One Dark",
-  catppuccin: "Catppuccin",
-  "tokyo-night": "Tokyo Night",
-  gruvbox: "Gruvbox",
-  dracula: "Dracula",
-  nord: "Nord",
-  solarized: "Solarized",
+
+/** What the note-style module needs from this file: the palette's ink and
+ *  tint expressions (with their light-mode fallbacks) and the code themes. */
+export const noteStyleEnv: StyleEnv = {
+  paletteText: paletteTextColor,
+  paletteTint,
+  codeThemes: CODE_THEMES,
 };
 
 /** Responsive Mermaid sizing kept separate from the DOM hook so the wide
@@ -241,82 +561,19 @@ export function mermaidViewport(
 /* Paste URL over selection → markdown link                            */
 /* ------------------------------------------------------------------ */
 
-const RE_URL = /^(https?|obsidian):\/\/\S+$/i;
-
-const RE_HTTP_URL = /^https?:\/\/\S+$/i;
-
-const NAMED_ENTITIES: Record<string, string> = {
-  lt: "<",
-  gt: ">",
-  quot: '"',
-  apos: "'",
-  nbsp: " ",
-  amp: "&",
-  ndash: "–",
-  mdash: "—",
-  hellip: "…",
-  lsquo: "‘",
-  rsquo: "’",
-  ldquo: "“",
-  rdquo: "”",
-  middot: "·",
-  bull: "•",
-};
-
-/** Minimal HTML entity decoding plus whitespace normalization. A single
- * pass, so no decoded output ("&#38;lt;" → "&lt;") is ever re-decoded. */
-function decodeHtmlText(text: string): string {
-  return text
-    .replace(
-      /&(?:#(\d+)|#x([0-9a-f]+)|(\w{1,8}));/gi,
-      (whole, dec: string | undefined, hex: string | undefined, name: string | undefined) => {
-        if (name) return NAMED_ENTITIES[name.toLowerCase()] ?? whole;
-        const code = dec ? Number(dec) : parseInt(hex!, 16);
-        return code <= 0x10ffff ? String.fromCodePoint(code) : whole;
-      }
-    )
-    .replace(/\s+/g, " ")
-    .trim();
+export function urlPasteAllowed(state: EditorState): boolean {
+  if (state.readOnly || state.selection.ranges.length !== 1) return false;
+  const { from, to } = state.selection.main;
+  return urlPasteContextAllowed(state.doc, from, to, cachedFences(state.doc));
 }
 
-/** Best-effort page title of an HTML document, entity-decoded, or null.
- * SPA pages (Next.js and friends) often ship an EMPTY <title> and set the
- * real one from JavaScript — fall back to Open Graph / Twitter metadata,
- * which such pages do render server-side. */
-export function extractHtmlTitle(html: string): string | null {
-  const title = html.match(/<title[^>]*>([^<]*)<\/title>/i)?.[1];
-  const decodedTitle = title ? decodeHtmlText(title) : "";
-  if (decodedTitle) return decodedTitle;
-  const meta = html.match(
-    /<meta[^>]*(?:property|name)=["'](?:og:title|twitter:title)["'][^>]*>/i
-  )?.[0];
-  const content = meta?.match(/content=["']([^"']*)["']/i)?.[1];
-  const decodedMeta = content ? decodeHtmlText(content) : "";
-  return decodedMeta || null;
-}
-
-/** Markdown link for a fetched page title: whitespace-collapsed,
- *  bracket-escaped, and length-capped. Null when the title is empty. */
-export function buildTitledLink(url: string, title: string): string | null {
-  const clean = title.replace(/\s+/g, " ").trim();
-  if (!clean) return null;
-  const capped =
-    clean.length > 160 ? clean.slice(0, 159).trimEnd() + "…" : clean;
-  // Backslash included: a trailing "\" would otherwise escape the "]".
-  const safe = capped.replace(/([\\[\]])/g, "\\$1");
-  return `[${safe}](${url})`;
-}
-
-/** Returns the replacement text when pasting `clip` over `selection`,
- *  or null when the paste should proceed normally. */
-export function buildPasteLink(selection: string, clip: string): string | null {
-  const url = clip.trim();
-  if (!RE_URL.test(url)) return null;
-  const sel = selection.trim();
-  if (!sel) return null;
-  if (RE_URL.test(sel)) return null; // don't wrap a URL in a URL
-  if (sel.includes("\n")) return null; // keep multi-line pastes literal
-  return `[${selection}](${url})`;
+/** Returning the literal URL is intentional: falling through lets the host
+ * apply its own URL-over-selection conversion even inside a code block. */
+export function selectedUrlPaste(state: EditorState, clip: string): string | null {
+  if (state.readOnly || state.selection.ranges.length !== 1) return null;
+  const { from, to } = state.selection.main;
+  const link = buildPasteLink(state.doc.sliceString(from, to), clip);
+  return link == null ? null : urlPasteAllowed(state) ? link : clip;
 }
 
 /* ------------------------------------------------------------------ */
@@ -330,6 +587,17 @@ interface BlockRange {
    *  it is one row INSIDE a quote/Callout rather than the container itself.
    *  Absent for top-level blocks and for a whole quote container. */
   quotePrefix?: string;
+  /** "span": several selected blocks travelling as one unit (a drag of a
+   *  block selection). Absent for a real single block. */
+  kind?: "span";
+}
+
+/** Same rows: the two ranges describe one block. */
+export function sameBlockRange(
+  a: BlockRange | null | undefined,
+  b: BlockRange | null | undefined
+): boolean {
+  return !!a && !!b && a.startLine === b.startLine && a.endLine === b.endLine;
 }
 
 export interface BlockTextChange {
@@ -343,6 +611,11 @@ export interface BlockTextChange {
 const RE_LIST = /^(\s*)(?:[-*+]|\d+[.)])([ \t]+)/;
 const RE_LIST_MARKER = /^(\s*)([-*+]|\d+[.)])([ \t]+)/;
 const RE_HEADING = /^#{1,6}\s/;
+/** A row that is nothing but an Obsidian block id: `^abc123`. */
+const RE_BLOCK_ID_ROW = /^\^([A-Za-z0-9-]+)[ \t]*$/;
+/** A block id trailing a row's own text: `some text ^abc123`. */
+const RE_BLOCK_ID_TAIL = /\s\^([A-Za-z0-9-]+)$/;
+
 const RE_HR = /^\s*(-{3,}|\*{3,}|_{3,})\s*$/;
 const RE_FENCE = /^\s*(```|~~~)/;
 const RE_QUOTE = /^\s*>/;
@@ -387,6 +660,34 @@ export function quotedListMarker(
     to: from + marker.length,
     ordered: !/^[-*+]$/.test(marker),
   };
+}
+
+/** Line numbers the editor's visible ranges touch — each exactly once, in
+ * ascending order. CodeMirror splits `visibleRanges` around anything a
+ * decoration replaces: a rendered link, concealed syntax, the widget that
+ * stands in for a row's "> " markers. A line carrying one of those appears
+ * in two ranges, so walking the ranges directly visits it twice — and the
+ * second visit re-adds the line's own decoration at a position the builder
+ * has already passed. RangeSetBuilder rejects that, and CodeMirror answers
+ * an exception by disabling the whole plugin, taking every decoration it
+ * draws down with it. */
+export function visibleLineNumbers(
+  doc: Text,
+  ranges: readonly { from: number; to: number }[]
+): number[] {
+  const numbers: number[] = [];
+  let last = 0;
+  for (const range of ranges) {
+    let pos = range.from;
+    while (pos <= range.to) {
+      const line = doc.lineAt(pos);
+      pos = line.to + 1;
+      if (line.number <= last) continue;
+      last = line.number;
+      numbers.push(line.number);
+    }
+  }
+  return numbers;
 }
 
 function indentWidth(s: string): number {
@@ -483,7 +784,7 @@ interface ListRenderingData {
  * the same rendering model directly from source so the editor runtime and
  * parser-based tests share identical depth/counter semantics.
  */
-function collectSourceListRendering(doc: Text): ListRenderingData {
+export function collectSourceListRendering(doc: Text): ListRenderingData {
   interface ItemContext {
     id: number;
     contentIndent: number;
@@ -576,8 +877,44 @@ function collectSourceListRendering(doc: Text): ListRenderingData {
   return { markers, lines };
 }
 
+/** collectSourceListRendering per document version. The list-marker
+ * plugin rebuilds on every edit and the source walk covers the whole
+ * document, so the result is memoised on the immutable Text (as
+ * cachedFences is) and shared by split panes showing the same note. */
+const sourceListRenderingCache = new WeakMap<Text, ListRenderingData>();
+function cachedSourceListRendering(doc: Text): ListRenderingData {
+  let rendering = sourceListRenderingCache.get(doc);
+  if (!rendering) {
+    rendering = collectSourceListRendering(doc);
+    sourceListRenderingCache.set(doc, rendering);
+  }
+  return rendering;
+}
+
+/** Whether a syntax tree carries semantic list containers at all, decided
+ * once per tree. Obsidian's HyperMD tree never does, so the full walk in
+ * collectListRendering would visit every node only to fall back to the
+ * source model; this probe enters just the block containers that can hold
+ * a list (the document root and blockquotes) and stops at the first one. */
+const treeListContainers = new WeakMap<Tree, boolean>();
+function hasListContainers(tree: Tree): boolean {
+  const known = treeListContainers.get(tree);
+  if (known !== undefined) return known;
+  const probe = (node: SyntaxNode): boolean => {
+    for (let child = node.firstChild; child; child = child.nextSibling) {
+      if (child.name === "OrderedList" || child.name === "BulletList") return true;
+      if (child.name === "Blockquote" && probe(child)) return true;
+    }
+    return false;
+  };
+  const found = probe(tree.topNode);
+  treeListContainers.set(tree, found);
+  return found;
+}
+
 /** One syntax-tree walk shared by Live Preview bullets and ordered labels. */
 function collectListRendering(tree: Tree, doc: Text): ListRenderingData {
+  if (!hasListContainers(tree)) return cachedSourceListRendering(doc);
   const markers: OrderedListMarker[] = [];
   const lines = new Map<number, ListStylePhase>();
 
@@ -630,7 +967,7 @@ function collectListRendering(tree: Tree, doc: Text): ListRenderingData {
   // dialect and therefore remains stable across Live Preview versions.
   return rendering.lines.length > 0
     ? rendering
-    : collectSourceListRendering(doc);
+    : cachedSourceListRendering(doc);
 }
 
 /**
@@ -701,24 +1038,77 @@ function attachedListParent(
   return { lineNo: start - 1, contentIndent };
 }
 
-/** Number of list ancestors that visually contain this source line. */
+/**
+ * A top-level row no list reaches past: unindented, not blank, not a list
+ * item or quote row (which may attach to the item above), not code, and
+ * after a blank row (else it could be a lazy continuation of an item). Any
+ * list range that starts above such a row ends above it, which is what
+ * lets listNestingDepth index one stretch of the note at a time. Being
+ * conservative here only makes a stretch longer, never a depth wrong.
+ */
+function isListBoundary(doc: Text, n: number, fences: FenceRange[]): boolean {
+  const text = doc.line(n).text;
+  if (RE_BLANK.test(text) || indentWidth(text) !== 0 || RE_LIST.test(text) || RE_QUOTE.test(text)) {
+    return false;
+  }
+  if (fenceAt(fences, n)) return false; // fence rows never start a segment
+  return n === 1 || RE_BLANK.test(doc.line(n - 1).text);
+}
+
+/** One indexed stretch of a note: lines [from, to), depth of `line` at
+ *  `depths[line - from]`. */
+interface ListDepthSegment {
+  from: number;
+  to: number;
+  depths: Int32Array;
+}
+
+// Custom fence projections have their own structure, so both immutable inputs
+// participate in the cache. Weak keys let closed notes and undo states go.
+// Segments are kept sorted by `from` and never overlap.
+const listDepthCache = new WeakMap<Text, WeakMap<FenceRange[], ListDepthSegment[]>>();
+
+/** Number of list ancestors that visually contain this source line.
+ *
+ * Every keystroke makes a new document, so the index is rebuilt per edit.
+ * Only the stretch between two list boundaries around the line is walked
+ * (isListBoundary): typing in a long note re-reads the list it is in, not
+ * the whole note. A second query in an indexed stretch reads no line. */
 export function listNestingDepth(
   doc: Text,
   lineNo: number,
   fences: FenceRange[] = cachedFences(doc)
 ): number {
   if (lineNo < 1 || lineNo > doc.lines) return 0;
-  let depth = 0;
-  for (let n = lineNo - 1; n >= 1; n--) {
-    const text = doc.line(n).text;
-    if (!RE_LIST.test(text)) continue;
-    // The list range is the containment proof. Merely finding an earlier,
-    // shallower marker is not enough: a paragraph/blank may have ended that
-    // list long before this indented top-level block.
-    const range = getBlockRange(doc, n, fences);
-    if (range?.startLine === n && range.endLine >= lineNo) depth++;
+  let byFences = listDepthCache.get(doc);
+  if (!byFences) listDepthCache.set(doc, byFences = new WeakMap());
+  let segments = byFences.get(fences);
+  if (!segments) byFences.set(fences, segments = []);
+  let lo = 0;
+  let hi = segments.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const seg = segments[mid];
+    if (lineNo < seg.from) hi = mid - 1;
+    else if (lineNo >= seg.to) lo = mid + 1;
+    else return seg.depths[lineNo - seg.from];
   }
-  return depth;
+  // `lo` is where a segment holding lineNo belongs in the sorted list.
+  let from = lineNo;
+  while (from > 1 && !isListBoundary(doc, from, fences)) from--;
+  let to = lineNo + 1;
+  while (to <= doc.lines && !isListBoundary(doc, to, fences)) to++;
+  function* ancestors() {
+    for (let n = from; n < to; n++) {
+      if (!RE_LIST.test(doc.line(n).text)) continue;
+      const range = getBlockRange(doc, n, fences);
+      // A list-looking row inside code belongs to the fence, not a list.
+      if (range?.startLine === n) yield range;
+    }
+  }
+  const depths = buildLineDepthIndexRange(from, to, ancestors());
+  segments.splice(lo, 0, { from, to, depths });
+  return depths[lineNo - from];
 }
 
 /** Structural indentation to preserve while dragging a block. */
@@ -757,10 +1147,15 @@ export interface BlockCaptionMeta {
   caption: string;
   collapsed: boolean;
   prefix: string;
+  /** Where the caption TEXT sits inside its line. Live Preview hides the
+   * two tags and leaves this slice as ordinary editable text, so both the
+   * decorations and the caret helpers need its exact bounds. */
+  bodyFrom: number;
+  bodyTo: number;
 }
 
 const RE_BLOCK_CAPTION_BODY =
-  /^<small class="nf-caption" data-nf-kind="(code|image|table)"(?: data-nf-collapsed="true")?>(.*?)<\/small>[ \t]*$/;
+  /^(<small class="nf-caption" data-nf-kind="(code|image|table)"(?: data-nf-collapsed="true")?>)(.*?)<\/small>[ \t]*$/;
 
 /** Indentation plus every quote/list-container marker before visible block
  * content. The quote matcher retains list content indentation between quote
@@ -782,11 +1177,14 @@ export function parseBlockCaption(text: string): BlockCaptionMeta | null {
   const prefix = structuralContentPrefix(text);
   const match = text.slice(prefix.length).match(RE_BLOCK_CAPTION_BODY);
   if (!match) return null;
+  const bodyFrom = prefix.length + match[1].length;
   return {
-    kind: match[1] as BlockCaptionKind,
-    caption: decodeCommentAttr(match[2]),
+    kind: match[2] as BlockCaptionKind,
+    caption: decodeCommentAttr(match[3]),
     collapsed: text.includes(' data-nf-collapsed="true"'),
     prefix,
+    bodyFrom,
+    bodyTo: bodyFrom + match[3].length,
   };
 }
 
@@ -797,10 +1195,14 @@ export function buildBlockCaption(
   kind: BlockCaptionKind,
   caption: string,
   collapsed = false,
-  prefix = ""
+  prefix = "",
+  /** Write the row even with nothing in it. Only the caption editor asks
+   * for this: an empty row is what the caret lands in when a caption is
+   * being started, and it is removed again if nothing is typed. */
+  allowEmpty = false
 ): string | null {
   const body = caption.replace(/\r?\n+/g, " ").trim();
-  if (!body && !(kind === "code" && collapsed)) return null;
+  if (!body && !allowEmpty && !(kind === "code" && collapsed)) return null;
   return (
     prefix +
     `<small class="nf-caption" data-nf-kind="${kind}"` +
@@ -1052,6 +1454,37 @@ export function cachedFences(doc: Text): FenceRange[] {
 }
 
 /**
+ * Give `next` the fence ranges already scanned for `prev` when `changes`
+ * (prev → next) cannot have moved them: the line count is the same, and
+ * every row the edit touches keeps its quote depth and neither was nor
+ * became a possible fence marker. Fence ranges are line-based, so they
+ * carry over as they are. An inline format applied row by row (see
+ * formatAcrossLines) makes a new document per row; without this each one
+ * re-scanned the whole note.
+ */
+function carryFences(prev: Text, next: Text, changes: ChangeSet): void {
+  if (fenceCache.has(next) || prev.lines !== next.lines) return;
+  const fences = fenceCache.get(prev);
+  if (!fences) return;
+  let same = true;
+  changes.iterChangedRanges((fromA, toA, fromB, toB) => {
+    if (!same) return;
+    const first = prev.lineAt(fromA).number;
+    const last = prev.lineAt(toA).number;
+    if (next.lineAt(fromB).number !== first || next.lineAt(toB).number !== last) {
+      same = false;
+      return;
+    }
+    for (let n = first; n <= last && same; n++) {
+      const before = prev.line(n).text;
+      const after = next.line(n).text;
+      if (fenceLineParts(before) || fenceLineParts(after) || quoteDepth(before) !== quoteDepth(after)) same = false;
+    }
+  });
+  if (same) fenceCache.set(next, fences);
+}
+
+/**
  * The fence containing `lineNo`, or null. Binary search rather than a walk:
  * this is the single hottest predicate in the plugin (every block-range,
  * quote-container and decoration pass consults it per line), so a linear
@@ -1091,6 +1524,254 @@ const RE_IMAGE_BLOCK =
 
 export function isImageBlockLine(text: string): boolean {
   return RE_IMAGE_BLOCK.test(text);
+}
+
+/** Every image embed on a line: wiki `![[path|alt|480]]` (group 1) or
+ * Markdown `![alt|480](url)` (groups 2 and 3). */
+const RE_IMAGE_EMBED = /!\[\[([^\]\r\n]+)\]\]|!\[([^\]\r\n]*)\]\(([^\r\n)]+)\)/g;
+/** Obsidian's native size suffix: `|480` or `|640x360`. */
+const RE_IMAGE_SIZE = /^\d+(?:x\d+)?$/;
+
+interface ImageEmbedMatch {
+  from: number;
+  to: number;
+  /** Pipe-separated parts: [path, ...alt, size?] for wiki embeds, the alt
+   * text's parts for Markdown images. */
+  parts: string[];
+  /** Markdown image destination; undefined for wiki embeds. */
+  url?: string;
+}
+
+/** The embed whose span contains `at` (an offset in the line), else the
+ * first one on the line, else null. */
+function imageEmbedAt(text: string, at?: number): ImageEmbedMatch | null {
+  let first: ImageEmbedMatch | null = null;
+  for (const m of text.matchAll(RE_IMAGE_EMBED)) {
+    const from = m.index ?? 0;
+    const embed: ImageEmbedMatch =
+      m[1] != null
+        ? { from, to: from + m[0].length, parts: m[1].split("|") }
+        : { from, to: from + m[0].length, parts: m[2].split("|"), url: m[3] };
+    if (at != null && at >= embed.from && at <= embed.to) return embed;
+    first ??= embed;
+  }
+  return first;
+}
+
+/** Whether the line carries an image embed at (or, failing that, anywhere). */
+export function hasImageEmbed(text: string, at?: number): boolean {
+  return imageEmbedAt(text, at) != null;
+}
+
+/** The index of the size part, or -1. A size is only ever the last part
+ * after a pipe, so `![[480.png]]` and `![480](url)` keep their names. */
+function imageSizePartIndex(parts: string[]): number {
+  const last = parts.length - 1;
+  return last >= 1 && RE_IMAGE_SIZE.test(parts[last].trim()) ? last : -1;
+}
+
+/** The native `|N` width of the image on a line, or null (no size, or a
+ * line without an image). */
+export function imageWidthOf(text: string, at?: number): number | null {
+  const embed = imageEmbedAt(text, at);
+  if (!embed) return null;
+  const index = imageSizePartIndex(embed.parts);
+  return index < 0 ? null : parseInt(embed.parts[index], 10);
+}
+
+/**
+ * Rewrite the image on a line with a native `|width` size (null removes
+ * it). Alt text and every other part survive: `![[a.png|alt|480]]` →
+ * `![[a.png|alt|600]]`, `![alt|480](url)` → `![alt](url)`. Lines without
+ * an image come back unchanged.
+ */
+export function setImageWidth(text: string, width: number | null, at?: number): string {
+  const embed = imageEmbedAt(text, at);
+  if (!embed) return text;
+  const parts = embed.parts.slice();
+  const index = imageSizePartIndex(parts);
+  if (index >= 0) parts.splice(index, 1);
+  if (width != null && Number.isFinite(width)) parts.push(String(Math.max(1, Math.round(width))));
+  const rebuilt = embed.url == null ? `![[${parts.join("|")}]]` : `![${parts.join("|")}](${embed.url})`;
+  return text.slice(0, embed.from) + rebuilt + text.slice(embed.to);
+}
+
+/** Write `width` (null = original) onto the image on `lineNo`. */
+function applyImageWidth(view: EditorView, lineNo: number, width: number | null, at?: number) {
+  if (lineNo < 1 || lineNo > view.state.doc.lines) return;
+  const line = view.state.doc.line(lineNo);
+  const next = setImageWidth(line.text, width, at);
+  if (next === line.text) return;
+  view.dispatch({
+    changes: { from: line.from, to: line.to, insert: next },
+    userEvent: "input.image-width",
+  });
+}
+
+/** Fixed size presets for when the image's column cannot be measured;
+ *  Original drops the size suffix. */
+const IMAGE_SIZE_PRESETS: { title: string; width: number | null }[] = [
+  { title: "Small", width: 240 },
+  { title: "Medium", width: 480 },
+  { title: "Large", width: 720 },
+  { title: "Original", width: null },
+];
+
+/**
+ * The Image size rows for a column `columnPx` wide: 25 / 50 / 75 % of it
+ * and the full column, then Original (a fixed 720 would render no larger
+ * than Original in a 700 px column). Widths under 40 px and repeats are
+ * dropped. An unknown or tiny column falls back to the fixed presets that
+ * still fit. Titles are translated.
+ */
+export function imageSizePresets(columnPx: number | null): { title: string; width: number | null }[] {
+  const original = { title: t("Original"), width: null };
+  if (columnPx != null && columnPx >= 80) {
+    const out: { title: string; width: number | null }[] = [];
+    const push = (title: string, width: number) => {
+      if (width < 40 || out.some((row) => row.width === width)) return;
+      out.push({ title, width });
+    };
+    for (const p of [25, 50, 75]) {
+      push(t("{n}% width").replace("{n}", String(p)), Math.round((columnPx * p) / 100));
+    }
+    push(t("Full column width"), Math.round(columnPx));
+    out.push(original);
+    return out;
+  }
+  return IMAGE_SIZE_PRESETS.filter(
+    (preset) => preset.width == null || columnPx == null || preset.width < columnPx
+  ).map((preset) => (preset.width == null ? original : { title: t(preset.title), width: preset.width }));
+}
+
+/** The inner width of the column the image on `lineNo` renders in: its
+ *  row's content box (a list or quote indent excluded), else the editor's
+ *  content width, else null. */
+function imageColumnWidth(view: EditorView, lineNo: number): number | null {
+  const inner = (el: HTMLElement | null | undefined): number | null => {
+    if (!el) return null;
+    const style = el.ownerDocument.defaultView?.getComputedStyle(el);
+    const pad = style ? (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0) : 0;
+    const width = el.clientWidth - pad;
+    return width > 0 ? width : null;
+  };
+  try {
+    const line = view.state.doc.line(lineNo);
+    const { node } = view.domAtPos(line.from);
+    const el = (node.nodeType === 1 ? (node as HTMLElement) : node.parentElement)
+      ?.closest<HTMLElement>(".cm-line, .cm-embed-block");
+    const embed = el?.matches(".image-embed") ? el : el?.querySelector<HTMLElement>(".image-embed");
+    const width = inner(embed?.parentElement);
+    if (width != null) return width;
+  } catch {
+    // A line outside the rendered viewport: measure the editor instead.
+  }
+  return inner(view.contentDOM);
+}
+
+function addImageSizeItems(menu: Menu, view: EditorView, lineNo: number) {
+  const current = imageWidthOf(view.state.doc.line(lineNo).text);
+  for (const preset of imageSizePresets(imageColumnWidth(view, lineNo))) {
+    menu.addItem((item) =>
+      item
+        .setTitle(preset.width == null ? preset.title : `${preset.title} · ${preset.width}`)
+        .setChecked(
+          preset.width == null ? current == null : current != null && Math.abs(current - preset.width) <= 2
+        )
+        .onClick(() => applyImageWidth(view, lineNo, preset.width))
+    );
+  }
+}
+
+export type ImageAlign = "left" | "center" | "right";
+const IMAGE_ALIGNS: readonly string[] = ["left", "center", "right"];
+/** An alignment word inside an alt part, with the space before it. */
+const RE_IMAGE_ALIGN_TOKEN = /(^|\s+)(?:left|center|right)(?=\s|$)/g;
+
+/** The [from, to) indexes of an embed's alt parts: after the path of a
+ *  wiki embed (from 0 for a Markdown image), up to the size part. */
+function imageAltSpan(embed: ImageEmbedMatch): [number, number] {
+  const size = imageSizePartIndex(embed.parts);
+  return [embed.url == null ? 1 : 0, size < 0 ? embed.parts.length : size];
+}
+
+/** The alignment word (left / center / right) in the alt of the image on
+ *  a line (the one at `at`), or null. Obsidian copies the alt onto the
+ *  img in both views, where styles.css aligns the image's row by it. */
+export function imageAlignOf(text: string, at?: number): ImageAlign | null {
+  const embed = imageEmbedAt(text, at);
+  if (!embed) return null;
+  const [from, to] = imageAltSpan(embed);
+  let found: ImageAlign | null = null;
+  for (const part of embed.parts.slice(from, to)) {
+    for (const token of part.split(/\s+/)) {
+      if (IMAGE_ALIGNS.includes(token)) found = token as ImageAlign;
+    }
+  }
+  return found;
+}
+
+/**
+ * Rewrite the image on a line with `align` as its alt's alignment word
+ * (null removes it). Other alt words and the size survive:
+ * `![[a.png|480]]` → `![[a.png|center|480]]`, `![[a.png|My photo|480]]` →
+ * `![[a.png|My photo center|480]]`, `![center|480](u)` → `![|480](u)`
+ * (the empty alt keeps 480 a size, which needs a part before it).
+ */
+export function setImageAlign(text: string, align: ImageAlign | null, at?: number): string {
+  const embed = imageEmbedAt(text, at);
+  if (!embed) return text;
+  const [from, to] = imageAltSpan(embed);
+  const markdown = embed.url != null;
+  const alt = embed.parts.slice(from, to).map((part) => {
+    const stripped = part.replace(RE_IMAGE_ALIGN_TOKEN, "");
+    return stripped === part ? part : stripped.trim();
+  });
+  // A wiki embed drops an emptied part; a Markdown image always keeps its
+  // first alt part, empty or not, as `![](u)` / `![|480](u)` need it.
+  const kept = alt.filter((part, i) => part !== "" || (markdown && i === 0));
+  if (align) {
+    let last = -1;
+    kept.forEach((part, i) => {
+      if (part.trim() !== "") last = i;
+    });
+    if (last >= 0) kept[last] = `${kept[last]} ${align}`;
+    else if (markdown) kept[0] = align;
+    else kept.unshift(align);
+  }
+  const parts = [...embed.parts.slice(0, from), ...kept, ...embed.parts.slice(to)];
+  const rebuilt = markdown ? `![${parts.join("|")}](${embed.url})` : `![[${parts.join("|")}]]`;
+  return text.slice(0, embed.from) + rebuilt + text.slice(embed.to);
+}
+
+/** Default alignment and Align left / center / right for the image on
+ *  `lineNo`, the current one checked. */
+function addImageAlignItems(menu: Menu, view: EditorView, lineNo: number) {
+  const current = imageAlignOf(view.state.doc.line(lineNo).text);
+  const rows: [ImageAlign | null, string, string][] = [
+    [null, "Default alignment", "align-justify"],
+    ["left", "Align left", "align-left"],
+    ["center", "Align center", "align-center"],
+    ["right", "Align right", "align-right"],
+  ];
+  for (const [value, title, icon] of rows) {
+    menu.addItem((item) =>
+      item
+        .setTitle(t(title))
+        .setIcon(icon)
+        .setChecked(current === value)
+        .onClick(() => {
+          if (lineNo > view.state.doc.lines) return;
+          const line = view.state.doc.line(lineNo);
+          const next = setImageAlign(line.text, value);
+          if (next === line.text) return;
+          view.dispatch({
+            changes: { from: line.from, to: line.to, insert: next },
+            userEvent: "input.image-align",
+          });
+        })
+    );
+  }
 }
 
 export function imageCaptionMeta(
@@ -1218,13 +1899,16 @@ export function getBlockRange(
     // The owner must be exactly the block the row above starts — it either
     // ends there or already reaches this caption. If that row belongs to
     // something larger, the caption stays on its own.
+    // A `^id` row may trail the caption; the owner then reaches past
+    // the caption to it.
+    const tailEnd = blockIdTailEnd(doc, lineNo, fences);
     if (
       ownerStart !== null &&
       above?.startLine === ownerStart &&
       above.endLine >= lineNo - 1 &&
-      above.endLine <= lineNo
+      above.endLine <= tailEnd
     ) {
-      return { startLine: ownerStart, endLine: lineNo };
+      return { startLine: ownerStart, endLine: tailEnd };
     }
   }
   // A caption row whose owner is gone (deleted, or moved away) is its own
@@ -1235,13 +1919,46 @@ export function getBlockRange(
   // paragraph twice and dragging the orphan carried the paragraph with it.
   if (ownCaption) return { startLine: lineNo, endLine: lineNo };
 
+  // A `^id` row on its own line is the Obsidian block id of the block
+  // above — written under a blank seam for tables, fences and quotes,
+  // which cannot end a row with one. It travels with that block the way
+  // a caption does, seam included, so a move or a delete never strands
+  // the id (and with it every link to the block). An id with nothing
+  // above it to own it is its own block.
+  if (!fenceAt(fences, lineNo) && RE_BLOCK_ID_ROW.test(doc.line(lineNo).text)) {
+    let ownerLine = lineNo - 1;
+    if (
+      ownerLine >= 1 &&
+      !fenceAt(fences, ownerLine) &&
+      RE_BLANK.test(doc.line(ownerLine).text)
+    ) ownerLine--;
+    const owner = ownerLine >= 1 ? getBlockRange(doc, ownerLine, fences) : null;
+    if (owner && owner.endLine === lineNo) return owner;
+    return { startLine: lineNo, endLine: lineNo };
+  }
+  if (
+    lineNo > 1 &&
+    lineNo < doc.lines &&
+    !fenceAt(fences, lineNo) &&
+    RE_BLANK.test(doc.line(lineNo).text) &&
+    !fenceAt(fences, lineNo + 1) &&
+    RE_BLOCK_ID_ROW.test(doc.line(lineNo + 1).text)
+  ) {
+    const owner = getBlockRange(doc, lineNo - 1, fences);
+    if (owner && owner.endLine > lineNo) return owner;
+  }
+
   // Any line inside a fenced code block (markers, code, blank lines, and
   // lines that merely LOOK like lists/headings) → the whole fence.
   const fence = fenceAt(fences, lineNo);
   if (fence) {
     return {
       startLine: fence.startLine,
-      endLine: codeCaptionMeta(doc, fence)?.lineNo ?? fence.endLine,
+      endLine: blockIdTailEnd(
+        doc,
+        codeCaptionMeta(doc, fence)?.lineNo ?? fence.endLine,
+        fences
+      ),
     };
   }
 
@@ -1288,7 +2005,7 @@ export function getBlockRange(
   if (isImageBlockLine(text)) {
     return {
       startLine: lineNo,
-      endLine: imageCaptionMeta(doc, lineNo)?.lineNo ?? lineNo,
+      endLine: blockIdTailEnd(doc, imageCaptionMeta(doc, lineNo)?.lineNo ?? lineNo, fences),
     };
   }
 
@@ -1322,11 +2039,13 @@ export function getBlockRange(
         lazyGrabbable(doc.line(end + 1).text) &&
         // A caption belongs to the block it labels, never to a quote above
         // it. Absorbing one here would contradict the caption row's own
-        // answer and put the same line in two blocks.
-        !parseBlockCaption(doc.line(end + 1).text)
+        // answer and put the same line in two blocks. A `^id` row is the
+        // quote's own id and attaches below, not as prose.
+        !parseBlockCaption(doc.line(end + 1).text) &&
+        !RE_BLOCK_ID_ROW.test(doc.line(end + 1).text)
       ) end++;
     }
-    return { startLine: start, endLine: end };
+    return { startLine: start, endLine: blockIdTailEnd(doc, end, fences) };
   }
 
   // Table: contiguous "|" rows (header, delimiter, body) are one block —
@@ -1336,7 +2055,11 @@ export function getBlockRange(
     if (!table) return null;
     return {
       startLine: table.startLine,
-      endLine: tableCaptionMeta(doc, table.endLine)?.lineNo ?? table.endLine,
+      endLine: blockIdTailEnd(
+        doc,
+        tableCaptionMeta(doc, table.endLine)?.lineNo ?? table.endLine,
+        fences
+      ),
     };
   }
 
@@ -1366,6 +2089,8 @@ export function getBlockRange(
         break;
       }
       const t = doc.line(i).text;
+      // The item's own `^id` row ends its content; it attaches below.
+      if (RE_BLOCK_ID_ROW.test(t)) break;
       // Match Obsidian Reading View's lazy list attachment: an immediately
       // adjacent quote/callout at the item's marker column belongs to this
       // item. This also makes the parent handle carry the whole callout.
@@ -1420,7 +2145,7 @@ export function getBlockRange(
       }
       break;
     }
-    return { startLine: lineNo, endLine: end };
+    return { startLine: lineNo, endLine: blockIdTailEnd(doc, end, fences) };
   }
 
   // Plain paragraph: contiguous non-blank, non-special lines (never
@@ -1430,6 +2155,7 @@ export function getBlockRange(
     const t = doc.line(n).text;
     return (
       !parseBlockCaption(t) &&
+      !RE_BLOCK_ID_ROW.test(t) &&
       !isImageBlockLine(t) &&
       !RE_BLANK.test(t) &&
       !RE_HEADING.test(t) &&
@@ -1443,7 +2169,27 @@ export function getBlockRange(
   let end = lineNo;
   while (start > 1 && isPlain(start - 1)) start--;
   while (end < doc.lines && isPlain(end + 1)) end++;
-  return { startLine: start, endLine: end };
+  return { startLine: start, endLine: blockIdTailEnd(doc, end, fences) };
+}
+
+/**
+ * The last row of a block that ends at `endLine` once its trailing `^id`
+ * row is counted: the row directly below, or the one below a single
+ * blank seam (Obsidian's spelling for tables, fences and quotes); else
+ * `endLine` itself.
+ */
+function blockIdTailEnd(doc: Text, endLine: number, fences: FenceRange[]): number {
+  const idRow = (n: number) =>
+    n <= doc.lines && !fenceAt(fences, n) && RE_BLOCK_ID_ROW.test(doc.line(n).text);
+  if (idRow(endLine + 1)) return endLine + 1;
+  const seam = endLine + 1;
+  if (
+    seam < doc.lines &&
+    !fenceAt(fences, seam) &&
+    RE_BLANK.test(doc.line(seam).text) &&
+    idRow(endLine + 2)
+  ) return endLine + 2;
+  return endLine;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1542,6 +2288,31 @@ function quoteContainerRange(
   const tail = getBlockRange(doc, end, fences);
   if (tail && tail.endLine > end && !fenceAt(fences, end)) end = tail.endLine;
   return { startLine: start, endLine: end };
+}
+
+/**
+ * `getBlockRange`, carried across fenced code when the block is a columns
+ * row. getBlockRange ends a quote at a fence inside it, so a row whose
+ * column holds code came back cut short at the fence: the column editor
+ * refused the partial row (a click on it dropped the caret into the raw
+ * rows instead) and the rest of the row was left out of every operation
+ * addressed through it. The quote container crosses the fence.
+ */
+export function columnsAwareBlockRange(
+  doc: Text,
+  lineNo: number,
+  fences: FenceRange[] = cachedFences(doc)
+): BlockRange | null {
+  const block = getBlockRange(doc, lineNo, fences);
+  if (!block) return null;
+  if (parseCalloutHeader(doc.line(block.startLine).text)?.type !== COLS_TYPE) return block;
+  const container = quoteContainerRange(doc, block.startLine, fences);
+  if (
+    !container ||
+    container.startLine !== block.startLine ||
+    container.endLine <= block.endLine
+  ) return block;
+  return { ...block, endLine: container.endLine };
 }
 
 /** A quote container's body seen as an ordinary document: every row with
@@ -1670,6 +2441,74 @@ export function quoteInnerBlocks(
   return blocks;
 }
 
+/** The slice of a DOM element the rendered-Callout row helpers read, so
+ *  they run on plain fake trees in tests. */
+export interface CalloutRowElement {
+  tagName: string;
+  classList: { contains(token: string): boolean };
+  children: ArrayLike<CalloutRowElement>;
+}
+
+function childWithClass<E extends CalloutRowElement>(parent: E, cls: string): E | null {
+  for (const child of Array.from(parent.children)) {
+    if (child.classList.contains(cls)) return child as E;
+  }
+  return null;
+}
+
+/**
+ * The `.callout` element inside a rendered Callout widget. Obsidian 1.13
+ * wraps it in `.markdown-rendered` (`.cm-embed-block.cm-callout >
+ * .markdown-rendered > .callout`); earlier builds put it right under the
+ * widget. Direct children only, so a nested Callout is never mistaken for
+ * the outer one.
+ */
+export function renderedCalloutRoot<E extends CalloutRowElement>(widget: E): E | null {
+  const direct = childWithClass(widget, "callout");
+  if (direct) return direct;
+  const rendered = childWithClass(widget, "markdown-rendered");
+  return rendered ? childWithClass(rendered, "callout") : null;
+}
+
+/**
+ * Zip a rendered Callout's rows with the blocks its source holds: the title
+ * row, then every direct child of `.callout-content` in document order
+ * (a list renders as one `<ul>`/`<ol>` whose `<li>` children are the
+ * items). Null when the two do not line up.
+ */
+export function calloutRowsFromDom<E extends CalloutRowElement>(
+  root: E,
+  info: { startLine: number; endLine: number },
+  doc: Text,
+  fences: FenceRange[] = cachedFences(doc)
+): Array<{ block: BlockRange; element: E }> | null {
+  const title = childWithClass(root, "callout-title");
+  if (!title) return null;
+  const group: BlockRange = { startLine: info.startLine, endLine: info.endLine };
+  const rows: Array<{ block: BlockRange; element: E }> = [
+    // The title row stands for itself; hovering it resolves to the whole
+    // Callout through innerBlockAt().
+    { block: { startLine: group.startLine, endLine: group.startLine }, element: title },
+  ];
+  const content = childWithClass(root, "callout-content");
+  const inner = quoteInnerBlocks(doc, group, fences);
+  if (!content) return inner.length === 0 ? rows : null;
+  let next = 0;
+  for (const child of Array.from(content.children) as E[]) {
+    const tag = child.tagName.toUpperCase();
+    const items =
+      tag === "UL" || tag === "OL"
+        ? (Array.from(child.children) as E[]).filter((li) => li.tagName.toUpperCase() === "LI")
+        : null;
+    for (const element of items ?? [child]) {
+      const block = inner[next++];
+      if (!block) return null;
+      rows.push({ block, element });
+    }
+  }
+  return next === inner.length ? rows : null;
+}
+
 export interface NestedCalloutRepair {
   from: number;
   to: number;
@@ -1764,6 +2603,21 @@ function vaultIndentUnit(app: App): IndentUnit {
 function vimModeEnabled(app: App): boolean {
   const vault = app.vault as unknown as { getConfig?: (key: string) => unknown };
   return vault.getConfig?.bind(app.vault)?.("vimMode") === true;
+}
+
+/** Whether an editor's DOM is a Canvas card's editor, where Escape finishes
+ *  the card. Obsidian 1.13 hosts that editor in an iframe inside the card,
+ *  so the card is found through the frame element, not the editor's own
+ *  ancestors. */
+export function inCanvasCardEditor(dom: HTMLElement): boolean {
+  if (dom.closest(".canvas-node")) return true;
+  let frame: HTMLElement | null = null;
+  try {
+    frame = (dom.ownerDocument.defaultView?.frameElement as HTMLElement | null) ?? null;
+  } catch {
+    /* a cross-origin frame: not a Canvas card */
+  }
+  return !!frame?.closest?.(".canvas-node");
 }
 
 /** `delta` columns of fresh indentation in the unit's preferred chars. */
@@ -1891,11 +2745,19 @@ function needsProtectedSeam(above: string, below: string): boolean {
  * blocks, or null when they already are. Inside a quote/Callout the seam is
  * an empty quote row (">"), never a bare blank line — a bare blank line
  * would close the container and split it in two.
+ *
+ * `"protect"` asks only what Markdown needs. `"style"` — for a block that
+ * lands somewhere (a move, a drop, a duplicate) — asks what the note
+ * should look like: at the top level every block keeps one blank row from
+ * its neighbours, except items of one list, and indented rows (list
+ * children, nested content) keep the protected answer. Inside a container
+ * both modes agree.
  */
 export function seamRowBetween(
   above: string,
   below: string,
-  containerPrefix = ""
+  containerPrefix = "",
+  mode: "protect" | "style" = "protect"
 ): string | null {
   const depth = quotePrefixDepth(containerPrefix);
   const depthAbove = quotePrefixDepth(quoteMarkerPrefix(above) ?? "");
@@ -1913,6 +2775,14 @@ export function seamRowBetween(
       // different column — which splits the box in two.
       ? split.prefix.trimEnd()
       : null;
+  }
+  if (mode === "style") {
+    if (!above || !below || RE_BLANK.test(above) || RE_BLANK.test(below)) return null;
+    const keepsProtected =
+      indentWidth(above) > 0 ||
+      indentWidth(below) > 0 ||
+      (RE_LIST.test(above) && RE_LIST.test(below));
+    if (!keepsProtected) return "";
   }
   return needsProtectedSeam(above, below) ? "" : null;
 }
@@ -1975,10 +2845,76 @@ function blockRemovalRange(doc: Text, block: BlockRange): { from: number; to: nu
   return { from, to };
 }
 
+/**
+ * The blank rows a top-level block takes with it, so that a move leaves
+ * exactly one blank seam behind — and a move and its opposite restore the
+ * note byte for byte. Null when the ordinary removal already does that.
+ * - First block: the blank rows under it go too (no leading blank line).
+ * - A non-list block between two items of a list: the blank row above goes
+ *   as well, so the items rejoin the way they were before it arrived.
+ * - Last block: the blank row above goes instead of whatever follows, so a
+ *   note keeps the trailing newline(s) it had.
+ */
+function topLevelSeamRemoval(
+  doc: Text,
+  block: BlockRange,
+  range: { from: number; to: number }
+): { from: number; to: number } | null {
+  const blank = (n: number) => n >= 1 && n <= doc.lines && RE_BLANK.test(doc.line(n).text);
+  const last = doc.line(block.endLine);
+  const hasTrailingNewline = last.to < doc.length;
+  if (block.startLine === 1) {
+    let n = block.endLine + 1;
+    if (!blank(n)) return null;
+    while (blank(n + 1)) n++;
+    const row = doc.line(n);
+    return { from: range.from, to: row.to < doc.length ? row.to + 1 : row.to };
+  }
+  if (!blank(block.startLine - 1)) return null;
+  let tail = true;
+  for (let n = block.endLine + 1; n <= doc.lines && tail; n++) tail = blank(n);
+  if (tail) {
+    const seam = doc.line(block.startLine - 1);
+    return {
+      from: hasTrailingNewline || seam.from === 0 ? seam.from : seam.from - 1,
+      to: last.to + (hasTrailingNewline ? 1 : 0),
+    };
+  }
+  const rowAfter = range.to < doc.length ? doc.lineAt(range.to).text : null;
+  const listAbove = block.startLine > 2 ? doc.line(block.startLine - 2).text : null;
+  if (
+    listAbove != null &&
+    rowAfter != null &&
+    !RE_LIST.test(doc.line(block.startLine).text) &&
+    // A deeper row after the gap would become the child of the item above.
+    indentWidth(rowAfter) <= indentWidth(listAbove) &&
+    continuesList(listAbove, rowAfter)
+  ) {
+    return { from: doc.line(block.startLine - 1).from, to: range.to };
+  }
+  return null;
+}
+
+/** Whether list row `below` directly under list row `above` stays in the
+ *  same list: a sibling with the same marker kind, or a row at another
+ *  depth (a child, or the parent level resuming after one). A different
+ *  bullet character or ordered delimiter would start a new list. */
+function continuesList(above: string, below: string): boolean {
+  const kind = (s: string) => {
+    const m = s.match(/^\s*(?:([-*+])|\d+([.)]))[ \t]/);
+    return m ? m[1] ?? m[2] : null;
+  };
+  const a = kind(above);
+  const b = kind(below);
+  if (a == null || b == null) return false;
+  return indentWidth(above) !== indentWidth(below) || a === b;
+}
+
 /** Removal range that does not fuse the source block's former neighbors. */
 function protectedBlockRemovalRange(
   doc: Text,
-  block: BlockRange
+  block: BlockRange,
+  tidySeams = true
 ): { from: number; to: number } {
   const range = blockRemovalRange(doc, block);
   const above = block.startLine > 1 ? doc.line(block.startLine - 1).text : "";
@@ -1996,6 +2932,9 @@ function protectedBlockRemovalRange(
   ) {
     return range;
   }
+  const seams =
+    block.quotePrefix || !tidySeams ? null : topLevelSeamRemoval(doc, block, range);
+  if (seams) return seams;
   const nestedListContinuation =
     RE_LIST.test(above) && indentWidth(below) > indentWidth(above);
   if (needsProtectedSeam(above, below) && !nestedListContinuation) {
@@ -2289,6 +3228,71 @@ export function pickDropLevel(
 }
 
 /**
+ * Where a block dropped at list indent `indent` before `targetLine` shows
+ * its words: the text start of the nearest list item above whose content
+ * column is `indent` — the item the drop nests into or sits beside. The
+ * scan skips the dragged block, blank rows and code rows, and stops at a
+ * top-level row that is neither a list item nor a quote. A to-do anchors
+ * at its checkbox, not after it: a paragraph dropped under `- [ ] task`
+ * starts there in both views (measured 486.3 / 485.2 px against the box
+ * at 485.2 and the words at 490.8). Reading view puts every dropped block
+ * on this column; Live Preview draws the tab the drop writes at its own
+ * width, so under a 2-space or 3-space list it can land a few px off.
+ * Null for indent 0 or when no item matches; the caller falls back to its
+ * step formula.
+ */
+export function dropLevelAnchor(
+  doc: Text,
+  targetLine: number,
+  indent: number,
+  fences: FenceRange[],
+  exclude?: BlockRange | null
+): { line: number; offset: number } | null {
+  if (indent <= 0) return null;
+  for (let n = Math.min(targetLine - 1, doc.lines); n >= 1; n--) {
+    if (exclude && n >= exclude.startLine && n <= exclude.endLine) continue;
+    if (fenceAt(fences, n)) continue;
+    const text = doc.line(n).text;
+    if (RE_BLANK.test(text)) continue;
+    const m = text.match(RE_LIST);
+    if (m) {
+      if (listContentIndent(text) === indent) return { line: n, offset: m[0].length };
+      continue;
+    }
+    if (indentWidth(text) === 0 && !RE_QUOTE.test(text)) return null;
+  }
+  return null;
+}
+
+/** Whether the drag handle may come back by itself once a scroll settles
+ *  (Chromium sends no mousemove to a pointer resting under a wheel
+ *  scroll). Never mid-drag or mid-marquee, never without a hover pointer
+ *  over the editor, and never after an edit since the pointer last moved:
+ *  typing hides the handle until the mouse moves, and the scroll that
+ *  follows the caret must not undo that. */
+export function canRehover(state: {
+  destroyed: boolean;
+  dragging: boolean;
+  pendingDrag: boolean;
+  selecting: boolean;
+  pendingSelect: boolean;
+  hasPointer: boolean;
+  enabled: boolean;
+  editedSincePointer: boolean;
+}): boolean {
+  return (
+    !state.destroyed &&
+    !state.dragging &&
+    !state.pendingDrag &&
+    !state.selecting &&
+    !state.pendingSelect &&
+    state.hasPointer &&
+    state.enabled &&
+    !state.editedSincePointer
+  );
+}
+
+/**
  * Left edge for the 46px `+` / drag-handle pair. The ideal pair starts
  * 50px before the block's real visual anchor, but narrow editor panes must
  * keep the complete control group inside the scroll viewport.
@@ -2365,6 +3369,70 @@ export function isWidgetSourcePosition(
   return pos >= sourceFrom && pos <= sourceEnd;
 }
 
+/** One in-place re-level of a block, as a change to dispatch. `landedOffset`
+ *  is how many rows a seam sealed in above pushed the block's first row. */
+export interface InPlaceChange {
+  from: number;
+  to: number;
+  insert: string;
+  landedOffset: number;
+}
+
+/**
+ * The change that re-levels `block` where it stands: re-indented to
+ * `targetIndent` and, when `quotePrefixOverride` differs from the markers
+ * it carries, moved into or out of a quote container, with the seam rows
+ * the new neighbours need. Null when nothing would change. Pure, so a
+ * batch step can build one change per block against the same document
+ * and dispatch them as a single transaction.
+ */
+export function reindentInPlaceChange(
+  doc: Text,
+  block: BlockRange,
+  targetIndent: number,
+  unit: IndentUnit = DEFAULT_INDENT_UNIT,
+  quotePrefixOverride?: string,
+  fences: FenceRange[] = cachedFences(doc)
+): InPlaceChange | null {
+  const sourceQuotePrefix = block.quotePrefix ??
+    (fenceAt(fences, block.startLine)?.quotePrefix ?? "");
+  const sourceQuoteDepth = quotePrefixDepth(sourceQuotePrefix);
+  const requoting =
+    quotePrefixOverride !== undefined && quotePrefixOverride !== sourceQuotePrefix;
+  const baseIndent = indentWidth(doc.line(block.startLine).text);
+  if (targetIndent === baseIndent && !requoting) return null;
+  const from = doc.line(block.startLine).from;
+  const to = doc.line(block.endLine).to;
+  const source = doc.sliceString(from, to);
+  const structural = source
+    .split("\n")
+    .some((line) => RE_QUOTE.test(line) || RE_FENCE.test(line) || RE_TABLE.test(line));
+  const reindented = reindentBlock(
+    source,
+    targetIndent - baseIndent,
+    structural ? { ...unit, useTab: false } : unit
+  );
+  let shifted =
+    quotePrefixOverride !== undefined &&
+    (sourceQuoteDepth > 0 || quotePrefixOverride !== "")
+      ? rewriteQuotePrefix(reindented, sourceQuoteDepth, quotePrefixOverride)
+      : reindented;
+  const shiftedLines = shifted.split("\n");
+  const above = block.startLine > 1 ? doc.line(block.startLine - 1).text : "";
+  const below = block.endLine < doc.lines ? doc.line(block.endLine + 1).text : "";
+  const landing = quotePrefixOverride ?? sourceQuotePrefix;
+  const seamAbove = seamRowBetween(above, shiftedLines[0], landing);
+  const seamBelow = seamRowBetween(
+    shiftedLines[shiftedLines.length - 1],
+    below,
+    landing
+  );
+  const sealAbove = seamAbove !== null;
+  if (sealAbove) shifted = seamAbove + "\n" + shifted;
+  if (seamBelow !== null) shifted += "\n" + seamBelow;
+  return { from, to, insert: shifted, landedOffset: sealAbove ? 1 : 0 };
+}
+
 /**
  * Move a block so it starts at targetLine (1-based, doc.lines + 1 = end),
  * re-indenting it to fit the destination context — dragging a nested code
@@ -2382,6 +3450,18 @@ export function moveBlock(
   quotePrefixOverride?: string
 ): number | null {
   const doc = view.state.doc;
+  // "Below the last row" of a note that ends with a newline means its
+  // empty last line: the block lands above it, so the note still ends
+  // with its newline rather than spending it on the seam.
+  if (
+    targetLine > doc.lines &&
+    doc.lines > 1 &&
+    doc.line(doc.lines).length === 0 &&
+    block.endLine < doc.lines &&
+    !fenceAt(fences, doc.lines)
+  ) {
+    targetLine = doc.lines;
+  }
   // Whether the only thing between the block and the drop point is
   // separator rows — blank lines, or the empty quote rows that separate
   // blocks inside a Callout.
@@ -2425,45 +3505,28 @@ export function moveBlock(
   // Dropped back onto its own position: a horizontal drag still changes
   // the nesting level, so re-level the block where it stands.
   if (inPlace) {
-    if (targetIndent === baseIndent && !requoting) return null;
-    const from = doc.line(block.startLine).from;
-    const to = doc.line(block.endLine).to;
-    const source = doc.sliceString(from, to);
-    const structural = source
-      .split("\n")
-      .some((line) => RE_QUOTE.test(line) || RE_FENCE.test(line) || RE_TABLE.test(line));
-    let shifted = applyQuotePrefix(
-      reindentBlock(
-        source,
-        targetIndent - baseIndent,
-        structural ? { ...unit, useTab: false } : unit
-      )
+    const change = reindentInPlaceChange(
+      doc,
+      block,
+      targetIndent,
+      unit,
+      quotePrefixOverride,
+      fences
     );
-    const shiftedLines = shifted.split("\n");
-    const above = block.startLine > 1 ? doc.line(block.startLine - 1).text : "";
-    const below = block.endLine < doc.lines ? doc.line(block.endLine + 1).text : "";
-    const landing = quotePrefixOverride ?? sourceQuotePrefix;
-    const seamAbove = seamRowBetween(above, shiftedLines[0], landing);
-    const seamBelow = seamRowBetween(
-      shiftedLines[shiftedLines.length - 1],
-      below,
-      landing
-    );
-    const sealAbove = seamAbove !== null;
-    if (sealAbove) shifted = seamAbove + "\n" + shifted;
-    if (seamBelow !== null) shifted += "\n" + seamBelow;
+    if (!change) return null;
     view.dispatch({
-      changes: {
-        from,
-        to,
-        insert: shifted,
-      },
+      changes: { from: change.from, to: change.to, insert: change.insert },
       userEvent: "move.block",
     });
-    return block.startLine + (sealAbove ? 1 : 0);
+    return block.startLine + change.landedOffset;
   }
 
-  const { from, to } = protectedBlockRemovalRange(doc, block);
+  // The seam rows a move tidies away never include the row it lands on.
+  let { from, to } = protectedBlockRemovalRange(doc, block);
+  if (targetLine <= doc.lines) {
+    const at = doc.line(targetLine).from;
+    if (at > from && at < to) ({ from, to } = protectedBlockRemovalRange(doc, block, false));
+  }
   let text = doc.sliceString(doc.line(block.startLine).from, doc.line(block.endLine).to);
   // Tabs plus a partial content-column remainder (for example "\t  >")
   // produce unstable Live Preview widgets. Structural multi-line blocks use
@@ -2492,26 +3555,73 @@ export function moveBlock(
   const lastMoved = movedLines[movedLines.length - 1];
   let prev = targetLine - 1;
   if (prev >= block.startLine && prev <= block.endLine) prev = block.startLine - 1;
-  const prevText = prev >= 1 && prev <= doc.lines ? doc.line(prev).text : "";
   const landing = quotePrefixOverride ?? sourceQuotePrefix;
-  const seamAbove = seamRowBetween(prevText, firstMoved, landing);
+  // A top-level list item landing on the far side of the blank row that
+  // closes (or opens) a list of its kind joins that list instead — the
+  // mirror of the removal that lets two items rejoin, so moving an item
+  // out of a list and back is a no-op.
+  if (
+    quotePrefixDepth(landing) === 0 &&
+    indentWidth(firstMoved) === 0 &&
+    RE_LIST.test(firstMoved)
+  ) {
+    const blankRow = (n: number) =>
+      n >= 1 && n <= doc.lines && RE_BLANK.test(doc.line(n).text) && !fenceAt(fences, n);
+    const listRow = (n: number) =>
+      n >= 1 && n <= doc.lines && (n < block.startLine || n > block.endLine)
+        ? doc.line(n).text
+        : null;
+    // The insertion may not fall inside the text this move removes.
+    const insertable = (n: number) => {
+      const at = doc.line(n).from;
+      return at <= from || at >= to;
+    };
+    const above = listRow(prev - 1);
+    const below = listRow(targetLine + 1);
+    if (blankRow(prev) && above != null && continuesList(above, firstMoved) && insertable(prev)) {
+      targetLine = prev;
+      prev -= 1;
+    } else if (
+      // Not when the row above already takes the item into its list.
+      !blankRow(prev) &&
+      prev >= 1 &&
+      !RE_LIST.test(doc.line(prev).text) &&
+      indentWidth(doc.line(prev).text) === 0 &&
+      blankRow(targetLine) &&
+      below != null &&
+      // Only a sibling: an indented row after a blank still belongs to
+      // the item above it, and the moved item would adopt it.
+      indentWidth(below) === 0 &&
+      continuesList(firstMoved, below) &&
+      insertable(targetLine + 1)
+    ) {
+      prev = targetLine;
+      targetLine += 1;
+    }
+  }
+  const prevText = prev >= 1 && prev <= doc.lines ? doc.line(prev).text : "";
+  const seamAbove = seamRowBetween(prevText, firstMoved, landing, "style");
   const sealAbove = seamAbove !== null;
   if (sealAbove) text = seamAbove + "\n" + text;
   const nextText = targetLine <= doc.lines ? doc.line(targetLine).text : "";
-  const seamBelow = seamRowBetween(lastMoved, nextText, landing);
+  const seamBelow = seamRowBetween(lastMoved, nextText, landing, "style");
   if (seamBelow !== null) text += "\n" + seamBelow;
 
   let insertPos: number;
   let insert: string;
   let blockOffset: number;
+  // Character offset from the insertion point to the block's first row: a
+  // seam sealed in above is a whole row (">" inside a Callout, not just
+  // an empty line) plus its newline.
+  const seamAboveChars = seamAbove !== null ? seamAbove.length + 1 : 0;
   if (targetLine > doc.lines) {
     insertPos = doc.length;
     insert = "\n" + text;
-    blockOffset = 1 + (sealAbove ? 1 : 0);
+    blockOffset = 1 + seamAboveChars;
   } else {
     insertPos = doc.line(targetLine).from;
     insert = text + "\n";
-    blockOffset = sealAbove ? 1 : 0;
+    blockOffset = seamAboveChars;
   }
 
   view.dispatch({
@@ -2530,6 +3640,40 @@ export function moveBlock(
     Math.min(view.state.doc.length, mappedInsertPos + blockOffset)
   );
   return view.state.doc.lineAt(startPos).number;
+}
+
+export interface DuplicateBlockChange {
+  /** Insertion point: the end of the block's last row. */
+  from: number;
+  insert: string;
+  /** The row between the block and its copy, or null when there is none. */
+  seam: string | null;
+  /** Characters from `from` to the copy's first row. */
+  copyOffset: number;
+  /** The copy's first line once the change is applied. */
+  copyLine: number;
+}
+
+/** The change that puts a copy of `block` right below it, one seam apart
+ *  (a blank row at the top level, except between items of one list; an
+ *  empty quote row inside a Callout). Shared by every Duplicate path. */
+export function duplicateBlockChange(doc: Text, block: BlockRange): DuplicateBlockChange {
+  const from = doc.line(block.endLine).to;
+  const text = doc.sliceString(doc.line(block.startLine).from, from);
+  const lines = text.split("\n");
+  const last = lines[lines.length - 1];
+  const container = block.quotePrefix ?? "";
+  const seam = seamRowBetween(last, lines[0], container, "style");
+  const nextText = block.endLine < doc.lines ? doc.line(block.endLine + 1).text : "";
+  const trailing = seamRowBetween(last, nextText, container, "style");
+  const lead = seam === null ? "\n" : `\n${seam}\n`;
+  return {
+    from,
+    insert: lead + text + (trailing === null ? "" : `\n${trailing}`),
+    seam,
+    copyOffset: lead.length,
+    copyLine: block.endLine + 1 + (seam === null ? 0 : 1),
+  };
 }
 
 /** First line of the block preceding this one (for keyboard moves). */
@@ -2647,17 +3791,17 @@ export function applyLinePrefix(lineText: string, prefix: string): string {
   return ws + prefix + rest;
 }
 
-/** Logical, non-overlapping blocks touched by an inclusive line span. */
 /**
  * The next block above (`dir` -1) or below (`dir` 1) `block`, or null at
  * the ends of the document.
  *
- * Blank rows are stepped over. The drag handle treats one as a block of
- * its own — it is draggable, and a marquee that sweeps it takes it along —
- * but as a DESTINATION a seam is never what the writer meant, and every
- * gap would otherwise cost an extra press. A row resolving back to `block`
- * (its own later lines, a caption it owns) is skipped for the same reason:
- * one press always lands somewhere new.
+ * Blank rows are stepped over. A seam is never selected — a marquee or a
+ * Shift step skips it, and only span operations (copy, cut, delete, move
+ * over first..last) carry the seams between selected blocks — and as a
+ * DESTINATION it is never what the writer meant either: every gap would
+ * cost an extra press. A row resolving back to `block` (its own later
+ * lines, a caption it owns) is skipped for the same reason: one press
+ * always lands somewhere new.
  */
 export function adjacentBlock(
   doc: Text,
@@ -2686,6 +3830,10 @@ function isBlankBlock(doc: Text, block: BlockRange): boolean {
   return true;
 }
 
+/** Logical, non-overlapping blocks touched by an inclusive line span.
+ *  Blank separator rows are not blocks to select: they are skipped, so a
+ *  span of nothing but blank rows is empty. Operations over the selection
+ *  as a span (first..last) still carry the seams between its blocks. */
 export function blocksInLineSpan(
   doc: Text,
   startLine: number,
@@ -2704,11 +3852,45 @@ export function blocksInLineSpan(
     }
     const previous = blocks[blocks.length - 1];
     if (
-      !previous ||
-      previous.startLine !== block.startLine ||
-      previous.endLine !== block.endLine
+      !isBlankBlock(doc, block) &&
+      (!previous ||
+        previous.startLine !== block.startLine ||
+        previous.endLine !== block.endLine)
     ) blocks.push(block);
     lineNo = Math.max(lineNo + 1, block.endLine + 1);
+  }
+  return blocks;
+}
+
+/**
+ * The blocks to select after a block has landed on `landed` and covers
+ * `spanLines` rows. Outside a quote this is the marquee's own answer,
+ * blocksInLineSpan. When the landing sits INSIDE a Callout or columns
+ * container (`inside`), getBlockRange would resolve any ">" row to the
+ * whole container, so the selection is built from the inner rows instead:
+ * exactly the paragraph, list item, fence or nested Callout that landed,
+ * with its quote prefix, so the flash and the next key act on it alone.
+ * Seam rows (empty quote rows between blocks) are skipped.
+ */
+export function landedBlocks(
+  doc: Text,
+  landed: number,
+  spanLines: number,
+  inside: boolean,
+  fences: FenceRange[] = cachedFences(doc)
+): BlockRange[] {
+  const last = Math.min(doc.lines, landed + Math.max(1, spanLines) - 1);
+  if (!inside) return blocksInLineSpan(doc, landed, last, fences);
+  const blocks: BlockRange[] = [];
+  let n = Math.max(1, landed);
+  while (n <= last) {
+    const block = innerBlockAt(doc, n, fences);
+    if (!block || block.startLine < landed) {
+      n++;
+      continue;
+    }
+    if (!isBlankBlock(doc, block)) blocks.push(block);
+    n = block.endLine + 1;
   }
   return blocks;
 }
@@ -2867,14 +4049,34 @@ export function turnQuoteBlockInto(
     return keep + applyLinePrefix(content, prefix);
   });
 
-  // A container's walls double as block separators, and two constructs stop
-  // parsing when they lose them: Obsidian will not begin a table or a rule on
-  // the line after a paragraph or a fence, so an unwrapped Callout ends up
-  // showing raw pipes where it used to show a table. Those get a blank row
-  // back. Ordinary prose does NOT — consecutive rows inside a Callout are one
-  // paragraph, and separating them would rewrite the text rather than unwrap
-  // it. The row below the block needs the same care: it was shielded by the
-  // container too, and is now sitting against plain text.
+  const below = block.endLine < doc.lines ? doc.line(block.endLine + 1).text : "";
+  return {
+    from: first.from,
+    to: doc.line(block.endLine).to,
+    insert: stitchLiftedRows(rows, kept, below, block.quotePrefix ?? "").join("\n"),
+  };
+}
+
+/**
+ * Rows lifted one quote level out of a container, with the blank seams
+ * they now need. `kept[i]` is row i's surviving container prefix, `below`
+ * the row after the block and `outerPrefix` the block's own container.
+ *
+ * A container's walls double as block separators, and two constructs stop
+ * parsing when they lose them: Obsidian will not begin a table or a rule on
+ * the line after a paragraph or a fence, so an unwrapped Callout ends up
+ * showing raw pipes where it used to show a table. Those get a blank row
+ * back. Ordinary prose does NOT — consecutive rows inside a Callout are one
+ * paragraph, and separating them would rewrite the text rather than unwrap
+ * it. The row below the block needs the same care: it was shielded by the
+ * container too, and is now sitting against plain text.
+ */
+function stitchLiftedRows(
+  rows: readonly string[],
+  kept: readonly string[],
+  below: string,
+  outerPrefix: string
+): string[] {
   const unquoted = (row: string) =>
     splitQuoteMarkers(row, quoteDepth(row)).rest;
   const fusesWithoutSeam = (above: string, belowRow: string) => {
@@ -2896,15 +4098,206 @@ export function turnQuoteBlockInto(
     }
     stitched.push(row);
   });
-  const below = block.endLine < doc.lines ? doc.line(block.endLine + 1).text : "";
   if (fusesWithoutSeam(stitched[stitched.length - 1], below)) {
-    stitched.push((block.quotePrefix ?? "").trimEnd());
+    stitched.push(outerPrefix.trimEnd());
   }
+  return stitched;
+}
+
+/** The targets that retype a container by its title: headings and lists.
+ *  Text and Quote lift or relabel the whole container instead. */
+const TITLE_TURN_PREFIXES: ReadonlySet<string> = new Set([
+  "# ", "## ", "### ", "- ", "1. ", "- [ ] ",
+]);
+
+/**
+ * Turn a Callout, a toggle or a multi-line quote into another type by its
+ * TITLE.
+ *
+ * The container's first row names it; the rows below are its body, not
+ * more titles. Retyping every row turned a three-line Callout into three
+ * headings and flattened a toggle's children onto its own level. For a
+ * heading or list target the title row takes the prefix and the body sheds
+ * one quote level: after a heading it follows as ordinary rows (one blank
+ * row apart), under a list item it is indented to the item's content
+ * column so it stays that item's children. A title-less Callout is named
+ * the way Obsidian renders it; a one-row Callout is just its title.
+ *
+ * Quote relabels a Callout or toggle — only the "[!type]" token goes, so a
+ * list or a nested Callout in the body survives as it stands — and Text is
+ * `turnQuoteBlockInto`'s plain unwrap. Null when the block is no such
+ * container or the target is not one of these, which leaves the caller's
+ * whole-block or one-row path in charge (a plain quote keeps it for Text
+ * and Quote, so the Backspace unwrap and today's results stay put).
+ */
+export function turnContainerInto(
+  doc: Text,
+  block: BlockRange,
+  prefix: string
+): BlockTextChange | null {
+  const first = doc.line(block.startLine);
+  const containerDepth = quotePrefixDepth(block.quotePrefix ?? "");
+  const head = splitQuoteMarkers(first.text, containerDepth);
+  if (!RE_QUOTE.test(head.rest)) return null;
+  const callout = parseCalloutHeader(head.rest);
+  if (callout && isScaffoldCallout(callout.type)) return null;
+  const multiLine = block.endLine > block.startLine;
+  const own = removeFirstQuoteMarker(head.rest);
+
+  if (!callout) {
+    // A plain quote has no title of its own: its first row stands in for
+    // one only when it is prose. A fence, table, rule or nested quote up
+    // there is structure, which the whole-block unwrap handles already.
+    if (!multiLine || !TITLE_TURN_PREFIXES.has(prefix)) return null;
+    if (
+      RE_BLANK.test(own) ||
+      RE_FENCE.test(own) ||
+      isTableRow(own) ||
+      RE_QUOTE.test(own) ||
+      RE_HR.test(own)
+    ) return null;
+  }
+  if (prefix === "") return callout ? turnQuoteBlockInto(doc, block, "") : null;
+
+  const named = callout ? own.replace(RE_CALLOUT_TOKEN, "").trim() : own;
+  if (prefix === "> ") {
+    if (!callout) return null;
+    // A title-less header leaves no row behind when a body follows, so the
+    // quote does not open on an empty line.
+    if (!named && multiLine) {
+      return { from: first.from, to: doc.line(block.startLine + 1).from, insert: "" };
+    }
+    return {
+      from: first.from,
+      to: first.to,
+      insert: head.prefix + (calloutToQuote(head.rest) ?? head.rest),
+    };
+  }
+  if (!TITLE_TURN_PREFIXES.has(prefix)) return null;
+
+  // A toggle without a title stays an empty row of the new type; a
+  // Callout without one reads as the word Obsidian renders for it.
+  const title = callout
+    ? prefix + (named || (callout.type === TOGGLE_TYPE ? "" : defaultCalloutTitle(callout.type)))
+    : applyLinePrefix(own, prefix);
+  const list = !prefix.startsWith("#");
+  const indent = list ? " ".repeat(listContentIndent(prefix) ?? 0) : "";
+  const rows = [head.prefix + title];
+  const kept = [head.prefix];
+  const body: { keep: string; content: string }[] = [];
+  for (let n = block.startLine + 1; n <= block.endLine; n++) {
+    const outer = splitQuoteMarkers(doc.line(n).text, containerDepth);
+    body.push({ keep: outer.prefix, content: removeFirstQuoteMarker(outer.rest) });
+  }
+  // A heading ends its own block, so any body starts a block of its own —
+  // a blank row keeps it readable. Under a list item, prose or a table
+  // right after the title would be swallowed into the title's paragraph
+  // (and a rule would turn it into a setext heading); a list, quote or
+  // fence starts a child block by itself.
+  const lead = body[0]?.content;
+  if (
+    lead !== undefined &&
+    !RE_BLANK.test(lead) &&
+    (!list || lazyGrabbable(lead) || RE_HR.test(lead))
+  ) {
+    rows.push(head.prefix.trimEnd());
+    kept.push(head.prefix);
+  }
+  for (const { keep, content } of body) {
+    rows.push(RE_BLANK.test(content) ? keep.trimEnd() : keep + indent + content);
+    kept.push(keep);
+  }
+  const below = block.endLine < doc.lines ? doc.line(block.endLine + 1).text : "";
   return {
     from: first.from,
     to: doc.line(block.endLine).to,
-    insert: stitched.join("\n"),
+    insert: stitchLiftedRows(rows, kept, below, block.quotePrefix ?? "").join("\n"),
   };
+}
+
+/**
+ * The single change behind "Turn into <type>" for one block, shared by the
+ * handle menu, the chords and the block-selection batch so all three
+ * retype a block identically. Null for a block `canTurnBlockInto` refuses.
+ *
+ * A container goes by its title (`turnContainerInto`), a multi-line quote
+ * otherwise as a whole (`turnQuoteBlockInto`), and anything else rewrites
+ * its first row — inside a Callout the "> " markers are the container,
+ * not the block, so they stay standing in front of the new prefix.
+ */
+export function turnBlockChange(
+  doc: Text,
+  block: BlockRange,
+  prefix: string,
+  fences: FenceRange[] = cachedFences(doc)
+): BlockTextChange | null {
+  const change = turnBlockChangeRaw(doc, block, prefix, fences);
+  // A heading takes no background (block-color.ts): turning a coloured
+  // block into one drops its marker in the same edit. Text, list, to-do
+  // and quote targets only swap the row's prefix, so the marker stays.
+  if (!change || !/^#{1,6} $/.test(prefix)) return change;
+  const rows = change.insert.split("\n");
+  rows[0] = setBlockBgMarker(rows[0], null) ?? rows[0];
+  return { ...change, insert: rows.join("\n") };
+}
+
+function turnBlockChangeRaw(
+  doc: Text,
+  block: BlockRange,
+  prefix: string,
+  fences: FenceRange[]
+): BlockTextChange | null {
+  if (!canTurnBlockInto(doc, block, fences)) return null;
+  const container = turnContainerInto(doc, block, prefix);
+  if (container) return container;
+  const whole = isMultiLineQuoteBlock(doc, block)
+    ? turnQuoteBlockInto(doc, block, prefix)
+    : null;
+  if (whole) return whole;
+  const line = doc.line(block.startLine);
+  const markers = block.quotePrefix ? quoteMarkerPrefix(line.text) ?? "" : "";
+  return {
+    from: line.from,
+    to: line.to,
+    insert: markers + applyLinePrefix(line.text.slice(markers.length), prefix),
+  };
+}
+
+/**
+ * The distinct blocks a selection touches, in document order: every row
+ * from the one holding `from` to the one holding `to` resolves through
+ * `innerBlockAt` (the block a writer would point at — a Callout's row, a
+ * list item with its children, the Callout itself from its title), blank
+ * seams are skipped and a block is taken once. A selection ending at the
+ * very start of a row does not reach into that row.
+ */
+export function blocksTouchedBySelection(
+  doc: Text,
+  from: number,
+  to: number,
+  fences: FenceRange[] = cachedFences(doc)
+): BlockRange[] {
+  const lo = Math.max(0, Math.min(from, to, doc.length));
+  const hi = Math.min(doc.length, Math.max(from, to));
+  const firstLine = doc.lineAt(lo).number;
+  let lastLine = doc.lineAt(hi).number;
+  if (hi > lo && lastLine > firstLine && doc.line(lastLine).from === hi) lastLine--;
+  const blocks: BlockRange[] = [];
+  let n = firstLine;
+  while (n <= lastLine) {
+    const block = innerBlockAt(doc, n, fences);
+    if (!block) {
+      n++;
+      continue;
+    }
+    const previous = blocks[blocks.length - 1];
+    const inside = previous &&
+      block.startLine >= previous.startLine &&
+      block.endLine <= previous.endLine;
+    if (!inside && !isBlankBlock(doc, block)) blocks.push(block);
+    n = Math.max(n + 1, block.endLine + 1);
+  }
+  return blocks;
 }
 
 /** Build one transaction's changes for a multi-block type conversion.
@@ -2918,27 +4311,128 @@ export function batchTurnIntoChanges(
 ): { changes: BlockTextChange[]; skipped: number } {
   const changes: BlockTextChange[] = [];
   let skipped = 0;
+  // A seam between selected blocks is no block to retype: "- [ ] " on an
+  // empty row is a stray to-do, not a conversion. It is not structural
+  // either, so it is not counted. A lone empty block, selected on its own,
+  // is the writer asking for a typed empty line, and still gets one.
+  const seamsOnly = blocks.every((block) => isBlankBlock(doc, block));
   for (const block of blocks) {
+    if (!seamsOnly && isBlankBlock(doc, block)) continue;
     const line = doc.line(block.startLine);
     const isFence = fenceAt(fences, block.startLine) != null;
     const isTable = !isFence && isTableRow(line.text);
     // A rule has no text to retype as anything else; giving it a prefix
-    // just spells "---" inside a heading or list item.
-    if (isFence || isTable || RE_HR.test(line.text)) {
+    // just spells "---" inside a heading or list item. Inside a Callout
+    // the rule sits behind the container's markers.
+    const content = block.quotePrefix
+      ? line.text.slice(quoteMarkerPrefix(line.text)?.length ?? 0)
+      : line.text;
+    if (isFence || isTable || RE_HR.test(content)) {
       skipped++;
       continue;
     }
-    if (block.endLine > block.startLine && RE_QUOTE.test(line.text)) {
-      const whole = turnQuoteBlockInto(doc, block, prefix);
-      if (!whole) {
-        skipped++;
-        continue;
-      }
-      if (whole.insert !== doc.sliceString(whole.from, whole.to)) changes.push(whole);
+    // The single-block change: a Callout row keeps its "> ", a container
+    // goes by its title, a multi-line quote as a whole.
+    const change = turnBlockChange(doc, block, prefix, fences);
+    if (!change) {
+      skipped++;
       continue;
     }
-    const insert = applyLinePrefix(line.text, prefix);
-    if (insert !== line.text) changes.push({ from: line.from, to: line.to, insert });
+    if (change.insert !== doc.sliceString(change.from, change.to)) changes.push(change);
+  }
+  return { changes, skipped };
+}
+
+/** A task item's marker head: indentation, quote markers, list marker and
+ * the box, with the box's state captured. */
+const RE_TASK_HEAD = /^(\s*(?:>[ \t]*)*)([-*+]|\d+[.)])([ \t]+)\[([ xX])\](?=[ \t]|$)/;
+
+/** Indentation plus quote markers: what precedes a row's own content. */
+const RE_ROW_HEAD = /^\s*(?:>[ \t]*)*/;
+
+/**
+ * Mod+Enter over a block selection: flip every selected block's task box.
+ *
+ * A block whose first row has no box becomes a to-do when that row is a
+ * plain paragraph or a bare list item (the box slips in after the list
+ * marker, so "- one" and "1. one" become "- [ ] one" / "1. [ ] one");
+ * anything with another prefix of its own (heading, quote, fence, table,
+ * rule, Callout header) is left alone, since a box pushed into it would
+ * corrupt the structure rather than tick it.
+ */
+export function toggleTaskLines(
+  doc: Text,
+  blocks: readonly BlockRange[]
+): BlockTextChange[] {
+  const changes: BlockTextChange[] = [];
+  for (const block of blocks) {
+    if (block.startLine < 1 || block.startLine > doc.lines) continue;
+    const line = doc.line(block.startLine);
+    const task = line.text.match(RE_TASK_HEAD);
+    if (task) {
+      const [head, lead, marker, gap, state] = task;
+      changes.push({
+        from: line.from,
+        to: line.from + head.length,
+        insert: `${lead}${marker}${gap}[${state === " " ? "x" : " "}]`,
+      });
+      continue;
+    }
+    // Only a row INSIDE a Callout has quote markers to look past; a quote
+    // block of its own is a quote, not a paragraph.
+    const head = block.quotePrefix
+      ? line.text.match(RE_ROW_HEAD)?.[0] ?? ""
+      : line.text.match(/^\s*/)?.[0] ?? "";
+    const content = line.text.slice(head.length);
+    // A bare list item is the commonest candidate: the box lands right
+    // after the marker gap, keeping the item's own marker.
+    const list = content.match(RE_LIST);
+    if (list && !content.slice(list[0].length).startsWith("[!")) {
+      const at = line.from + head.length + list[0].length;
+      changes.push({ from: at, to: at, insert: "[ ] " });
+      continue;
+    }
+    if (
+      RE_BLANK.test(content) ||
+      RE_LINE_PREFIX.test(content) ||
+      RE_FENCE.test(content) ||
+      RE_TABLE.test(content) ||
+      RE_HR.test(content) ||
+      content.startsWith("[!")
+    ) continue;
+    const at = line.from + head.length;
+    changes.push({ from: at, to: at, insert: "- [ ] " });
+  }
+  return changes;
+}
+
+/**
+ * One transaction's changes for wrapping several blocks into Callouts,
+ * toggles or code blocks — `wrapBlockInto` for a block selection. Blocks
+ * that `canWrapBlockInto` refuses are counted as skipped and left intact.
+ */
+export function batchWrapIntoChanges(
+  doc: Text,
+  blocks: readonly BlockRange[],
+  kind: BlockWrapKind,
+  fences: FenceRange[] = cachedFences(doc)
+): { changes: BlockTextChange[]; skipped: number } {
+  const changes: BlockTextChange[] = [];
+  let skipped = 0;
+  for (const block of blocks) {
+    if (!canWrapBlockInto(doc, block, fences, kind)) {
+      skipped++;
+      continue;
+    }
+    const from = doc.line(block.startLine).from;
+    const to = doc.line(block.endLine).to;
+    const wrapped = buildBlockWrap(doc.sliceString(from, to).split("\n"), kind);
+    const above = block.startLine > 1 ? doc.line(block.startLine - 1).text : "";
+    const below = block.endLine < doc.lines ? doc.line(block.endLine + 1).text : "";
+    let text = wrapped.join("\n");
+    if (needsProtectedSeam(above, wrapped[0])) text = "\n" + text;
+    if (needsProtectedSeam(wrapped[wrapped.length - 1], below)) text += "\n";
+    changes.push({ from, to, insert: text });
   }
   return { changes, skipped };
 }
@@ -2966,6 +4460,40 @@ export function lineContentSpan(
   const trimmed = rest.replace(/\s+$/, "");
   if (trimmed.length === 0 || trimmed.startsWith("[!")) return null;
   return { from: offset, to: offset + trimmed.length };
+}
+
+/** A row that is nothing but an embed: `![[pic.png]]` or `![alt](url)`,
+ *  inside any quote markers. */
+const RE_EMBED_ONLY_ROW = /^\s*(?:>\s*)*(?:!\[\[[^\]]+\]\]|!\[[^\]]*\]\([^)]*\))\s*$/;
+/** A row that is nothing but an Obsidian block id, inside any quote markers. */
+const RE_BLOCK_ID_ONLY_ROW = /^\s*(?:>\s*)*\^[A-Za-z0-9-]+\s*$/;
+/** A block id at the end of a row's text: ` ^abc123`. */
+const RE_TRAILING_BLOCK_ID = /\s+\^[A-Za-z0-9-]+\s*$/;
+/** A footnote definition's label: `[^1]: `. */
+const RE_FOOTNOTE_LABEL = /^\[\^[^\]]+\]:\s*/;
+
+/**
+ * The part of a row an inline format wraps when it runs over several rows:
+ * lineContentSpan, minus what is structure rather than text. A caption row
+ * (`<small class="nf-caption" …>`) wrapped in `**` is no longer its block's
+ * caption, a wrapped `^id` is no longer a block id (every link to the block
+ * breaks), a wrapped embed row stops owning its caption, and a wrapped
+ * `[^1]:` is no longer a footnote. Null when nothing on the row may be
+ * wrapped. Kept out of lineContentSpan, which also maps rendered offsets
+ * to source ones.
+ */
+export function inlineFormatSpan(lineText: string): { from: number; to: number } | null {
+  if (parseBlockCaption(lineText) || RE_EMBED_ONLY_ROW.test(lineText) || RE_BLOCK_ID_ONLY_ROW.test(lineText)) {
+    return null;
+  }
+  const span = lineContentSpan(lineText);
+  if (!span) return null;
+  let { from, to } = span;
+  const label = RE_FOOTNOTE_LABEL.exec(lineText.slice(from, to));
+  if (label) from += label[0].length;
+  const id = RE_TRAILING_BLOCK_ID.exec(lineText.slice(from, to));
+  if (id) to = from + id.index;
+  return to > from ? { from, to } : null;
 }
 
 export interface BatchFormatMarkers {
@@ -3025,6 +4553,7 @@ export function batchToggleFormatChanges(
     skipped++;
   };
   for (const block of blocks) {
+    if (isBlankBlock(doc, block)) continue;
     const first = doc.line(block.startLine);
     const firstFence = fenceAt(fences, block.startLine);
     const firstTable = !firstFence && isTableRow(first.text)
@@ -3055,7 +4584,7 @@ export function batchToggleFormatChanges(
         reportSkipped("table", table?.startLine ?? n, table?.endLine ?? n);
         continue;
       }
-      const span = lineContentSpan(line.text);
+      const span = inlineFormatSpan(line.text);
       if (!span) continue;
       const text = line.text.slice(span.from, span.to);
       // A rule inside a Callout reaches this loop with its quote markers
@@ -3186,15 +4715,58 @@ export function parseRow(line: string): string[] {
   return cells;
 }
 
-/** Rendered width of cell text: CJK and fullwidth characters occupy two
- *  columns, so mixed Chinese/English tables still align in the editor.
- *  HTML tags (color markers, inline spans) render invisibly — skip them. */
+/** Symbols outside the emoji blocks that fonts render as a two-column
+ *  emoji by default (Unicode Emoji_Presentation), as inclusive ranges. */
+const EMOJI_PRESENTATION_RANGES: [number, number][] = [
+  [0x231a, 0x231b], [0x23e9, 0x23ec], [0x23f0, 0x23f0], [0x23f3, 0x23f3],
+  [0x25fd, 0x25fe], [0x2614, 0x2615], [0x2648, 0x2653], [0x267f, 0x267f],
+  [0x2693, 0x2693], [0x26a1, 0x26a1], [0x26aa, 0x26ab], [0x26bd, 0x26be],
+  [0x26c4, 0x26c5], [0x26ce, 0x26ce], [0x26d4, 0x26d4], [0x26ea, 0x26ea],
+  [0x26f2, 0x26f3], [0x26f5, 0x26f5], [0x26fa, 0x26fa], [0x26fd, 0x26fd],
+  [0x2705, 0x2705], [0x270a, 0x270b], [0x2728, 0x2728], [0x274c, 0x274c],
+  [0x274e, 0x274e], [0x2753, 0x2755], [0x2757, 0x2757], [0x2795, 0x2797],
+  [0x27b0, 0x27b0], [0x27bf, 0x27bf], [0x2b1b, 0x2b1c], [0x2b50, 0x2b50],
+  [0x2b55, 0x2b55],
+];
+
+/** Rendered width of cell text: CJK, fullwidth characters and emoji
+ *  occupy two columns, so mixed Chinese/English tables still align in the
+ *  editor. HTML tags (color markers, inline spans) render invisibly and an
+ *  escaped pipe renders as one character — neither counts. Combining marks,
+ *  variation selectors, skin tones and the joiner-glued members of a ZWJ
+ *  sequence (👨‍👩‍👧 is one glyph) take no column of their own. */
 export function displayWidth(s: string): number {
-  s = s.replace(/<[^>]*>/g, "");
+  s = s.replace(/<[^>]*>/g, "").replace(/\\\|/g, "|");
   let w = 0;
+  let afterJoiner = false;
+  let afterRegional = false;
+  let prevNarrowSymbol = false;
   for (const ch of s) {
     const c = ch.codePointAt(0) ?? 0;
-    w +=
+    const glued = afterJoiner;
+    afterJoiner = c === 0x200d;
+    const regional = c >= 0x1f1e6 && c <= 0x1f1ff;
+    const flagTail = regional && afterRegional;
+    afterRegional = regional && !afterRegional;
+    if (c === 0xfe0f && prevNarrowSymbol) {
+      // U+FE0F asks for emoji presentation of a text-default symbol
+      // (❤ + FE0F is the red heart emoji): the pair takes two columns.
+      w += 1;
+      prevNarrowSymbol = false;
+      continue;
+    }
+    if (
+      glued ||
+      flagTail ||
+      c === 0x200d || // zero-width joiner
+      c === 0x20e3 || // combining keycap
+      (c >= 0xfe0e && c <= 0xfe0f) || // variation selectors
+      (c >= 0x1f3fb && c <= 0x1f3ff) || // skin tone modifiers
+      (c >= 0x0300 && c <= 0x036f) // combining diacritics
+    ) {
+      continue;
+    }
+    const wide =
       (c >= 0x1100 && c <= 0x115f) || // Hangul Jamo
       (c >= 0x2e80 && c <= 0xa4cf) || // CJK radicals … Yi syllables
       (c >= 0xac00 && c <= 0xd7a3) || // Hangul syllables
@@ -3202,9 +4774,13 @@ export function displayWidth(s: string): number {
       (c >= 0xfe30 && c <= 0xfe4f) || // CJK compatibility forms
       (c >= 0xff00 && c <= 0xff60) || // fullwidth forms
       (c >= 0xffe0 && c <= 0xffe6) ||
-      (c >= 0x20000 && c <= 0x3fffd) // CJK extensions B+
-        ? 2
-        : 1;
+      (c >= 0x1f000 && c <= 0x1faff) || // emoji blocks
+      (c >= 0x20000 && c <= 0x3fffd) || // CJK extensions B+
+      EMOJI_PRESENTATION_RANGES.some(([lo, hi]) => c >= lo && c <= hi);
+    w += wide ? 2 : 1;
+    // Symbols and dingbats that FE0F can promote; letters and digits
+    // (1️⃣ is a keycap, still one column) it cannot.
+    prevNarrowSymbol = !wide && c >= 0x2000 && c <= 0x2bff;
   }
   return w;
 }
@@ -3374,6 +4950,188 @@ export function tableDeleteColumn(text: string, col: number): string {
   for (const r of clean.rows) r.cells.splice(at, 1);
   return tableWithBg(rebuildTable(clean), tableColor);
 }
+
+/** First markdown row index that is a body row: everything from there on
+ *  may move, be duplicated or sorted; the header (and delimiter) may not. */
+function tableBodyStart(rows: { delim: boolean }[]): number {
+  const d = delimIndex(rows);
+  return d < 0 ? 1 : d + 1;
+}
+
+/** Swap body row `row` with its neighbour above (`dir` -1) or below
+ *  (`dir` 1). The header and the delimiter never move, and a row never
+ *  crosses them: a no-op returns the text unchanged. */
+export function tableMoveRow(text: string, row: number, dir: -1 | 1): string {
+  const tbl = parseTable(text);
+  const first = tableBodyStart(tbl.rows);
+  const target = row + dir;
+  if (row < first || target < first || row >= tbl.rows.length || target >= tbl.rows.length) {
+    return text;
+  }
+  [tbl.rows[row], tbl.rows[target]] = [tbl.rows[target], tbl.rows[row]];
+  return rebuildTable(tbl);
+}
+
+/** Swap column `col` with its neighbour left (`dir` -1) or right (`dir`
+ *  1) in every row, delimiter included, so alignment colons travel with
+ *  their column. A no-op at either edge. */
+export function tableMoveColumn(text: string, col: number, dir: -1 | 1): string {
+  const tbl = parseTable(text);
+  const target = col + dir;
+  if (col < 0 || target < 0 || col >= tbl.nCols || target >= tbl.nCols) return text;
+  // The table tint marker is anchored to the first header cell: lift it
+  // out before the swap and put it back afterwards, or a column moved
+  // across that cell would carry the marker away (see tableInsertColumn).
+  const tableColor = tableBgColor(text);
+  const clean = parseTable(text.replace(RE_TBL_MARKER, ""));
+  for (const r of clean.rows) {
+    [r.cells[col], r.cells[target]] = [r.cells[target], r.cells[col]];
+  }
+  return tableWithBg(rebuildTable(clean), tableColor);
+}
+
+/** Insert a copy of body row `row` directly below it (cell colors travel
+ *  with the copy). The header and delimiter cannot be duplicated. */
+export function tableDuplicateRow(text: string, row: number): string {
+  const tbl = parseTable(text);
+  if (row < tableBodyStart(tbl.rows) || row >= tbl.rows.length) return text;
+  tbl.rows.splice(row + 1, 0, { delim: false, cells: [...tbl.rows[row].cells] });
+  return rebuildTable(tbl);
+}
+
+/** The text a sort compares: the cell without its color wrapper, table
+ *  marker or any inline HTML. */
+function sortKeyOf(cell: string): string {
+  const inner = splitTableMarkers(cell).inner;
+  const unwrapped = inner.match(RE_CELL_BG)?.[1] ?? inner;
+  return unwrapped.replace(/<[^>]*>/g, "").trim();
+}
+
+/**
+ * Sort the body rows by column `col` (header and delimiter stay put), in
+ * natural order — "item 2" before "item 10", case and accents ignored —
+ * and stably, so rows equal in that column keep their order. `rowMap`
+ * gives each original markdown row's new index, so a caret can follow
+ * the row it was in. A header-only fragment (no delimiter) is left alone.
+ */
+export function tableSortByColumn(
+  text: string,
+  col: number,
+  dir: "asc" | "desc"
+): { text: string; rowMap: number[] } {
+  const tbl = parseTable(text);
+  const d = delimIndex(tbl.rows);
+  const identity = tbl.rows.map((_, i) => i);
+  if (d < 0 || col < 0 || col >= tbl.nCols) return { text, rowMap: identity };
+  const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+  const body = tbl.rows
+    .map((r, index) => ({ r, index, key: sortKeyOf(r.cells[col] ?? "") }))
+    .slice(d + 1);
+  const sign = dir === "asc" ? 1 : -1;
+  body.sort((a, b) => sign * collator.compare(a.key, b.key));
+  const rowMap = [...identity];
+  body.forEach((entry, i) => {
+    rowMap[entry.index] = d + 1 + i;
+  });
+  tbl.rows = [...tbl.rows.slice(0, d + 1), ...body.map((entry) => entry.r)];
+  return { text: rebuildTable(tbl), rowMap };
+}
+
+/** A cursor-relative table edit and where the caret lands afterwards
+ *  (only asked when the edit changed something). The command palette,
+ *  the right-click menu and the toolbar overflow share these. */
+export interface TableEditRecipe {
+  edit: (text: string, row: number, col: number) => string;
+  target: (row: number, col: number, oldText: string, newText: string) => { row: number; col: number };
+}
+
+export type TableStructureEdit =
+  | "move-row-up"
+  | "move-row-down"
+  | "move-column-left"
+  | "move-column-right"
+  | "duplicate-row"
+  | "sort-asc"
+  | "sort-desc";
+
+/** The edit behind each structural table command, with a caret target
+ *  that follows the moved row or column (the copy, for a duplicate; the
+ *  row's new place, for a sort). Fresh closures each call: a sort keeps
+ *  its row map between the edit and the target. */
+export function tableEditRecipe(kind: TableStructureEdit): TableEditRecipe {
+  switch (kind) {
+    case "move-row-up":
+      return { edit: (t, r) => tableMoveRow(t, r, -1), target: (r, c) => ({ row: r - 1, col: c }) };
+    case "move-row-down":
+      return { edit: (t, r) => tableMoveRow(t, r, 1), target: (r, c) => ({ row: r + 1, col: c }) };
+    case "move-column-left":
+      return { edit: (t, _r, c) => tableMoveColumn(t, c, -1), target: (r, c) => ({ row: r, col: c - 1 }) };
+    case "move-column-right":
+      return { edit: (t, _r, c) => tableMoveColumn(t, c, 1), target: (r, c) => ({ row: r, col: c + 1 }) };
+    case "duplicate-row":
+      return { edit: (t, r) => tableDuplicateRow(t, r), target: (r, c) => ({ row: r + 1, col: c }) };
+    case "sort-asc":
+    case "sort-desc": {
+      let rowMap: number[] | null = null;
+      return {
+        edit: (t, _r, c) => {
+          const sorted = tableSortByColumn(t, c, kind === "sort-asc" ? "asc" : "desc");
+          rowMap = sorted.rowMap;
+          return sorted.text;
+        },
+        target: (r, c) => ({ row: rowMap?.[r] ?? r, col: c }),
+      };
+    }
+  }
+}
+
+/** Which structural edits apply at (row, col) of a table, for graying
+ *  out menu rows: a header row cannot move or be duplicated, an edge
+ *  column cannot move outward, and a sort needs a delimiter and two body
+ *  rows. */
+export function tableStructureEditEnabled(
+  text: string,
+  row: number,
+  col: number,
+  kind: TableStructureEdit
+): boolean {
+  const tbl = parseTable(text);
+  const first = tableBodyStart(tbl.rows);
+  const last = tbl.rows.length - 1;
+  const onBody = row >= first && row <= last && !tbl.rows[row].delim;
+  switch (kind) {
+    case "move-row-up":
+      return onBody && row > first;
+    case "move-row-down":
+      return onBody && row < last;
+    case "duplicate-row":
+      return onBody;
+    case "move-column-left":
+      return col > 0 && col < tbl.nCols;
+    case "move-column-right":
+      return col >= 0 && col < tbl.nCols - 1;
+    case "sort-asc":
+    case "sort-desc":
+      return delimIndex(tbl.rows) >= 0 && last - first >= 1;
+  }
+}
+
+/** Menu rows for the structural edits, in the order every surface shows
+ *  them: row moves and duplicate, column moves, then the sorts. */
+export const TABLE_STRUCTURE_ROWS: { kind: TableStructureEdit; title: string; icon: string }[] = [
+  { kind: "duplicate-row", title: "Duplicate row", icon: "copy" },
+  { kind: "move-row-up", title: "Move row up", icon: "arrow-up" },
+  { kind: "move-row-down", title: "Move row down", icon: "arrow-down" },
+  { kind: "move-column-left", title: "Move table column left", icon: "arrow-left" },
+  { kind: "move-column-right", title: "Move table column right", icon: "arrow-right" },
+  // Obsidian 1.13's Lucide set spells these without the inner dash; an
+  // unknown id renders no glyph and shifts the row's title left.
+  { kind: "sort-asc", title: "Sort column A→Z", icon: "arrow-down-az" },
+  { kind: "sort-desc", title: "Sort column Z→A", icon: "arrow-down-za" },
+];
+
+/** Icons of the table's two deletes, on the toolbar and in every menu. */
+export const TABLE_DELETE_ICONS = { row: "rows-2", column: "columns-2" } as const;
 
 /* ---------- Per-table / per-cell backgrounds ----------------------- */
 /* Colors live in the markdown itself as class-only spans, so they      */
@@ -3554,6 +5312,19 @@ function cellStart(line: string, c: number): number {
   return pos;
 }
 
+/** Where the caret goes after a table edit: the content start of cell
+ *  (row, col) in the rebuilt table `out`, which begins at document
+ *  position `from`. The row is clamped into the table and moved off the
+ *  delimiter to the nearest data row; the column is clamped to that row. */
+export function tableCellAnchor(from: number, out: string, row: number, col: number): number {
+  const lines = out.split("\n");
+  const r = nearestTableDataRow(out, Math.max(0, Math.min(row, lines.length - 1)));
+  const cols = Math.max(1, parseRow(lines[r]).length);
+  const c = Math.max(0, Math.min(col, cols - 1));
+  const before = lines.slice(0, r).reduce((sum, line) => sum + line.length + 1, 0);
+  return from + before + cellStart(lines[r], c);
+}
+
 /** Cell index at ch: how many pipes sit strictly before the cursor. */
 function cellAt(line: string, ch: number): number {
   const pipes = pipePositions(line);
@@ -3645,6 +5416,19 @@ interface TableCtx {
   column: ColumnProjectionAtPosition | null;
 }
 
+/**
+ * Every caret sits on an owned caption row. Tab and Shift+Tab do nothing
+ * there: an indented caption no longer matches its block's prefix, so it
+ * stops being owned and its raw <small> tags show.
+ */
+export function tabOnCaptionRows(state: EditorState): boolean {
+  const doc = state.doc;
+  return state.selection.ranges.every((range) => {
+    const line = doc.lineAt(range.head);
+    return line.text.includes("nf-caption") && ownedBlockCaption(doc, line.number) != null;
+  });
+}
+
 function makeTableKeymap(plugin: NotionFlowPlugin) {
   const context = (view: EditorView): TableCtx | null => {
     if (!plugin.settings.tableEditing) return null;
@@ -3730,6 +5514,7 @@ function makeTableKeymap(plugin: NotionFlowPlugin) {
   };
 
   const nav = (view: EditorView, dir: 1 | -1): boolean => {
+    if (tabOnCaptionRows(view.state)) return true;
     const ctx = context(view);
     if (!ctx) return false;
     const res = tableNavigate(ctx.lines, ctx.row, ctx.ch, dir);
@@ -3907,7 +5692,21 @@ export function quoteEnterPlan(
   const line = doc.lineAt(pos);
   const prefix = quoteMarkerPrefix(line.text);
   if (prefix == null) return null;
-  if (fenceAt(resolved, line.number)) return null;
+  const lineFence = fenceAt(resolved, line.number);
+  if (lineFence) {
+    // Code rows belong to the code keymap — except the closing "```",
+    // which is the block's last row INSIDE the container. Enter at its end
+    // means "a new line after the code block", and the default writes that
+    // line without the "> " markers, dropping it out of the Callout and
+    // sealing the block one row early. Only from the row's very end: the
+    // marker itself is still the editor's to edit.
+    if (
+      !lineFence.closed ||
+      line.number !== lineFence.endLine ||
+      pos !== line.to
+    )
+      return null;
+  }
   if (RE_QUOTE_ONLY.test(line.text)) {
     const columnDepth = columnContentQuoteDepth(doc, line.number);
     // The two quote markers of an nf-col are structure, not a quote level
@@ -3952,6 +5751,27 @@ export function quoteEnterPlan(
   }
   if (pos - line.from < prefix.length) return null;
   if (RE_LIST.test(line.text.slice(prefix.length))) return null;
+  // Enter at the end of a Callout title whose empty body row already waits
+  // right below (the /toggle and /callout templates and a fresh toggle wrap
+  // all write one) moves into that row. Adding a second empty row above it
+  // would leave a stray marker row at the bottom of the box, and no row
+  // typed above that one would ever end its level, so Enter-Enter could no
+  // longer leave the box.
+  if (pos === line.to && line.number < doc.lines) {
+    const header = calloutHeaderAt(doc, line.number);
+    const nx = doc.line(line.number + 1);
+    if (
+      header &&
+      !isScaffoldCallout(header.type) &&
+      // A collapsed box hides that row; the caret must not vanish into it.
+      header.fold !== "-" &&
+      RE_QUOTE_ONLY.test(nx.text) &&
+      quoteDepth(nx.text) === quoteDepth(line.text) &&
+      quoteRowEndsItsLevel(doc, nx.number)
+    ) {
+      return { from: pos, to: pos, insert: "", cursor: nx.to };
+    }
+  }
   return { from: pos, to: pos, insert: "\n" + prefix, cursor: pos + 1 + prefix.length };
 }
 
@@ -4033,6 +5853,22 @@ export function quoteBackspacePlan(
       if (fenceAt(resolved, line.number - 1) || isTableRow(previous.text)) {
         return { from: pos, to: pos, insert: "", cursor: pos };
       }
+      // The first body row of a Callout or toggle with more rows below:
+      // the row above is its title, and joining would fold body text into
+      // the header ("> [!note] Tone"). Step onto the end of the title's
+      // text instead and change nothing; a second press edits the title.
+      if (
+        calloutHeaderAt(doc, previous.number) &&
+        quoteDepth(previous.text) === quoteDepth(line.text)
+      ) {
+        const titleStart = calloutHeaderVisualRange(previous.text)?.to ?? 0;
+        return {
+          from: pos,
+          to: pos,
+          insert: "",
+          cursor: previous.from + Math.max(previous.text.trimEnd().length, titleStart),
+        };
+      }
       return {
         from: previous.to,
         to: line.from + prefix.length,
@@ -4042,6 +5878,20 @@ export function quoteBackspacePlan(
     }
   }
   const d = dedentQuoteLine(line.text)!;
+  // The last row of a level leaves it. Unwrapped in place it would sit right
+  // under a deeper row and join that row's paragraph as a lazy continuation,
+  // still drawn inside the box (or in the inner Callout, one level up). A
+  // seam row at the new depth really closes the level above.
+  const newDepth = quoteDepth(d.text);
+  if (line.number > 1 && quoteDepth(doc.line(line.number - 1).text) > newDepth) {
+    const sep = newDepth === 0 ? "" : (quoteMarkerPrefix(d.text) ?? "").trimEnd();
+    return {
+      from: line.from,
+      to: line.to,
+      insert: sep + "\n" + d.text,
+      cursor: line.from + sep.length + 1 + d.cursor,
+    };
+  }
   return {
     from: line.from,
     to: line.to,
@@ -4137,6 +5987,128 @@ export function buildQuotedPasteForSelection(
   }
 
   return buildQuotedPaste(start.text, from - start.from, clip);
+}
+
+/* ------------------------------------------------------------------ */
+/* Paste as table                                                      */
+/* ------------------------------------------------------------------ */
+
+/** Whether a paste on this line may become a table: nothing but a quote
+ * marker (if any) and whitespace. */
+export function blankPasteLine(text: string): boolean {
+  return text.slice(quoteMarkerPrefix(text)?.length ?? 0).trim() === "";
+}
+
+/** Whether the clipboard already carries a rich table that Obsidian's own
+ * HTML → Markdown conversion turns into a table. */
+export function htmlHasTable(html: string | null | undefined): boolean {
+  return !!html && /<table[\s>]/i.test(html);
+}
+
+/** One delimited line into cells. A comma-delimited row honours simple
+ * double-quoted cells ("a, b" stays one cell, "" is a literal quote). */
+export function splitDelimitedRow(line: string, delimiter: string): string[] {
+  if (delimiter === "\t") return line.split("\t");
+  const cells: string[] = [];
+  let cell = "";
+  let quoted = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (quoted) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') {
+          cell += '"';
+          i++;
+        } else quoted = false;
+      } else cell += ch;
+    } else if (ch === '"' && cell.trim() === "") {
+      cell = "";
+      quoted = true;
+    } else if (ch === delimiter) {
+      cells.push(cell);
+      cell = "";
+    } else cell += ch;
+  }
+  cells.push(cell);
+  return cells;
+}
+
+/**
+ * The forced conversion behind the "Table: paste clipboard as table" command: tab-separated
+ * when any line has a tab, comma-separated otherwise. Unlike the automatic
+ * paste this pads ragged rows and accepts a single-column list, so it
+ * only returns null for an empty clipboard.
+ */
+export function delimitedTextToTable(
+  text: string,
+  format: (md: string) => string = formatTable
+): string | null {
+  const lines = text.replace(/\r\n?/g, "\n").split("\n").filter((line) => line.trim() !== "");
+  if (lines.length === 0) return null;
+  const delimiter = lines.some((line) => line.includes("\t")) ? "\t" : ",";
+  const rows = lines.map((line) =>
+    splitDelimitedRow(line, delimiter).map((cell) =>
+      cell.replace(/[\r\n]+/g, " ").trim().replace(/\\?\|/g, "\\|")
+    )
+  );
+  const width = Math.max(...rows.map((cells) => cells.length));
+  for (const cells of rows) while (cells.length < width) cells.push("");
+  const row = (cells: string[]) => "| " + cells.join(" | ") + " |";
+  const md = [row(rows[0]), row(Array(width).fill("---")), ...rows.slice(1).map(row)].join("\n");
+  return format(md);
+}
+
+/** The table text as it lands on a (blank) line: inside a quote every row
+ * carries the line's marker, elsewhere the table pastes as is. */
+export function tablePasteReplacement(lineText: string, md: string): string {
+  const prefix = quoteMarkerPrefix(lineText);
+  return prefix == null ? md : buildQuotedPaste(lineText, prefix.length, md) ?? md;
+}
+
+/**
+ * How a table pasted on a blank line lands. It must stay a table, so a
+ * paragraph (or table) row right above gets a blank seam row first: a table
+ * glued under a text line renders as plain pipes. A Callout title above
+ * needs none. The caret ends on the row right after the table, never inside
+ * it (Live Preview's table widget would take a caret parked on the last row
+ * and move it into the first header cell), and that row must not touch the
+ * content below either, or the words typed there would merge into that
+ * paragraph (lazily into a quote's):
+ * - a following blank row with the same quote marker is reused, unless the
+ *   row after it (`around.following`) has content;
+ * - otherwise a new row carrying the marker is appended, plus a blank seam
+ *   row when the next row has content.
+ * Offsets are relative to the paste line; `insert` replaces that line's
+ * text after its marker.
+ */
+export function tablePasteLanding(
+  lineText: string,
+  nextLineText: string | null,
+  md: string,
+  around: { previous?: string | null; following?: string | null } = {}
+): { insert: string; caretLineOffset: number; caretCh: number } {
+  const prefix = quoteMarkerPrefix(lineText) ?? "";
+  const previous = around.previous ?? null;
+  const following = around.following ?? null;
+  // A Callout title above needs no seam only when the paste line is inside
+  // that Callout: on the blank row below a title-only Callout the table
+  // would otherwise be absorbed into its title as lazy text.
+  const lead =
+    previous !== null &&
+    !blankPasteLine(previous) &&
+    !(parseCalloutHeader(previous) && quoteDepth(lineText) >= quoteDepth(previous))
+      ? "\n" + prefix
+      : "";
+  const replacement = lead + tablePasteReplacement(lineText, md);
+  const rows = replacement.split("\n").length;
+  const nextBlank = nextLineText !== null && blankPasteLine(nextLineText);
+  const nextFree =
+    nextBlank &&
+    (quoteMarkerPrefix(nextLineText) ?? "").trimEnd() === prefix.trimEnd() &&
+    (following === null || blankPasteLine(following));
+  if (nextFree) return { insert: replacement, caretLineOffset: rows, caretCh: nextLineText.length };
+  const seam = nextLineText !== null && !nextBlank ? "\n" + prefix.trimEnd() : "";
+  return { insert: replacement + "\n" + prefix + seam, caretLineOffset: rows, caretCh: prefix.length };
 }
 
 /** A single-caret check shared by the quote and code block keymaps. */
@@ -4491,6 +6463,13 @@ export function fenceEnterPlan(
 /**
  * Backspace with the caret at a code line's content start removes one
  * whole indent level (vault-unit aligned) instead of one character.
+ *
+ * With no indentation left to eat the key means "join this row onto the one
+ * above", and inside a quote/Callout that has to be spelled out: the row's
+ * "> " markers sit behind a widget, so CodeMirror's own Backspace would
+ * chew through them one invisible character at a time — the first press
+ * appearing to do nothing, the second dropping the row out of the Callout
+ * and cutting the code block in half.
  */
 export function fenceBackspacePlan(
   doc: Text,
@@ -4510,7 +6489,39 @@ export function fenceBackspacePlan(
     ? quotePrefixParts(line.text)?.length ?? fence.bodyPrefix.length
     : 0;
   const ws = line.text.slice(containerLength).match(RE_LEADING_WS)?.[0] ?? "";
-  if (ws.length === 0 || pos !== line.from + containerLength + ws.length) return null;
+  if (pos !== line.from + containerLength + ws.length) return null;
+  if (ws.length === 0) {
+    // Unquoted rows carry no hidden prefix: there the newline is all there
+    // is to remove, which is exactly what CodeMirror already does.
+    if (containerLength === 0) return null;
+    if (line.number > fence.startLine + 1) {
+      const previous = doc.line(line.number - 1);
+      return {
+        from: previous.to,
+        to: line.from + containerLength,
+        insert: "",
+        cursor: previous.to,
+      };
+    }
+    // The row above is the block's own "```lang" opener, hidden behind the
+    // code card's header. There is no code line to join onto, and merging
+    // into that token would turn the opener into text and spill the rest of
+    // the Callout out of the block. An empty first row still goes away —
+    // the row below simply takes its place.
+    const lastBodyLine = fence.closed ? fence.endLine - 1 : fence.endLine;
+    if (line.text.length === containerLength && line.number < lastBodyLine) {
+      const next = doc.line(line.number + 1);
+      const nextContainer =
+        quotePrefixParts(next.text)?.length ?? fence.bodyPrefix.length;
+      return {
+        from: line.from,
+        to: next.from,
+        insert: "",
+        cursor: line.from + nextContainer,
+      };
+    }
+    return { from: pos, to: pos, insert: "", cursor: pos };
+  }
   const width = indentWidth(ws);
   const target =
     width % unit.width === 0
@@ -4523,6 +6534,21 @@ export function fenceBackspacePlan(
     insert,
     cursor: line.from + containerLength + insert.length,
   };
+}
+
+/**
+ * Whether a list item row can follow a new paragraph row with no blank
+ * row between them and still start its own item. One outside that
+ * paragraph's column (a sibling of the item holding it) always does;
+ * otherwise it must be able to interrupt a paragraph: a bullet with text,
+ * or an ordered item numbered 1 (CommonMark).
+ */
+function listItemStandsApart(content: string, paragraphIndent: number): boolean {
+  const m = content.match(RE_LIST_MARKER);
+  if (!m) return false;
+  if (indentWidth(m[1]) < paragraphIndent) return true;
+  if (content.slice(m[0].length).trim() === "") return false;
+  return /^[-*+]$/.test(m[2]) || Number.parseInt(m[2], 10) === 1;
 }
 
 /**
@@ -4543,9 +6569,17 @@ export function fenceExitPlan(
   const metadataLine = codeCaptionMeta(doc, fence)?.lineNo;
   const blockEndLine = metadataLine ?? fence.endLine;
   if (fence.closed && blockEndLine < doc.lines) {
-    // A blank line already waits below the block — just move there.
+    // A blank line already waits below the block — just move there. Inside
+    // a quote/Callout it only counts when it waits in the same container:
+    // a bare blank row below the block is already OUTSIDE the Callout, and
+    // landing there would leave the block rather than continue after it.
     const next = doc.line(blockEndLine + 1);
-    if (RE_BLANK.test(next.text)) {
+    const waiting =
+      fence.quoteDepth > 0
+        ? RE_QUOTE_ONLY.test(next.text) &&
+          quoteDepth(next.text) === fence.quoteDepth
+        : RE_BLANK.test(next.text);
+    if (waiting) {
       return { from: next.to, to: next.to, insert: "", cursor: next.to };
     }
   }
@@ -4553,6 +6587,25 @@ export function fenceExitPlan(
   let insert = "\n" + bodyWs;
   if (!fence.closed) {
     insert = "\n" + bodyWs + fence.marker + insert;
+  } else if (blockEndLine < doc.lines) {
+    // Content right below the block: a lone new row would merge into that
+    // paragraph (lazily, inside a quote) the moment the writer types, so a
+    // blank seam row keeps the two apart. In a quote the seam keeps its
+    // markers, or it would split the container in two. A list item below
+    // needs none — it starts its own block — and a blank row before it
+    // would make the whole list loose.
+    const next = doc.line(blockEndLine + 1).text;
+    const nextContent = next.slice(quoteMarkerPrefix(next)?.length ?? 0);
+    const bodyIndent = indentWidth(bodyWs.slice(quoteMarkerPrefix(bodyWs)?.length ?? 0));
+    if (nextContent.trim() !== "" && !listItemStandsApart(nextContent, bodyIndent)) {
+      const seam = fence.quoteDepth > 0 ? bodyWs.trimEnd() : "";
+      return {
+        from: last.to,
+        to: last.to,
+        insert: "\n" + bodyWs + "\n" + seam,
+        cursor: last.to + 1 + bodyWs.length,
+      };
+    }
   }
   return {
     from: last.to,
@@ -4560,6 +6613,54 @@ export function fenceExitPlan(
     insert,
     cursor: last.to + insert.length,
   };
+}
+
+/**
+ * ArrowDown (or End / ArrowRight on the closing fence) in a code block that
+ * ends the note. Live Preview reveals the closing fence as the caret nears
+ * it, and from there no key leads anywhere: typing turns the closer into a
+ * new opener that swallows everything after it. The keys write the same
+ * trailing paragraph a click below the note does. Null anywhere else — on
+ * any row but the last body row or the closer, in an unclosed fence, or
+ * when anything (other than the block's caption row) follows the block.
+ */
+export function codeBlockDownPlan(
+  doc: Text,
+  pos: number,
+  fences: FenceRange[] = cachedFences(doc)
+): QuoteKeyPlan | null {
+  const line = doc.lineAt(pos);
+  const fence = fenceAt(fences, line.number);
+  if (!fence || !fence.closed) return null;
+  if (line.number <= fence.startLine) return null;
+  if (line.number !== fence.endLine - 1 && line.number !== fence.endLine) return null;
+  const blockEnd = codeCaptionMeta(doc, fence)?.lineNo ?? fence.endLine;
+  if (blockEnd !== doc.lines) return null;
+  return trailingParagraphPlan(doc, fences);
+}
+
+/**
+ * ArrowUp (or ArrowLeft at the row's text start) in the first code row of
+ * a code block that opens the note. The opener row is drawn as the
+ * language chip and no caret rests in front of it (stepOverHiddenRows), so
+ * with nothing above the block no key reached a position before the code,
+ * and nothing could be written there. The keys open an empty paragraph
+ * above the block instead, the mirror of codeBlockDownPlan. Null anywhere
+ * else — any other row, ArrowLeft mid-row, or a block with no code rows.
+ */
+export function codeBlockUpPlan(
+  doc: Text,
+  pos: number,
+  fences: FenceRange[] = cachedFences(doc),
+  key: "up" | "left" = "up"
+): QuoteKeyPlan | null {
+  const line = doc.lineAt(pos);
+  if (line.number !== 2) return null;
+  const fence = fenceAt(fences, 1);
+  if (!fence || fence.startLine !== 1) return null;
+  if (fence.closed && fence.endLine <= 2) return null;
+  if (key === "left" && pos !== line.from + fenceRowTextStart(line.text, fence)) return null;
+  return { from: 0, to: 0, insert: "\n", cursor: 0 };
 }
 
 /**
@@ -4699,54 +6800,124 @@ function makeCodeBlockKeymap(plugin: NotionFlowPlugin) {
     toggleWrap(view, open, close);
     return true;
   };
-  return Prec.high(
-    keymap.of([
-      { key: "Mod-b", run: (view) => htmlToggle(view, "<b>", "</b>") },
-      { key: "Mod-i", run: (view) => htmlToggle(view, "<i>", "</i>") },
-      {
-        key: "Enter",
-        run: (view) => {
-          const pos = caret(view);
-          if (pos == null) return false;
-          return applyKeyPlan(
-            view,
-            fenceEnterPlan(
-              view.state.doc,
-              pos,
-              cachedFences(view.state.doc),
-              vaultIndentUnit(plugin.app)
-            ),
-            "input"
-          );
+  /** The keyboard way out of a code block that ends the note (see
+   * codeBlockDownPlan). Source mode shows the closer as plain text with
+   * room after it, so only Live Preview needs it. */
+  const leaveTrailingCode = (view: EditorView, key: "down" | "right" | "end"): boolean => {
+    const pos = caret(view);
+    if (pos == null || !isLivePreviewEditor(view)) return false;
+    const doc = view.state.doc;
+    const fences = cachedFences(doc);
+    const line = doc.lineAt(pos);
+    const fence = fenceAt(fences, line.number);
+    if (!fence || !fence.closed) return false;
+    const onCloser = line.number === fence.endLine;
+    if (key === "right" && !(onCloser && pos === line.to)) return false;
+    if (key === "end" && !onCloser) return false;
+    // An open suggestion popup (the slash menu, [[ links, a column's own
+    // completion list) owns ArrowDown.
+    if (
+      key === "down" &&
+      view.dom.ownerDocument.querySelector(".suggestion-container, .cm-tooltip-autocomplete")
+    ) {
+      return false;
+    }
+    if (key === "down" && !onCloser) {
+      // A long code row wraps: ArrowDown walks its visual rows first.
+      try {
+        const moved = view.moveVertically(view.state.selection.main, true);
+        if (doc.lineAt(moved.head).number === line.number) return false;
+      } catch {
+        return false;
+      }
+    }
+    return applyKeyPlan(view, codeBlockDownPlan(doc, pos, fences), "input");
+  };
+  /** The keyboard way above a code block that opens the note (see
+   * codeBlockUpPlan). Source mode shows the opener as text a caret can
+   * sit in front of, so only Live Preview needs it. */
+  const enterAboveLeadingCode = (view: EditorView, key: "up" | "left"): boolean => {
+    const pos = caret(view);
+    if (pos == null || !isLivePreviewEditor(view)) return false;
+    const doc = view.state.doc;
+    if (doc.lineAt(pos).number !== 2) return false;
+    if (key === "up") {
+      // An open suggestion popup owns ArrowUp.
+      if (view.dom.ownerDocument.querySelector(".suggestion-container, .cm-tooltip-autocomplete")) {
+        return false;
+      }
+      // A long code row wraps: ArrowUp walks its visual rows first.
+      try {
+        const moved = view.moveVertically(view.state.selection.main, false);
+        if (doc.lineAt(moved.head).number === 2) return false;
+      } catch {
+        return false;
+      }
+    }
+    return applyKeyPlan(view, codeBlockUpPlan(doc, pos, cachedFences(doc), key), "input");
+  };
+  return [
+    // Obsidian's own Live Preview ArrowUp/ArrowDown keymap (the one that
+    // steps over widgets) is Prec.high too and registered first, and it
+    // always claims the key, so these bindings must sit above it.
+    Prec.highest(
+      keymap.of([
+        { key: "ArrowDown", run: (view) => leaveTrailingCode(view, "down") },
+        { key: "ArrowUp", run: (view) => enterAboveLeadingCode(view, "up") },
+      ])
+    ),
+    Prec.high(
+      keymap.of([
+        { key: "Mod-b", run: (view) => htmlToggle(view, "<b>", "</b>") },
+        { key: "Mod-i", run: (view) => htmlToggle(view, "<i>", "</i>") },
+        {
+          key: "Enter",
+          run: (view) => {
+            const pos = caret(view);
+            if (pos == null) return false;
+            return applyKeyPlan(
+              view,
+              fenceEnterPlan(
+                view.state.doc,
+                pos,
+                cachedFences(view.state.doc),
+                vaultIndentUnit(plugin.app)
+              ),
+              "input"
+            );
+          },
         },
-      },
-      {
-        key: "Backspace",
-        run: (view) => {
-          const pos = caret(view);
-          if (pos == null) return false;
-          return applyKeyPlan(
-            view,
-            fenceBackspacePlan(
-              view.state.doc,
-              pos,
-              cachedFences(view.state.doc),
-              vaultIndentUnit(plugin.app)
-            ),
-            "delete.dedent"
-          );
+        {
+          key: "Backspace",
+          run: (view) => {
+            const pos = caret(view);
+            if (pos == null) return false;
+            return applyKeyPlan(
+              view,
+              fenceBackspacePlan(
+                view.state.doc,
+                pos,
+                cachedFences(view.state.doc),
+                vaultIndentUnit(plugin.app)
+              ),
+              "delete.dedent"
+            );
+          },
         },
-      },
-      {
-        key: "Mod-Shift-Enter",
-        run: (view) => {
-          const pos = caret(view);
-          if (pos == null) return false;
-          return applyKeyPlan(view, fenceExitPlan(view.state.doc, pos), "input");
+        {
+          key: "Mod-Shift-Enter",
+          run: (view) => {
+            const pos = caret(view);
+            if (pos == null) return false;
+            return applyKeyPlan(view, fenceExitPlan(view.state.doc, pos), "input");
+          },
         },
-      },
-    ])
-  );
+        { key: "ArrowRight", run: (view) => leaveTrailingCode(view, "right") },
+        { key: "ArrowLeft", run: (view) => enterAboveLeadingCode(view, "left") },
+        { key: "End", run: (view) => leaveTrailingCode(view, "end") },
+      ])
+    ),
+  ];
 }
 
 /**
@@ -4803,9 +6974,8 @@ function makeCodeMarkerRewriter(plugin: NotionFlowPlugin) {
       // when it would wrap HTML-tagged text, where Markdown cannot style
       // the rendered element (see rangeTouchesHtmlPairIn). A second press
       // inside an already tag-wrapped region toggles that pair off.
-      const source = doc.toString();
-      const enclosing = enclosingTagPairIn(
-        source,
+      const enclosing = enclosingTagPairInDoc(
+        doc,
         head.from,
         tail.from,
         open,
@@ -4828,7 +6998,7 @@ function makeCodeMarkerRewriter(plugin: NotionFlowPlugin) {
           },
         ];
       }
-      if (!rangeTouchesHtmlPairIn(source, head.from, tail.from)) return tr;
+      if (!rangeTouchesPairs(cachedColorTagPairs(doc), head.from, tail.from)) return tr;
     }
     if (before === open && after === close) {
       // The selection is already wrapped — the hotkey toggles it off.
@@ -4867,16 +7037,51 @@ function makeCodeMarkerRewriter(plugin: NotionFlowPlugin) {
 /**
  * Step a block one nesting level in or out, in place.
  *
- * The levels come from `computeDropLevels` and the edit from `moveBlock`,
- * which is the whole of what a sideways drag does — so Tab cannot offer a
- * depth the drag would refuse, and neither can spell a level the other
- * spells differently. `pickDropLevel` with a delta of exactly one step is
- * the same "where am I now, one over" question the drag asks per mouse
- * move, so the step lands on the same rung the pointer would have.
+ * The levels come from `computeDropLevels` and the edit from
+ * `reindentInPlaceChange` (moveBlock's in-place path), which is the whole
+ * of what a sideways drag does — so Tab cannot offer a depth the drag
+ * would refuse, and neither can spell a level the other spells
+ * differently. `pickDropLevel` with a delta of exactly one step is the
+ * same "where am I now, one over" question the drag asks per mouse move,
+ * so the step lands on the same rung the pointer would have.
  *
- * Returns false when there is no level to move to, which is how Tab keeps
- * its ordinary meaning wherever the block has nowhere to go.
+ * `indentBlockChange` returns the change (null when there is no level to
+ * move to, which is how Tab keeps its ordinary meaning wherever the block
+ * has nowhere to go); `indentBlockStep` dispatches it and reports whether
+ * anything moved.
  */
+export function indentBlockChange(
+  doc: Text,
+  block: BlockRange,
+  dir: -1 | 1,
+  fences: FenceRange[] = cachedFences(doc),
+  unit: IndentUnit = DEFAULT_INDENT_UNIT
+): InPlaceChange | null {
+  const levels = computeDropLevels(doc, fences, block.startLine, block);
+  if (levels.length < 2) return null;
+  const STEP = 24;
+  const current = block.quotePrefix ?? "";
+  const indent = indentWidth(doc.line(block.startLine).text);
+  const here = pickDropLevel(levels, current, indent, 0, STEP);
+  const next = pickDropLevel(levels, current, indent, dir * STEP, STEP);
+  if (next.indent === here.indent && next.quotePrefix === here.quotePrefix) {
+    return null;
+  }
+  // The same rung the drag would snap to for this level.
+  const targetIndent = pickIndent(
+    computeDropIndents(doc, fences, block.startLine, block),
+    next.indent
+  );
+  return reindentInPlaceChange(
+    doc,
+    block,
+    targetIndent,
+    unit,
+    next.quotePrefix,
+    fences
+  );
+}
+
 export function indentBlockStep(
   view: EditorView,
   block: BlockRange,
@@ -4884,28 +7089,13 @@ export function indentBlockStep(
   fences: FenceRange[],
   unit: IndentUnit
 ): boolean {
-  const doc = view.state.doc;
-  const levels = computeDropLevels(doc, fences, block.startLine, block);
-  if (levels.length < 2) return false;
-  const STEP = 24;
-  const current = block.quotePrefix ?? "";
-  const indent = indentWidth(doc.line(block.startLine).text);
-  const here = pickDropLevel(levels, current, indent, 0, STEP);
-  const next = pickDropLevel(levels, current, indent, dir * STEP, STEP);
-  if (next.indent === here.indent && next.quotePrefix === here.quotePrefix) {
-    return false;
-  }
-  return (
-    moveBlock(
-      view,
-      block,
-      block.startLine,
-      fences,
-      next.indent,
-      unit,
-      next.quotePrefix
-    ) != null
-  );
+  const change = indentBlockChange(view.state.doc, block, dir, fences, unit);
+  if (!change) return false;
+  view.dispatch({
+    changes: { from: change.from, to: change.to, insert: change.insert },
+    userEvent: "move.block",
+  });
+  return true;
 }
 
 /**
@@ -4943,6 +7133,7 @@ export function blockIndentTarget(
 
 function makeBlockIndentKeymap(plugin: NotionFlowPlugin) {
   const step = (view: EditorView, dir: -1 | 1): boolean => {
+    if (tabOnCaptionRows(view.state)) return true;
     if (!plugin.settings.blockIndent) return false;
     const sel = view.state.selection.main;
     // A real selection means "indent this text", which is not this key's
@@ -5006,8 +7197,26 @@ function makeQuoteKeymap(plugin: NotionFlowPlugin) {
           );
         },
       },
+      // Both spellings of "go to the start of this line". CodeMirror's own
+      // answer is the line start — a position hidden behind the header
+      // widget, where the caret looks like it is at the title but no longer
+      // behaves like it. The title IS the start of this row as drawn.
+      // Two bindings, not one with `mac:`: a binding's `mac` REPLACES its
+      // `key` on macOS, which would take the Home key away there.
       {
         key: "Home",
+        run: (view) => {
+          const pos = caret(view);
+          if (pos == null) return false;
+          return apply(
+            view,
+            headerPlan(view, pos, "Home"),
+            "select.callout-title"
+          );
+        },
+      },
+      {
+        mac: "Mod-ArrowLeft",
         run: (view) => {
           const pos = caret(view);
           if (pos == null) return false;
@@ -5065,6 +7274,10 @@ export interface CalloutHeader {
   typeTo: number;
   /** Offset just after "]", where the fold marker sits or would go. */
   foldAt: number;
+  /** The whitespace-separated tokens after "|" ("[!nf-col|30 nf-red]" →
+   *  ["30", "nf-red"]): column widths, the plugin's colour, anything else
+   *  a header carries. Empty when there is no "|". */
+  metadata: string[];
 }
 
 const RE_CALLOUT_HEAD = /^(\s*(?:>[ \t]*)+\[!)([^\]|\r\n]+)([^\]\r\n]*\])([+-]?)/;
@@ -5080,13 +7293,122 @@ export function parseCalloutHeader(text: string): CalloutHeader | null {
     typeFrom: m[1].length,
     typeTo: m[1].length + m[2].length,
     foldAt: m[1].length + m[2].length + m[3].length,
+    metadata: m[3].startsWith("|")
+      ? m[3].slice(1, -1).trim().split(/\s+/).filter(Boolean)
+      : [],
   };
+}
+
+/**
+ * Whether row `lineNo` begins a blockquote: the row above sits at a
+ * shallower quote depth (or there is none). Obsidian reads a Callout off a
+ * blockquote's FIRST row only, so in "> quote\n> [!warning] x" the second
+ * row is quote text that happens to start with brackets. The same rule as
+ * findFoldTargets (src/features/toggle-fold-all.ts).
+ */
+export function opensQuote(doc: Text, lineNo: number): boolean {
+  return (
+    lineNo <= 1 ||
+    quoteDepth(doc.line(lineNo - 1).text) < quoteDepth(doc.line(lineNo).text)
+  );
+}
+
+/** Row `lineNo`'s Callout header, or null — also for a "[!type]" row in the
+ *  middle of a quote, which Obsidian draws as text (see `opensQuote`). */
+export function calloutHeaderAt(doc: Text, lineNo: number): CalloutHeader | null {
+  const header = parseCalloutHeader(doc.line(lineNo).text);
+  return header && opensQuote(doc, lineNo) ? header : null;
+}
+
+/** The header line with one metadata token replaced, added or removed —
+ * the token `matches` picks (at its old place, else appended), the others
+ * kept — or null when the line is no Callout header. */
+function withCalloutMetaToken(
+  text: string,
+  matches: (token: string) => boolean,
+  value: string | null
+): string | null {
+  const header = parseCalloutHeader(text);
+  if (!header) return null;
+  const tokens = header.metadata.slice();
+  const index = tokens.findIndex(matches);
+  if (value == null) {
+    if (index >= 0) tokens.splice(index, 1);
+  } else if (index >= 0) {
+    tokens[index] = value;
+  } else {
+    tokens.push(value);
+  }
+  const meta = tokens.length > 0 ? `|${tokens.join(" ")}` : "";
+  return text.slice(0, header.typeTo) + meta + text.slice(header.foldAt - 1);
+}
+
+/** Set (or with null, remove) the metadata token that starts with `prefix`
+ * — "nf-" for the Callout colour — keeping every other token, such as a
+ * column width. Null when the line is no Callout header. */
+export function setCalloutMetaToken(
+  text: string,
+  prefix: string,
+  value: string | null
+): string | null {
+  return withCalloutMetaToken(text, (token) => token.startsWith(prefix), value);
+}
+
+/** The palette colour a header's metadata names ("nf-red" → "red"), if any. */
+export function calloutMetaColor(metadata: readonly string[]): PaletteColor | null {
+  for (const token of metadata) {
+    if (!token.startsWith("nf-")) continue;
+    const name = token.slice(3);
+    if ((PALETTE_COLORS as readonly string[]).includes(name)) return name as PaletteColor;
+  }
+  return null;
+}
+
+/** The palette hue of a plugin colour triplet variable ("--nf-red-rgb" →
+ * "red"), or null for anything else (the theme's Callout variables). */
+function paletteTripletHue(colorVar: string): string | null {
+  const match = /^--nf-([a-z]+)-rgb$/.exec(colorVar);
+  return match ? match[1] : null;
+}
+
+/** The ink behind a Callout block's colour variable — what its title,
+ * border and rules are drawn in. A plugin palette colour ("--nf-red-rgb")
+ * is the hue's ink token, `var(--nf-red, #b5554d)`: a note palette
+ * re-inks it, and under Classic the ink equals the triplet, so nothing
+ * changes. The theme's own Callout variables are complete colours. */
+export function calloutColorValue(colorVar: string): string {
+  const hue = paletteTripletHue(colorVar);
+  return hue ? paletteTextColor(hue) : `var(${colorVar})`;
+}
+
+/** The fill source of a Callout block under edit (`--nf-co-surface`),
+ * matching what the rendered Callout mixes its wash from: a palette colour
+ * fills from its triplet, a theme type from the palette's wash source for
+ * that type (`--nf-co-wash-<suffix>`, defined only under a note palette)
+ * and otherwise from the theme colour itself. Under Classic every value
+ * equals the ink, so the edit rows paint exactly as before. */
+export function calloutSurfaceValue(colorVar: string): string {
+  if (paletteTripletHue(colorVar)) return `rgb(var(${colorVar}))`;
+  const theme = /^--callout-([a-z0-9-]+)$/.exec(colorVar);
+  if (theme) return `var(--nf-co-wash-${theme[1]}, var(${colorVar}))`;
+  return calloutColorValue(colorVar);
 }
 
 /** The source token represented by the visual Callout lead while editing.
  * Keep this boundary shared by the decoration, keyboard protection and the
  * click activator: one character of disagreement would either expose source
  * or leave an invisible character that Backspace can corrupt. */
+/** The title Obsidian itself renders for a Callout that has none of its
+ * own: the type name with its first letter capitalized, in English — the
+ * app does not translate it. The edit row stands in for that rendered
+ * header, so it shows the very same word. A translated placeholder used to
+ * live here, and the title visibly changed ("Tip" → "提示") the moment the
+ * caret entered the row, which reads as an edit the user did not make. */
+export function defaultCalloutTitle(type: string): string {
+  const name = type.trim();
+  return name ? name.charAt(0).toUpperCase() + name.slice(1) : "";
+}
+
 export function calloutHeaderVisualRange(
   text: string
 ): { from: number; to: number } | null {
@@ -5161,7 +7483,7 @@ export function calloutSourceTextAnchor(
   for (let n = first; n <= last; n++) {
     const line = doc.line(n);
     const visual = calloutHeaderVisualRange(line.text);
-    if (!visual) continue;
+    if (!visual || !opensQuote(doc, n)) continue;
     hiddenHeaders.push({
       from: line.from + visual.from,
       to: line.from + visual.to,
@@ -5199,7 +7521,8 @@ export function calloutHeaderKeyPlan(
 ): QuoteKeyPlan | null {
   const line = doc.lineAt(pos);
   const visual = calloutHeaderVisualRange(line.text);
-  if (!visual) return null;
+  // A mid-quote "[!type]" row shows its token as text: ordinary keys there.
+  if (!visual || !opensQuote(doc, line.number)) return null;
   const titleStart = line.from + visual.to;
 
   if (key === "Home") {
@@ -5211,19 +7534,19 @@ export function calloutHeaderKeyPlan(
     };
   }
   if (key === "Backspace") {
-    if (pos < titleStart) {
-      return {
-        from: pos,
-        to: pos,
-        insert: "",
-        cursor: titleStart,
-      };
-    }
-    if (pos === titleStart) {
+    // Every position from the row start up to the title is drawn in the
+    // SAME place — the header token sits behind a widget — so the key has
+    // to mean one thing across all of them. It used to mean "move to the
+    // title start" below the title and "unwrap the Callout" exactly at it,
+    // and since the caret shows no difference between those two spots, the
+    // first press read as a dead key: nothing moved, nothing changed, and
+    // only a second press did the thing that was asked for.
+    if (pos <= titleStart) {
       const prefix = quoteMarkerPrefix(line.text);
       if (prefix) {
         return quoteBackspacePlan(doc, line.from + prefix.length);
       }
+      return { from: pos, to: pos, insert: "", cursor: titleStart };
     }
     return null;
   }
@@ -5318,6 +7641,49 @@ export function setToggleCollapsed(text: string, collapsed: boolean): string | n
   return head + text.slice(m[0].length);
 }
 
+/**
+ * A click on an empty toggle's "click to add content" hint: open the toggle
+ * (a fold-less or closed header gets "+") and put the caret on a body row —
+ * the one already there, or a new one carrying the header's own markers.
+ * The title is never edited. Changes are in `doc` positions; `anchor` is in
+ * the document after them. Null off a toggle header.
+ */
+export function emptyToggleBodyPlan(
+  doc: Text,
+  headerLine: number
+): { changes: { from: number; to: number; insert: string }[]; anchor: number } | null {
+  if (headerLine < 1 || headerLine > doc.lines) return null;
+  const line = doc.line(headerLine);
+  const header = parseToggleHeader(line.text);
+  if (!header) return null;
+  const changes: { from: number; to: number; insert: string }[] = [];
+  const marker = line.text.slice(header.tokenFrom, header.tokenTo).match(/\]([+-]?)/)?.[1];
+  let headerText = line.text;
+  if (marker !== "+") {
+    headerText = setToggleCollapsed(line.text, false) ?? line.text;
+    if (headerText !== line.text) {
+      changes.push({ from: line.from, to: line.to, insert: headerText });
+    }
+  }
+  const delta = headerText.length - line.text.length;
+  const bodyPrefix = /[ \t]$/.test(header.prefix) ? header.prefix : header.prefix + " ";
+  const depth = quoteDepth(line.text);
+  if (headerLine < doc.lines) {
+    const next = doc.line(headerLine + 1);
+    if (quoteDepth(next.text) >= depth && depth > 0) {
+      // A row of this toggle already waits: a bare ">" becomes the full
+      // prefix so the first character typed is body text, not a marker.
+      if (RE_QUOTE_ONLY.test(next.text) && quoteDepth(next.text) === depth && next.text !== bodyPrefix) {
+        changes.push({ from: next.from, to: next.to, insert: bodyPrefix });
+        return { changes, anchor: next.from + delta + bodyPrefix.length };
+      }
+      return { changes, anchor: next.to + delta };
+    }
+  }
+  changes.push({ from: line.to, to: line.to, insert: "\n" + bodyPrefix });
+  return { changes, anchor: line.from + headerText.length + 1 + bodyPrefix.length };
+}
+
 /** Plain title text for a line being turned into a toggle: one block's
  * worth of leading Markdown (quote markers, list marker, heading hashes,
  * task box) is scaffolding for the OLD block, not part of the title. */
@@ -5367,7 +7733,11 @@ export type BlockWrapKind = "callout" | "toggle" | "code";
  * header row above it; prefixing it again would bury the text one level
  * deeper than the box that is being built around it.
  */
-export function buildBlockWrap(lines: string[], kind: BlockWrapKind): string[] {
+export function buildBlockWrap(source: string[], kind: BlockWrapKind): string[] {
+  // A block background's marker (block-color.ts) would be literal code in
+  // a fence, and a Callout or toggle carries its own colour: it goes.
+  const lines = source.slice();
+  if (lines.length > 0) lines[0] = setBlockBgMarker(lines[0], null) ?? lines[0];
   if (kind === "toggle") return buildToggleWrap(lines);
   if (kind === "code") return ["```", ...dedentLines(lines), "```"];
   const quoted = RE_QUOTE.test(lines[0] ?? "") && !parseCalloutHeader(lines[0] ?? "");
@@ -5479,22 +7849,31 @@ const CALLOUT_SHORTHAND: Record<string, string> = {
   引用: "quote",
 };
 
-/** ">!type±" at the head of a line, the "!" preceded by at least one ">". */
-const RE_RULE_CALLOUT = /^(\s*)((?:>[ \t]*)+)!(\p{L}*)([+-]?)$/u;
-/** "[]" / "[x]" at the head of a line, a bullet optionally already there. */
-const RE_RULE_TODO = /^(\s*(?:>[ \t]*)*(?:[-*+][ \t]+)?)\[([ xX]?)\]$/;
+/** ">!type±" at the head of a line, the "!" preceded by at least one ">".
+ *  A Chinese keyboard types "！" for "!", and its ">" key gives "》" — which
+ *  counts only as the first marker, right after the indentation. */
+const RE_RULE_CALLOUT = /^(\s*)((?:[>》][ \t]*)(?:>[ \t]*)*)[!！](\p{L}*)([+-]?)$/u;
+/** "[]" / "[x]" at the head of a line, a bullet optionally already there;
+ *  the full-width "【】" a Chinese keyboard types counts too. */
+const RE_RULE_TODO = /^(\s*(?:>[ \t]*)*(?:[-*+][ \t]+)?)(?:\[([ xX]?)\]|【([ xX]?)】)$/;
+/** A lone "》" (a Chinese keyboard's ">") opening an otherwise empty line. */
+const RE_RULE_QUOTE_ZH = /^([ \t]*)》$/;
 
 /**
  * What the line becomes when the space key completes a shorthand, or null
  * when it spells nothing — `from` is an offset within the line, so the
- * caller replaces `[line.from + from, caret]` with `insert`.
+ * caller replaces `[line.from + from, caret]` with `insert`. The output is
+ * always ASCII Markdown, whichever keyboard typed the shorthand.
  *
  * An unknown type after ">!" deliberately expands to nothing: ">!foo " has
  * to stay literal, or a typo silently becomes a Callout named after it.
+ * A top-level Callout typed right under a paragraph (`above`, the line
+ * before) starts after a blank line, as /callout does: glued on, it would
+ * read as that paragraph's lazy continuation.
  */
 export function inputRuleExpansion(
   before: string,
-  options: { toggles: boolean }
+  options: { toggles: boolean; above?: string }
 ): { from: number; insert: string } | null {
   const callout = before.match(RE_RULE_CALLOUT);
   if (callout) {
@@ -5510,20 +7889,28 @@ export function inputRuleExpansion(
     // A toggle written without a marker is read as open, but the marker is
     // what carries the state in the file — always write one.
     const marker = fold || (type === TOGGLE_TYPE ? "+" : "");
-    const depth = (markers.match(/>/g) ?? []).length;
+    const depth = (markers.match(/[>》]/g) ?? []).length;
+    const above = options.above;
+    const seam =
+      depth === 1 && !indent && above != null && !RE_BLANK.test(above) && !RE_QUOTE.test(above)
+        ? "\n"
+        : "";
     return {
       from: 0,
-      insert: `${indent}${"> ".repeat(depth)}[!${type}]${marker} `,
+      insert: `${seam}${indent}${"> ".repeat(depth)}[!${type}]${marker} `,
     };
   }
   const todo = before.match(RE_RULE_TODO);
   if (todo) {
-    const [, prefix, state] = todo;
+    const [, prefix, ascii, wide] = todo;
+    const state = ascii ?? wide ?? "";
     // The bullet may already be there ("- []"), and inside a quote it sits
     // after the markers, where RE_LIST cannot see it.
     const bullet = /(?:[-*+][ \t]+)$/.test(prefix) ? "" : "- ";
     return { from: 0, insert: `${prefix}${bullet}[${state.trim() ? "x" : " "}] ` };
   }
+  const quote = before.match(RE_RULE_QUOTE_ZH);
+  if (quote) return { from: 0, insert: `${quote[1]}> ` };
   return null;
 }
 
@@ -5537,6 +7924,9 @@ export function makeInputRuleFilter(plugin: NotionFlowPlugin) {
   return EditorState.transactionFilter.of((tr) => {
     if (!plugin.settings.inputRules || !tr.docChanged) return tr;
     if (!tr.isUserEvent("input.type")) return tr;
+    // An IME composition owns its transactions; a shorthand waits for a
+    // plain space after the committed text.
+    if (tr.isUserEvent("input.type.compose")) return tr;
     let inserts = 0;
     let at = -1;
     let typedSpace = true;
@@ -5556,6 +7946,7 @@ export function makeInputRuleFilter(plugin: NotionFlowPlugin) {
     if (fenceAt(cachedFences(doc), line.number)) return tr;
     const rule = inputRuleExpansion(line.text, {
       toggles: plugin.settings.toggleBlocks,
+      above: line.number > 1 ? doc.line(line.number - 1).text : undefined,
     });
     if (!rule) return tr;
     return [
@@ -5611,11 +8002,13 @@ export function columnContentQuoteDepth(doc: Text, lineNo: number): number | nul
   return null;
 }
 
-/** Sanitized column width from "[!nf-col|…]" metadata: an integer
- * percentage clamped to sane bounds, or null for anything else. */
+/** Sanitized column width from "[!nf-col|…]" metadata: the integer
+ * percentage token, clamped to sane bounds, or null when there is none.
+ * Other tokens beside it (a Callout colour) are ignored. */
 export function columnWidthPercent(meta: string | null): number | null {
-  if (!meta || !/^\d{1,2}$/.test(meta.trim())) return null;
-  const n = Number(meta.trim());
+  const token = meta?.trim().split(/\s+/).find((part) => /^\d{1,2}$/.test(part));
+  if (!token) return null;
+  const n = Number(token);
   return n >= 10 && n <= 90 ? n : null;
 }
 
@@ -6156,12 +8549,12 @@ function openColumnsMenuFromDOM(btn: HTMLElement, evt: MouseEvent) {
   try {
     const doc = view.state.doc;
     const lineNo = doc.lineAt(view.posAtDOM(btn)).number;
-    const block = getBlockRange(doc, lineNo, cachedFences(doc));
+    const block = columnsAwareBlockRange(doc, lineNo, cachedFences(doc));
     if (!block) return;
     if (parseCalloutHeader(doc.line(block.startLine).text)?.type !== COLS_TYPE) {
       return;
     }
-    const menu = new Menu().setUseNativeMenu(false);
+    const menu = trackMenu(new Menu().setUseNativeMenu(false));
     addColumnsMenuItems(menu, view, block);
     menu.showAtMouseEvent(evt);
   } catch {
@@ -6191,7 +8584,7 @@ function openColumnMenuFromDOM(
       userEvent,
     });
   };
-  const menu = new Menu().setUseNativeMenu(false);
+  const menu = trackMenu(new Menu().setUseNativeMenu(false));
   menu.addItem((item) =>
     item
       .setTitle(t("Add column left"))
@@ -6247,6 +8640,7 @@ function openColumnMenuFromDOM(
         }
         new ConfirmModal(
           plugin.app,
+          t("Delete column"),
           t("Delete this column and all of its content?"),
           t("Delete this column"),
           remove
@@ -6342,9 +8736,13 @@ export function setColumnWidths(
 }
 
 function columnHeaderWithWidth(line: string, width: number | null): string {
-  return line.replace(
-    /\[!nf-col(?:\|[^\]\r\n]*)?\]/i,
-    width == null ? `[!${COL_TYPE}]` : `[!${COL_TYPE}|${width}]`
+  // Only the width token changes; a colour token beside it stays.
+  return (
+    withCalloutMetaToken(
+      line,
+      (token) => /^\d+$/.test(token),
+      width == null ? null : String(width)
+    ) ?? line
   );
 }
 
@@ -6484,7 +8882,7 @@ function renderedColumnsContext(
   try {
     const doc = view.state.doc;
     const lineNo = doc.lineAt(view.posAtDOM(widget, 0)).number;
-    const block = getBlockRange(doc, lineNo, cachedFences(doc));
+    const block = columnsAwareBlockRange(doc, lineNo, cachedFences(doc));
     if (!block) return null;
     if (parseCalloutHeader(doc.line(block.startLine).text)?.type !== COLS_TYPE) {
       return null;
@@ -6533,9 +8931,16 @@ function resizedColumnPixels(
   return next;
 }
 
+/** Whether a gutter press moved far enough to be a resize. A plain click
+ * (or the two clicks of a double-click) writes no widths. */
+export function columnResizeCommits(startX: number, endX: number): boolean {
+  return Math.abs(endX - startX) >= 3;
+}
+
 /** Pointer-driven gutter resize. DOM receives a live pixel preview; the
  * Markdown width metadata changes once on pointerup, so one undo restores
- * the previous layout. */
+ * the previous layout. A press that barely moves only focuses the gutter,
+ * where the arrow keys take over. */
 function startColumnResizeFromDOM(handle: HTMLElement, evt: PointerEvent): boolean {
   if (evt.button !== 0) return false;
   const ctx = renderedColumnsContext(handle);
@@ -6608,7 +9013,18 @@ function startColumnResizeFromDOM(handle: HTMLElement, evt: PointerEvent): boole
     }
   };
   const onUp = (up: PointerEvent) => {
-    if (up.pointerId === evt.pointerId) cleanup(true);
+    if (up.pointerId !== evt.pointerId) return;
+    if (columnResizeCommits(startX, up.clientX)) {
+      pendingX = up.clientX;
+      cleanup(true);
+      return;
+    }
+    cleanup(false);
+    try {
+      handle.focus({ preventScroll: true });
+    } catch {
+      // Detached between pointerdown and pointerup.
+    }
   };
   const onCancel = (cancel: PointerEvent) => {
     if (cancel.pointerId === evt.pointerId) cleanup(false);
@@ -6651,11 +9067,65 @@ function resizeColumnsFromKeyboard(handle: HTMLElement, evt: KeyboardEvent): boo
   const next = resizedColumnPixels(widths, divider, step * visual * (rtl ? -1 : 1));
   evt.preventDefault();
   evt.stopPropagation();
-  return replaceRenderedColumnWidths(
-    handle,
+  const changed = dispatchColumnWidths(
+    ctx.view,
+    ctx.block,
     columnPercentsFromWidths(next),
     "input.columns.resize"
   );
+  // The new widths re-render the row, and the focused gutter goes with
+  // it: hand focus to its successor so the next arrow keeps resizing.
+  if (changed) refocusColumnResizer(ctx.view, ctx.block.startLine, divider);
+  return changed;
+}
+
+/** Take a rendered columns row's controls out of the Tab order unless the
+ * row turns out to live in Live Preview. The row is often still detached
+ * when the post-processor runs, so this waits for it to be attached (a few
+ * frames at most); one that never is stays unreachable. */
+function settleColumnControls(cols: HTMLElement, controls: HTMLElement[], tries = 0): void {
+  if (controls.length === 0) return;
+  const win = cols.ownerDocument.defaultView ?? window;
+  win.requestAnimationFrame(() => {
+    try {
+      if (!cols.isConnected && tries < 4) {
+        settleColumnControls(cols, controls, tries + 1);
+        return;
+      }
+      const live = cols.isConnected && !!cols.closest(".markdown-source-view.is-live-preview");
+      for (const control of controls) control.tabIndex = live ? 0 : -1;
+    } catch {
+      // Never let a detached row break rendering.
+    }
+  });
+}
+
+/** Focus gutter `divider` of the rendered columns row starting on `line`
+ * once it has been rendered again (a few frames at most). */
+function refocusColumnResizer(view: EditorView, line: number, divider: number, tries = 0): void {
+  const win = view.dom.ownerDocument.defaultView ?? window;
+  win.requestAnimationFrame(() => {
+    try {
+      if (!view.dom.isConnected) return;
+      for (const widget of Array.from(
+        view.contentDOM.querySelectorAll<HTMLElement>(".cm-embed-block.cm-callout")
+      )) {
+        if (view.state.doc.lineAt(view.posAtDOM(widget, 0)).number !== line) continue;
+        const handle = widget.querySelector<HTMLElement>(
+          `.nf-col-resizer[data-nf-column-divider="${divider}"]`
+        );
+        if (handle && handle.tabIndex >= 0) {
+          if (handle.ownerDocument.activeElement !== handle) {
+            handle.focus({ preventScroll: true });
+          }
+          return;
+        }
+      }
+      if (tries < 8) refocusColumnResizer(view, line, divider, tries + 1);
+    } catch {
+      // The row went away (undo, mode switch): nothing to focus.
+    }
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -6877,20 +9347,85 @@ function visualColumnRuntimeIsCurrent(runtime: VisualColumnRuntime): boolean {
   );
 }
 
-function closeVisualColumnEditor(
+/**
+ * Where writing resumes after leaving a columns row whose last row is
+ * `rowEndLine`: an empty line of its own, with a blank line on each side.
+ *
+ * The blank seam right below the row is not a safe caret spot — typing
+ * there fills the seam, and Markdown's lazy continuation then pulls the
+ * text (and the paragraph after it) into the last column. Blank lines that
+ * already exist are reused, so a second call changes nothing: at most one
+ * blank and one empty line ever follow the row. The caret goes to a real
+ * line rather than a key being intercepted because an IME composition
+ * starts wherever the caret already is.
+ */
+export function columnExitPlan(doc: Text, rowEndLine: number): QuoteKeyPlan {
+  const blank = (n: number) => n <= doc.lines && doc.line(n).text.trim() === "";
+  const row = doc.line(Math.max(1, Math.min(rowEndLine, doc.lines)));
+  const at = (pos: number, insert: string, cursor: number): QuoteKeyPlan =>
+    ({ from: pos, to: pos, insert, cursor });
+  if (row.number >= doc.lines) return at(row.to, "\n\n", row.to + 2);
+  const seam = doc.line(row.number + 1);
+  if (!blank(seam.number)) return at(row.to, "\n\n\n", row.to + 2);
+  if (seam.number >= doc.lines) return at(seam.to, "\n", seam.to + 1);
+  const next = doc.line(seam.number + 1);
+  if (!blank(next.number)) return at(seam.to, "\n\n", seam.to + 1);
+  if (next.number >= doc.lines || blank(next.number + 1)) return at(next.from, "", next.from);
+  return at(next.to, "\n", next.from);
+}
+
+export function closeVisualColumnEditor(
   runtime: VisualColumnRuntime,
-  placement: "source" | "after"
+  placement: "source" | "after",
+  plugin: NotionFlowPlugin
 ) {
-  const docLength = runtime.outerView.state.doc.length;
-  const anchor = placement === "source"
-    ? Math.min(docLength, runtime.model.from + 1)
-    : Math.min(docLength, runtime.model.to + (runtime.model.to < docLength ? 1 : 0));
-  runtime.outerView.dispatch({
-    effects: setVisualColumnEffect.of(null),
-    selection: { anchor },
+  const outer = runtime.outerView;
+  const doc = outer.state.doc;
+  const docLength = doc.length;
+  const header = doc.lineAt(Math.min(docLength, runtime.model.from));
+  if (placement === "source" || quoteDepth(header.text) !== 1) {
+    const anchor = placement === "source"
+      ? Math.min(docLength, runtime.model.from + 1)
+      : Math.min(docLength, runtime.model.to + (runtime.model.to < docLength ? 1 : 0));
+    outer.dispatch({
+      effects: setVisualColumnEffect.of(null),
+      selection: { anchor },
+      scrollIntoView: true,
+    });
+    outer.focus();
+    return;
+  }
+  // Done/Esc: the row ends up selected as a block (Notion), and whatever is
+  // typed next becomes its own paragraph below it — never a lazy
+  // continuation of the last column.
+  const plan = columnExitPlan(doc, doc.lineAt(Math.min(docLength, runtime.model.to)).number);
+  const changes = plan.from === plan.to && !plan.insert
+    ? undefined
+    : { from: plan.from, to: plan.to, insert: plan.insert };
+  // With the row selected, the caret waiting below it must not also look
+  // like a place to type: Backspace or ⌘V there would act on the row.
+  const selectsRow = plugin.settings.dragHandles && plugin.settings.blockSelectKey &&
+    !!plugin.blockSelectionFor(outer);
+  outer.dispatch({
+    effects: [setVisualColumnEffect.of(null), blockCaretAwayEffect.of(selectsRow)],
+    changes,
+    selection: { anchor: plan.cursor },
     scrollIntoView: true,
+    userEvent: "input",
   });
-  runtime.outerView.focus();
+  outer.focus();
+  // After the dispatch and the focus: setBlockSelection needs focus, and
+  // any later document change would clear the selection again.
+  if (plugin.settings.dragHandles && plugin.settings.blockSelectKey) {
+    const next = outer.state.doc;
+    const block = columnsAwareBlockRange(next, next.lineAt(runtime.model.from).number, cachedFences(next));
+    const blocks = plugin.blockSelectionFor(outer);
+    if (block) blocks?.setBlockSelection([block]);
+    // No selection took (focus went elsewhere): the caret is all there is.
+    if (selectsRow && !blocks?.selectedBlocks.length) {
+      outer.dispatch({ effects: blockCaretAwayEffect.of(false) });
+    }
+  }
 }
 
 function syncVisualColumnChild(
@@ -6990,6 +9525,12 @@ function renderVisualColumnPreview(
   });
 }
 
+/** Inline style for a label only assistive technology reads. */
+const VISUALLY_HIDDEN_STYLE =
+  "position:absolute;width:1px;height:1px;overflow:hidden;" +
+  "clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;pointer-events:none";
+let columnShellLabelSeq = 0;
+
 class VisualColumnWidget extends WidgetType {
   constructor(
     readonly plugin: NotionFlowPlugin,
@@ -7071,10 +9612,35 @@ class VisualColumnWidget extends WidgetType {
         });
         runtime.observer.observe(root);
       }
+      // The child editor was built before CodeMirror put the widget in the
+      // page, outside the note's `.is-live-preview`, so the plugins that
+      // draw only in Live Preview (Callout and toggle rows, code chips)
+      // drew nothing: the column opened showing raw `> [!…]` and ``` rows
+      // until the first key. Once attached, a placed selection has them
+      // draw.
+      let drawn = false;
+      const drawLive = () => {
+        const child = runtime.activeEditor;
+        if (drawn || !child || !root.isConnected) return;
+        drawn = true;
+        child.dispatch({ selection: child.state.selection });
+      };
       runtime.animationFrame = ownerWindow.requestAnimationFrame(() => {
         runtime.animationFrame = null;
         if (!visualColumnRuntimeIsCurrent(runtime)) return;
+        drawLive();
         outerView.requestMeasure();
+        if (focus || this.column !== existing?.activeColumn) {
+          runtime.activeEditor?.focus();
+        }
+      });
+      // Take focus as soon as CodeMirror has put the widget in the page,
+      // not a frame later: a column opened from the keyboard (an arrow
+      // into the row) must not leave the very next keystrokes to the outer
+      // editor, whose caret waits on the row's hidden source.
+      queueMicrotask(() => {
+        if (!visualColumnRuntimeIsCurrent(runtime) || !root.isConnected) return;
+        drawLive();
         if (focus || this.column !== existing?.activeColumn) {
           runtime.activeEditor?.focus();
         }
@@ -7128,7 +9694,7 @@ class VisualColumnWidget extends WidgetType {
     sourceButton.addEventListener("click", (evt) => {
       evt.preventDefault();
       evt.stopPropagation();
-      closeVisualColumnEditor(runtime, "source");
+      closeVisualColumnEditor(runtime, "source", this.plugin);
     });
     const doneButton = ownerDocument.createElement("button");
     doneButton.type = "button";
@@ -7139,7 +9705,7 @@ class VisualColumnWidget extends WidgetType {
     doneButton.addEventListener("click", (evt) => {
       evt.preventDefault();
       evt.stopPropagation();
-      closeVisualColumnEditor(runtime, "after");
+      closeVisualColumnEditor(runtime, "after", this.plugin);
     });
     toolbar.append(sourceButton, doneButton);
     root.appendChild(toolbar);
@@ -7156,7 +9722,15 @@ class VisualColumnWidget extends WidgetType {
       if (!inner) continue;
       if (index === this.column) {
         shell.classList.add("is-active");
-        shell.setAttribute("aria-label", t("Editing column"));
+        // Named through a visually hidden child, not aria-label: Obsidian
+        // shows a tooltip for every aria-label under the pointer, and the
+        // shell's outlived the editor it named.
+        const label = ownerDocument.createElement("span");
+        label.id = `nf-col-label-${++columnShellLabelSeq}`;
+        label.textContent = t("Editing column");
+        label.setAttribute("style", VISUALLY_HIDDEN_STYLE);
+        shell.appendChild(label);
+        shell.setAttribute("aria-labelledby", label.id);
         const host = ownerDocument.createElement("div");
         host.className = "nf-column-editor-host";
         shell.appendChild(host);
@@ -7228,38 +9802,10 @@ class VisualColumnWidget extends WidgetType {
   ) {
     const plugin = this.plugin;
     let innerView: EditorView;
+    // ⌘B, ⌘I and ⌘K never reach this keymap: Obsidian's hotkey scope runs
+    // their commands first, on the OUTER editor. The plugin wraps those
+    // commands instead (see routeEditorChords) so they act on this column.
     const visualInlineKeymap = keymap.of([
-      {
-        key: "Mod-b",
-        preventDefault: true,
-        stopPropagation: true,
-        run: (view) => this.toggleVisualMarkdown(view, "**", "<b>", "</b>"),
-      },
-      {
-        key: "Mod-i",
-        preventDefault: true,
-        stopPropagation: true,
-        run: (view) => this.toggleVisualMarkdown(view, "*", "<i>", "</i>"),
-      },
-      {
-        key: "Mod-k",
-        preventDefault: true,
-        stopPropagation: true,
-        run: (view) => {
-          if (inFenceBody(view.state)) return true;
-          const sel = view.state.selection.main;
-          if (sel.empty) {
-            view.dispatch({
-              changes: { from: sel.from, insert: "[]()" },
-              selection: { anchor: sel.from + 1 },
-              userEvent: "input",
-            });
-          } else {
-            insertLink(view);
-          }
-          return true;
-        },
-      },
       {
         key: "Mod-\\",
         preventDefault: true,
@@ -7272,10 +9818,11 @@ class VisualColumnWidget extends WidgetType {
     ]);
     const domHandlers = EditorView.domEventHandlers({
       keydown: (evt) => {
+        if (evt.isComposing || evt.keyCode === 229) return false;
         if (evt.key === "Escape") {
           evt.preventDefault();
           evt.stopPropagation();
-          closeVisualColumnEditor(runtime, "after");
+          closeVisualColumnEditor(runtime, "after", this.plugin);
           return true;
         }
         const mod = evt.metaKey || evt.ctrlKey;
@@ -7301,10 +9848,7 @@ class VisualColumnWidget extends WidgetType {
         const selection = view.state.selection.main;
         const plain = data.getData("text/plain");
         if (plugin.settings.pasteUrlLinks) {
-          const link = buildPasteLink(
-            view.state.doc.sliceString(selection.from, selection.to),
-            plain
-          );
+          const link = selectedUrlPaste(view.state, plain);
           if (link) {
             evt.preventDefault();
             view.dispatch({
@@ -7316,8 +9860,46 @@ class VisualColumnWidget extends WidgetType {
             return true;
           }
         }
-        if (!plugin.settings.calloutEditing) return false;
         const html = data.getData("text/html");
+        if (
+          plugin.settings.pasteTableFromTsv &&
+          view.state.selection.ranges.length === 1 &&
+          selection.empty &&
+          preferTsvOverHtml(html, plain)
+        ) {
+          const doc = view.state.doc;
+          const line = doc.lineAt(selection.head);
+          const md =
+            blankPasteLine(line.text) &&
+            !isTableRow(line.text) &&
+            !fenceAt(cachedFences(doc), line.number)
+              ? tsvToMarkdownTable(plain, { format: formatTable })
+              : null;
+          if (md) {
+            const prefixLength = quoteMarkerPrefix(line.text)?.length ?? 0;
+            const textOf = (n: number) => (n >= 1 && n <= doc.lines ? doc.line(n).text : null);
+            const landing = tablePasteLanding(line.text, textOf(line.number + 1), md, {
+              previous: textOf(line.number - 1),
+              following: textOf(line.number + 2),
+            });
+            const changes = view.state.changes({
+              from: line.from + prefixLength,
+              to: line.to,
+              insert: landing.insert,
+            });
+            // The caret lands on the row after the table, outside it.
+            const landed = changes.apply(doc).line(line.number + landing.caretLineOffset);
+            evt.preventDefault();
+            view.dispatch({
+              changes,
+              selection: { anchor: landed.from + landing.caretCh },
+              scrollIntoView: true,
+              userEvent: "input.paste",
+            });
+            return true;
+          }
+        }
+        if (!plugin.settings.calloutEditing) return false;
         const clip = html ? htmlToMarkdown(html) : plain;
         if (view.state.selection.ranges.length !== 1) return false;
         const replacement = buildQuotedPasteForSelection(
@@ -7344,6 +9926,9 @@ class VisualColumnWidget extends WidgetType {
     });
     const editorAdapter = (view: EditorView): Editor =>
       ({
+        // As on Obsidian's own editor: the slash menu reads what this
+        // view draws (a code opener's chip) to place its caret.
+        cm: view,
         getLine(lineNo: number) {
           return lineNo >= 0 && lineNo < view.state.doc.lines
             ? view.state.doc.line(lineNo + 1).text
@@ -7381,84 +9966,14 @@ class VisualColumnWidget extends WidgetType {
       } as unknown as Editor);
     const slashCompletion = autocompletion({
       activateOnTyping: true,
-      maxRenderedOptions: 18,
+      maxRenderedOptions: 40,
+      optionClass: () => "nf-slash-item",
+      // The menu is mounted on <body> (see `tooltips` below), outside the
+      // column scope, so the column's own look is keyed on this class.
+      tooltipClass: () => "nf-column-slash",
+      addToOptions: slashCompletionRowParts(),
       override: [
-        (context: CompletionContext) => {
-          if (!plugin.settings.slashCommands) return null;
-          const line = context.state.doc.lineAt(context.pos);
-          const before = line.text.slice(0, context.pos - line.from);
-          const match = before.match(
-            /(?:^|[\s>]|[　-ヿ一-鿿＀-￯])[/／]([\w　-ヿ一-鿿＀-￯-]*)$/
-          );
-          if (!match || fenceAt(cachedFences(context.state.doc), line.number)) {
-            return null;
-          }
-          const query = match[1].toLowerCase();
-          const all = plugin.settings.columnLayout
-            ? SLASH_COMMANDS
-            : SLASH_COMMANDS.filter((command) => !command.id.startsWith("cols"));
-          const prefix = (command: SlashCommand) =>
-            command.id.startsWith(query) ||
-            command.name.toLowerCase().startsWith(query) ||
-            command.keywords.split(" ").some((keyword) => keyword.startsWith(query));
-          const commands = query
-            ? all
-                .filter(
-                  (command) =>
-                    command.id.startsWith(query) ||
-                    command.name.toLowerCase().includes(query) ||
-                    command.keywords.includes(query)
-                )
-                .sort((a, b) => Number(prefix(b)) - Number(prefix(a)))
-            : all;
-          const from = context.pos - match[1].length - 1;
-          return {
-            from,
-            validFor: /^[/／][\w　-ヿ一-鿿＀-￯-]*$/,
-            options: commands.map((command) => ({
-              label: command.name,
-              detail: command.desc ?? command.hint,
-              type: "keyword",
-              boost: prefix(command) ? 20 : 0,
-              apply: (view: EditorView, _completion: Completion, start: number, end: number) => {
-                const current = view.state.doc.lineAt(start);
-                const startPos = {
-                  line: current.number - 1,
-                  ch: start - current.from,
-                };
-                const endLine = view.state.doc.lineAt(end);
-                const endPos = {
-                  line: endLine.number - 1,
-                  ch: end - endLine.from,
-                };
-                if (command.linePrefix !== undefined) {
-                  const withoutTrigger =
-                    current.text.slice(0, startPos.ch) +
-                    current.text.slice(end - current.from);
-                  const quote = command.linePrefix.startsWith(">")
-                    ? null
-                    : quoteMarkerPrefix(withoutTrigger);
-                  const replacement = quote
-                    ? quote + applyLinePrefix(withoutTrigger.slice(quote.length), command.linePrefix)
-                    : applyLinePrefix(withoutTrigger, command.linePrefix);
-                  view.dispatch({
-                    changes: { from: current.from, to: current.to, insert: replacement },
-                    selection: { anchor: current.from + replacement.length },
-                    scrollIntoView: true,
-                    userEvent: "input.complete",
-                  });
-                  return;
-                }
-                SlashSuggest.insertSnippetInto(
-                  editorAdapter(view),
-                  startPos,
-                  endPos,
-                  command
-                );
-              },
-            })),
-          };
-        },
+        (context: CompletionContext) => columnSlashCompletion(plugin, context, editorAdapter),
       ],
     });
     const state = EditorState.create({
@@ -7472,12 +9987,25 @@ class VisualColumnWidget extends WidgetType {
         // navigation. Without it the column looked like a plain textarea
         // even though the surrounding note was in Live Preview.
         markdown(),
+        operationLifecycle(plugin.operations),
         EditorView.lineWrapping,
+        // Obsidian paints `[contenteditable=false]` widgets with
+        // `contain: paint`, which clipped the slash menu to a few pixels.
+        // The (popout-safe) body is outside every such box.
+        tooltips({ parent: host.ownerDocument.body }),
         domHandlers,
         pasteHandlers,
         slashCompletion,
         visualInlineKeymap,
+        // The shorthands (`[] `, `>!tip `) and the marker Backspace ladder,
+        // as in the note. The projected outer change carries userEvent
+        // "input.inputrule", which the note's own filter ignores, so a
+        // shorthand expands once. Headings are not concealed in here, so
+        // only the markers setting takes a visible "## " whole.
+        makeInputRuleFilter(plugin),
+        makeMarkerBackspaceKeymap(plugin, { headingMarkers: false }),
         makeToolbarPlugin(plugin),
+        linkPendingField(),
         makeListMarkerPlugin(),
         makeNestedIndentPlugin(plugin),
         makeConcealPlugin(plugin),
@@ -7545,28 +10073,123 @@ class VisualColumnWidget extends WidgetType {
     runtime.activeEditor = innerView;
   }
 
-  private toggleVisualMarkdown(
-    view: EditorView,
-    marker: string,
-    codeOpen: string,
-    codeClose: string
-  ): boolean {
-    if (view.composing) return false;
-    const inCode = inFenceBody(view.state);
-    const open = inCode ? codeOpen : marker;
-    const close = inCode ? codeClose : marker;
-    const sel = view.state.selection.main;
-    if (sel.empty) {
-      view.dispatch({
-        changes: { from: sel.from, insert: open + close },
-        selection: { anchor: sel.from + open.length },
-        userEvent: "input",
-      });
-    } else {
-      toggleWrap(view, open, close);
+}
+
+/** Whether `view` is the child editor of an open columns row. */
+function inColumnEditor(view: EditorView | null | undefined): boolean {
+  return !!view?.dom.closest?.(".nf-column-editor-host");
+}
+
+/** Whether a column of `outer` is open in the visual column editor. */
+function columnEditorOpen(outer: EditorView): boolean {
+  return !!outer.contentDOM?.querySelector?.(".nf-column-editor-host .cm-editor");
+}
+
+/** The child editor of the column open in `outer`, or null. */
+export function openColumnEditorView(
+  outer: EditorView,
+  find: (el: HTMLElement) => EditorView | null = (el) => EditorView.findFromDOM(el)
+): EditorView | null {
+  const el = outer.contentDOM?.querySelector?.<HTMLElement>(".nf-column-editor-host .cm-editor");
+  if (!el) return null;
+  const view = find(el);
+  return view && view !== outer ? view : null;
+}
+
+/** Whether focus sits in one of the plugin's cards mounted on <body> — the
+ *  link card, a comment card, the icon picker. */
+export function focusInPluginPopover(doc: Document): boolean {
+  const active = doc.activeElement as Element | null;
+  return !!active?.closest?.(".nf-link-pop, .nf-cmt-pop, .nf-pop");
+}
+
+/**
+ * `command` made to stand down while focus is in one of the plugin's own
+ * cards (the link card, a comment card; `cardFocused` says so). Obsidian
+ * runs a hotkey's editor command whatever has focus, and these cards push
+ * no Scope, so ⌘U typed in the link card's text field underlined the note
+ * behind it — and that edit cancelled the card and lost what was typed.
+ * The wrapped ⌘B/⌘I/⌘K already refuse there; this covers every editor
+ * command the plugin registers. Plain `callback` commands are left alone.
+ */
+export function guardPopoverCommand(command: Command, cardFocused: (editor: Editor) => boolean): Command {
+  const { editorCallback, editorCheckCallback } = command;
+  let guarded = command;
+  if (editorCallback) {
+    guarded = {
+      ...guarded,
+      editorCallback: (editor, ctx) => (cardFocused(editor) ? undefined : editorCallback(editor, ctx)),
+    };
+  }
+  if (editorCheckCallback) {
+    guarded = {
+      ...guarded,
+      editorCheckCallback: (checking, editor, ctx) =>
+        cardFocused(editor) ? false : editorCheckCallback(checking, editor, ctx),
+    };
+  }
+  return guarded;
+}
+
+/**
+ * The nested CodeMirror `outer` holds that a command should act on: the
+ * one with focus — a column's child editor, or with `cells` Obsidian's own
+ * table-cell editor — else, while a column is open, that column even when
+ * focus has moved to something else (the link card opened from it, a
+ * toolbar button reached with Alt+F10). Null when the note itself is meant.
+ */
+export function nestedEditorFor(
+  outer: EditorView,
+  opts: { cells?: boolean } = {},
+  find: (el: HTMLElement) => EditorView | null = (el) => EditorView.findFromDOM(el)
+): EditorView | null {
+  const active = outer.dom.ownerDocument.activeElement;
+  const el = active?.closest?.(".cm-editor") as HTMLElement | null | undefined;
+  if (el && el !== outer.dom && outer.dom.contains(el)) {
+    const view = find(el);
+    if (view && view !== outer) {
+      if (inColumnEditor(view)) return view;
+      if (opts.cells && view.dom.closest("td, th")) return view;
     }
+  }
+  if (el && el !== outer.dom && outer.dom.contains(el)) return null;
+  return openColumnEditorView(outer, find);
+}
+
+/**
+ * ⌘B / ⌘I for an editor Obsidian's own commands cannot reach (a column's
+ * child editor). A selection toggles like the toolbar does — HTML runs and
+ * code fences included; a caret inside a word formats that word, as
+ * Obsidian does; anywhere else an empty marker pair opens with the caret
+ * between.
+ */
+export function toggleInlineFormatIn(
+  view: EditorView,
+  marker: string,
+  codeOpen: string,
+  codeClose: string
+): boolean {
+  if (view.composing) return false;
+  const sel = view.state.selection.main;
+  if (!sel.empty) {
+    toggleDualFormat(view, marker, codeOpen, codeClose);
     return true;
   }
+  const word = view.state.wordAt(sel.head);
+  if (word && word.from < sel.head && sel.head < word.to) {
+    view.dispatch({ selection: { anchor: word.from, head: word.to } });
+    toggleDualFormat(view, marker, codeOpen, codeClose);
+    return true;
+  }
+  const inCode = inFenceBody(view.state);
+  const open = inCode ? codeOpen : marker;
+  const close = inCode ? codeClose : marker;
+  view.dispatch({
+    changes: { from: sel.from, insert: open + close },
+    selection: { anchor: sel.from + open.length },
+    userEvent: "input",
+  });
+  return true;
 }
 
 function makeVisualColumnEditor(plugin: NotionFlowPlugin) {
@@ -7645,6 +10268,44 @@ function makeVisualColumnEditor(plugin: NotionFlowPlugin) {
         view.dispatch({ effects: setVisualColumnEffect.of(null) });
         return false;
       },
+    }),
+    // A caret the writer moves into a columns row opens the column rather
+    // than the raw rows; inside raw source it never rests on a code
+    // block's closing ```. See columnsEntryPlan.
+    EditorState.transactionFilter.of((tr) => {
+      if (!plugin.settings.columnLayout || tr.docChanged || !tr.selection) return tr;
+      if (!tr.isUserEvent("select")) return tr;
+      if (tr.effects.some((effect) => effect.is(setVisualColumnEffect))) return tr;
+      const start = tr.startState;
+      if (!start.field(editorLivePreviewField, false)) return tr;
+      if (start.field(field).active) return tr;
+      if (start.selection.ranges.length !== 1 || tr.selection.ranges.length !== 1) return tr;
+      if (!tr.selection.main.empty) return tr;
+      const plan = guard("columns entry", () => null, () =>
+        columnsEntryPlan(
+          start.doc,
+          start.selection.main.head,
+          tr.selection!.main.head,
+          cachedFences(start.doc)
+        )
+      );
+      if (!plan) return tr;
+      if (plan.kind === "past") {
+        return [tr, { selection: { anchor: plan.pos }, sequential: true }];
+      }
+      return [
+        tr,
+        {
+          effects: setVisualColumnEffect.of({
+            from: plan.from,
+            to: plan.to,
+            column: plan.column,
+            cursor: plan.cursor,
+          }),
+          selection: { anchor: plan.from },
+          sequential: true,
+        },
+      ];
     }),
   ];
 }
@@ -7793,22 +10454,282 @@ function activateRenderedColumn(
   return true;
 }
 
+/**
+ * Open the visual column editor on column `column` of the columns row whose
+ * header is on `headerLine` — the same effect a click on a rendered column
+ * dispatches. Only in Live Preview with columns on; false (and nothing
+ * dispatched) when the row is not a columns row. The field drops the effect
+ * by itself when a column's source cannot be projected, so a row the editor
+ * cannot show stays as it is.
+ */
+export function openVisualColumnAt(
+  plugin: { settings: { columnLayout: boolean } },
+  view: EditorView,
+  headerLine: number,
+  column: number,
+  cursor = 0
+): boolean {
+  if (!plugin.settings.columnLayout || !isLivePreviewEditor(view)) return false;
+  const doc = view.state.doc;
+  if (headerLine < 1 || headerLine > doc.lines) return false;
+  const block = columnsAwareBlockRange(doc, headerLine, cachedFences(doc));
+  if (!block) return false;
+  const header = doc.line(block.startLine);
+  if (parseCalloutHeader(header.text)?.type !== COLS_TYPE) return false;
+  view.dispatch({
+    effects: setVisualColumnEffect.of({
+      from: header.from,
+      to: doc.line(block.endLine).to,
+      column: Math.max(0, column),
+      cursor,
+    }),
+    selection: { anchor: header.from },
+  });
+  return true;
+}
+
+/**
+ * A click on the "empty toggle" hint of a toggle inside a rendered column:
+ * the body row emptyToggleBodyPlan writes, plus the column editor opened
+ * on that column with its caret on the new row. Left to the outer editor,
+ * the caret would land in the row's raw `> > >` source and turn the whole
+ * columns row into raw rows. Null when the toggle is not in a top-level
+ * columns row the column editor can show (the caller then writes the row
+ * in place, as for any toggle).
+ */
+export function columnToggleBodyPlan(
+  doc: Text,
+  toggleLine: number
+): {
+  changes: { from: number; to: number; insert: string }[];
+  from: number;
+  to: number;
+  column: number;
+  cursor: number;
+} | null {
+  const header = columnsHeaderAbove(doc, toggleLine);
+  if (header == null || header === toggleLine) return null;
+  const headerText = doc.line(header).text;
+  if (quoteDepth(headerText) !== 1 || /^\s/.test(headerText)) return null;
+  const plan = emptyToggleBodyPlan(doc, toggleLine);
+  if (!plan) return null;
+  const next = ChangeSet.of(plan.changes, doc.length).apply(doc);
+  const target = columnProjectionAtPosition(next, plan.anchor);
+  if (!target || next.lineAt(target.blockFrom).number !== header) return null;
+  const row = columnsAwareBlockRange(next, header, cachedFences(next));
+  if (!row || row.startLine !== header) return null;
+  const layout = parseColumnsSource(
+    next.sliceString(next.line(row.startLine).from, next.line(row.endLine).to).split("\n")
+  );
+  if (
+    !layout ||
+    layout.columns.length < 2 ||
+    layout.columns.some((_column, index) => !columnInnerSource(layout, index))
+  ) return null;
+  return {
+    changes: plan.changes,
+    from: next.line(row.startLine).from,
+    to: next.line(row.endLine).to,
+    column: target.inner.columnIndex,
+    cursor: target.innerPos,
+  };
+}
+
+/** The `[!nf-cols]` header a row belongs to: `lineNo` itself or the first
+ *  header met walking up through its quote rows. Null outside a columns
+ *  row (a non-quote row ends the walk). */
+export function columnsHeaderAbove(doc: Text, lineNo: number): number | null {
+  for (let n = Math.min(lineNo, doc.lines); n >= 1; n--) {
+    const text = doc.line(n).text;
+    if (parseCalloutHeader(text)?.type === COLS_TYPE) return n;
+    if (!RE_QUOTE.test(text)) return null;
+  }
+  return null;
+}
+
+/**
+ * What a caret move in the outer editor should do about a top-level
+ * columns row it lands in. `from` is the head before the move, `to` after.
+ *
+ *  - Coming from OUTSIDE the row (an arrow, Page, a click past the widget):
+ *    `open` the column holding the landing row in the visual editor — its
+ *    start when moving forward, its end when moving back — instead of
+ *    walking the raw `> >` rows, where the first character typed breaks
+ *    the row. The Source button's own raw editing starts inside the row,
+ *    so it is left alone.
+ *  - Already inside (raw source): a landing on the closing ``` of a code
+ *    block in a column goes `past` it — on past the block and the blank
+ *    seam under it, or, moving up, to the code's last row — since text
+ *    typed there turns the closer into code and swallows the rest of the
+ *    row. With nothing below the seam, the column editor opens instead.
+ *
+ * Null when the move has nothing to do with a columns row, or when the row
+ * cannot be shown in the column editor.
+ */
+export function columnsEntryPlan(
+  doc: Text,
+  from: number,
+  to: number,
+  fences: FenceRange[] = cachedFences(doc)
+):
+  | { kind: "open"; from: number; to: number; column: number; cursor: number }
+  | { kind: "past"; pos: number }
+  | null {
+  const line = doc.lineAt(Math.max(0, Math.min(to, doc.length)));
+  const header = columnsHeaderAbove(doc, line.number);
+  if (header == null) return null;
+  const headerText = doc.line(header).text;
+  if (quoteDepth(headerText) !== 1 || /^\s/.test(headerText)) return null;
+  const row = columnsAwareBlockRange(doc, header, fences);
+  if (!row || line.number > row.endLine) return null;
+  const rowFrom = doc.line(row.startLine).from;
+  const rowTo = doc.line(row.endLine).to;
+  const forward = to >= from;
+  const layout = parseColumnsSource(doc.sliceString(rowFrom, rowTo).split("\n"));
+  const inners = layout && layout.columns.length >= 2
+    ? layout.columns.map((_column, index) => columnInnerSource(layout, index))
+    : null;
+  const open = (lineNo: number) => {
+    if (!layout || !inners || inners.some((inner) => !inner)) return null;
+    const index = lineNo - row.startLine;
+    let column = 0;
+    layout.columns.forEach((segment, i) => {
+      if (index >= segment.headerIndex) column = i;
+    });
+    const inner = inners[column]!;
+    // The column editor is created with this caret, so its own filter never
+    // carries it off a code block's fence rows: a column that opens with
+    // code starts in the code (not in front of the opener chip, where the
+    // first key breaks the fence), and one that ends with code ends on the
+    // last code row rather than after the closing ```.
+    const innerFences = cachedFences(inner.doc);
+    let cursor = 0;
+    if (forward) {
+      const fence = fenceAt(innerFences, 1);
+      if (fence?.startLine === 1) cursor = codeOpenerAfter(inner.doc, fence) ?? 0;
+    } else {
+      for (let n = inner.doc.lines; n >= 1; n--) {
+        if (!inner.doc.line(n).text.trim()) continue;
+        cursor = inner.doc.line(n).to;
+        const fence = fenceAt(innerFences, n);
+        if (fence?.closed && fence.endLine === n && fence.startLine < n) {
+          if (fence.endLine - fence.startLine > 1) cursor = inner.doc.line(n - 1).to;
+          else if (fence.startLine > 1) cursor = inner.doc.line(fence.startLine - 1).to;
+        }
+        break;
+      }
+    }
+    return { kind: "open" as const, from: rowFrom, to: rowTo, column, cursor };
+  };
+  if (from < rowFrom || from > rowTo) return open(line.number);
+  const fence = fenceAt(fences, line.number);
+  if (
+    !fence ||
+    !fence.closed ||
+    fence.endLine !== line.number ||
+    fence.startLine === line.number ||
+    fence.quoteDepth < 2
+  ) return null;
+  if (!forward) return { kind: "past", pos: doc.line(line.number - 1).to };
+  // A closer inside the row: on to the next row text can be typed in — the
+  // rest of this column, or, past the bare `>` separator and the next
+  // column's header, that column's first row — so ArrowDown still reaches
+  // them. A Callout header or another code opener is no such row (a key
+  // typed after its markers breaks it): then on past the whole row.
+  const rowDepth = quoteDepth(headerText);
+  for (let n = line.number + 1; n <= row.endLine; n++) {
+    const next = doc.line(n);
+    if (quoteDepth(next.text) <= rowDepth) continue;
+    const callout = parseCalloutHeader(next.text);
+    if (callout?.type === COL_TYPE) continue;
+    if (callout || fenceAt(fences, n)?.startLine === n) break;
+    return { kind: "past", pos: next.from + (quoteMarkerPrefix(next.text)?.length ?? 0) };
+  }
+  // Not onto the blank seam right under the row: text typed there is lazy
+  // continuation, pulled into the last column. The row after the seam is
+  // safe ground.
+  const seam = row.endLine + 1;
+  if (seam <= doc.lines && doc.line(seam).text.trim() !== "") {
+    return { kind: "past", pos: doc.line(seam).from };
+  }
+  if (seam + 1 <= doc.lines) return { kind: "past", pos: doc.line(seam + 1).from };
+  return open(line.number);
+}
+
+/**
+ * The block a landing must select WHOLE, because Live Preview draws it as
+ * one widget: the caret cannot sit inside it without exposing its source.
+ *
+ *  - the top-level columns row the landed rows now sit in (`inside`), or
+ *    that they are;
+ *  - the landed block itself when it is a top-level Callout, a table or an
+ *    embed line, and it covers everything that landed.
+ *
+ * Null otherwise — a row landed inside an ordinary Callout keeps its caret
+ * (the Callout's in-place editor shows it styled), and a plain paragraph is
+ * no widget at all.
+ */
+export function widgetContainerFor(
+  doc: Text,
+  landed: number,
+  spanLines: number,
+  inside: boolean,
+  fences: FenceRange[] = cachedFences(doc)
+): BlockRange | null {
+  if (landed < 1 || landed > doc.lines) return null;
+  const last = Math.min(doc.lines, landed + Math.max(1, spanLines) - 1);
+  const header = columnsHeaderAbove(doc, landed);
+  if (header != null && (inside || header === landed)) {
+    const headerText = doc.line(header).text;
+    const row = quoteDepth(headerText) === 1 && !/^\s/.test(headerText)
+      ? columnsAwareBlockRange(doc, header, fences)
+      : null;
+    if (row && row.startLine <= landed && row.endLine >= last) {
+      return { startLine: row.startLine, endLine: row.endLine };
+    }
+  }
+  if (inside) return null;
+  const text = doc.line(landed).text;
+  const topCallout = !!parseCalloutHeader(text) && quoteDepth(text) === 1 && !/^\s/.test(text);
+  const table = !topCallout && isTableRow(text) && !RE_QUOTE.test(text) && !/^\s/.test(text);
+  const embed = !topCallout && !table && isImageBlockLine(text);
+  if (!topCallout && !table && !embed) return null;
+  // A Callout is its whole quote box: getBlockRange ends a quote at a code
+  // block inside it, which would leave a Callout holding code "not
+  // covered" and tear it open at the landing. innerBlockAt answers a
+  // header row with the box, code included, as the handle grabs it.
+  const block = topCallout
+    ? innerBlockAt(doc, landed, fences)
+    : getBlockRange(doc, landed, fences);
+  if (!block || block.startLine !== landed || block.endLine < last) return null;
+  return { startLine: block.startLine, endLine: block.endLine };
+}
+
 /** Execute a right-edge drop: remove `dragged` from where it was and put
  * it beside `target` — a new columns row, or one more column when the
  * target already is one. One transaction, so a single undo restores both. */
-function dropAsColumn(view: EditorView, dragged: BlockRange, target: BlockRange) {
+function dropAsColumn(
+  view: EditorView,
+  dragged: BlockRange,
+  target: BlockRange
+): number | null {
   const doc = view.state.doc;
-  const removal = protectedBlockRemovalRange(doc, dragged);
+  // Seam rows stay: the neighbours read below are the original rows.
+  const removal = protectedBlockRemovalRange(doc, dragged, false);
   const draggedLines = doc
     .sliceString(doc.line(dragged.startLine).from, doc.line(dragged.endLine).to)
     .split("\n");
   const tFrom = doc.line(target.startLine).from;
   const tTo = doc.line(target.endLine).to;
   const targetLines = doc.sliceString(tFrom, tTo).split("\n");
+  // Either way the new column is the tail: a ">" seam, its own header,
+  // then the dragged rows.
+  const column = appendColumnLines(draggedLines);
   const wrapped =
     parseCalloutHeader(targetLines[0])?.type === COLS_TYPE
-      ? [...targetLines, ...appendColumnLines(draggedLines)]
+      ? [...targetLines, ...column]
       : buildColumnsWrap(targetLines, draggedLines);
+  const contentRow = wrapped.length - column.length + 2;
 
   // Seam lines are read PAST the dragged block when it is the direct
   // neighbor — that neighbor is being removed by this same transaction.
@@ -7823,16 +10744,31 @@ function dropAsColumn(view: EditorView, dragged: BlockRange, target: BlockRange)
   const above = prevNo >= 1 ? doc.line(prevNo).text : "";
   const below = nextNo <= doc.lines ? doc.line(nextNo).text : "";
   let text = wrapped.join("\n");
-  if (needsProtectedSeam(above, wrapped[0])) text = "\n" + text;
+  let leadingRows = 0;
+  if (needsProtectedSeam(above, wrapped[0])) {
+    text = "\n" + text;
+    leadingRows = 1;
+  }
   if (needsProtectedSeam(wrapped[wrapped.length - 1], below)) text += "\n";
 
+  // Caret on the new column's first content row. Changes are in original
+  // coordinates; a removal above the target shifts the insertion up.
+  const mappedFrom = tFrom - (removal.to <= tFrom ? removal.to - removal.from : 0);
+  const rowOffset = text
+    .split("\n")
+    .slice(0, leadingRows + contentRow)
+    .reduce((sum, row) => sum + row.length + 1, 0);
+  const anchor = mappedFrom + rowOffset;
   view.dispatch({
     changes: [
       { from: removal.from, to: removal.to },
       { from: tFrom, to: tTo, insert: text },
     ],
+    selection: { anchor },
     userEvent: "move.block",
   });
+  const after = view.state.doc;
+  return after.lineAt(Math.max(0, Math.min(after.length, anchor))).number;
 }
 
 /** Items that set (or assign) the Callout type of `lineNo`. */
@@ -7857,6 +10793,48 @@ function addCalloutTypeItems(menu: Menu, view: EditorView, lineNo: number) {
         })
     );
   }
+}
+
+/** Items that colour the Callout at `lineNo` independently of its type:
+ * nine palette swatches and Default, written as an "nf-<colour>" metadata
+ * token that other Markdown apps ignore. */
+function addCalloutColorItems(menu: Menu, view: EditorView, lineNo: number) {
+  const header = parseCalloutHeader(view.state.doc.line(lineNo).text);
+  if (!header) return;
+  const current = calloutMetaColor(header.metadata);
+  const write = (value: string | null) => {
+    const line = view.state.doc.line(lineNo);
+    const next = setCalloutMetaToken(line.text, "nf-", value);
+    if (next == null || next === line.text) return;
+    view.dispatch({
+      changes: { from: line.from, to: line.to, insert: next },
+      userEvent: "input.callout-color",
+    });
+  };
+  for (const color of PALETTE_COLORS) {
+    menu.addItem((item) => {
+      item
+        .setTitle(t(COLOR_LABELS[color]))
+        .setIcon("circle")
+        .setChecked(current === color)
+        .onClick(() => write(`nf-${color}`));
+      // The icon element is not in the public typings; tint it when
+      // present, and styles.css fills the circle (a swatch, not a ring).
+      const iconEl = (item as unknown as { iconEl?: HTMLElement }).iconEl;
+      if (iconEl) {
+        iconEl.style.color = `rgb(var(--nf-${color}-rgb))`;
+        iconEl.classList.add("nf-menu-swatch");
+      }
+    });
+  }
+  menu.addSeparator();
+  menu.addItem((item) =>
+    item
+      .setTitle(t("Default"))
+      .setIcon("ban")
+      .setChecked(current == null)
+      .onClick(() => write(null))
+  );
 }
 
 function addCalloutFoldItem(menu: Menu, view: EditorView, lineNo: number) {
@@ -7897,8 +10875,57 @@ function addToggleStateItem(menu: Menu, view: EditorView, lineNo: number) {
           changes: { from: line.from, to: line.to, insert: next },
           userEvent: "input.toggle-fold",
         });
+        if (header.collapsed) markToggleFoldMotion(view, lineNo);
       })
   );
+}
+
+/** Mark the freshly rebuilt widget of the toggle whose header is
+ * `foldLine` with `nf-fold-motion`, so styles.css can ease its body open.
+ * Only a fold click may call this — CodeMirror rebuilds the Callout widget
+ * synchronously inside the dispatch that rewrote the ± marker, so the new
+ * DOM is already in place; the class is dropped with the next rebuild.
+ * The widget is the last `.cm-embed-block.cm-callout` starting at or
+ * before the header, and inside it the nth toggle in pre-order, counted
+ * the same way toggleFoldLine maps a triangle back to its header line. */
+function markToggleFoldMotion(view: EditorView, foldLine: number) {
+  try {
+    const doc = view.state.doc;
+    if (foldLine < 1 || foldLine > doc.lines) return;
+    const pos = doc.line(foldLine).from;
+    let widget: HTMLElement | null = null;
+    let widgetStart = -1;
+    for (const embed of Array.from(
+      view.contentDOM.querySelectorAll<HTMLElement>(".cm-embed-block.cm-callout")
+    )) {
+      let start: number;
+      try {
+        start = view.posAtDOM(embed, 0);
+      } catch {
+        continue;
+      }
+      if (pos < start) continue;
+      if (start >= widgetStart) {
+        widget = embed;
+        widgetStart = start;
+      }
+    }
+    if (!widget || widgetStart < 0) return;
+    const startLine = doc.lineAt(widgetStart).number;
+    const block = getBlockRange(doc, startLine, cachedFences(doc));
+    if (foldLine > (block?.endLine ?? startLine)) return;
+    let index = 0;
+    for (let n = startLine; n < foldLine; n++) {
+      if (parseToggleHeader(doc.line(n).text)) index++;
+    }
+    const toggles = Array.from(
+      widget.querySelectorAll<HTMLElement>(".callout[data-callout]")
+    ).filter((el) => el.dataset.callout?.toLowerCase() === TOGGLE_TYPE);
+    const callout = pos === widgetStart ? widget.querySelector<HTMLElement>(".callout") : toggles[index];
+    callout?.classList.add("nf-fold-motion");
+  } catch {
+    // The widget may not be rendered for this row; nothing to animate.
+  }
 }
 
 function addCalloutToQuoteItem(menu: Menu, view: EditorView, lineNo: number) {
@@ -7928,10 +10955,113 @@ function addCalloutToQuoteItem(menu: Menu, view: EditorView, lineNo: number) {
   );
 }
 
-function openCalloutTypeMenu(view: EditorView, lineNo: number, evt: MouseEvent) {
-  const menu = new Menu().setUseNativeMenu(false);
+/** The icon a Callout header's metadata picks: a Lucide name from the
+ * icon card's list, "emoji" (the title's first character is the icon),
+ * or null for the type's own icon — also for a name this version lacks,
+ * which setIcon could not draw. */
+export function calloutIconFromMetadata(metadata: readonly string[]): string | null {
+  const icon = calloutIconFromMeta(metadata);
+  return icon == null ? null : icon.kind === "emoji" ? "emoji" : icon.name;
+}
+
+/** A zero-size box at a pointer event, for anchoring a card there. */
+function pointRect(evt: MouseEvent): DOMRect {
+  return new DOMRect(evt.clientX, evt.clientY, 0, 0);
+}
+
+/** The icon card for the Callout whose header is row `lineNo`, beside
+ * `anchor`: a Lucide icon writes `nfi-<name>`, an emoji writes `nfi-emoji`
+ * and puts the emoji at the title's start, Default icon removes the token,
+ * and closing the card (Esc, a click outside) changes nothing. */
+export function openCalloutIconPicker(app: App, view: EditorView, lineNo: number, anchor: DOMRect) {
+  const doc = view.state.doc;
+  if (lineNo < 1 || lineNo > doc.lines) return;
+  const header = doc.line(lineNo).text;
+  if (!parseCalloutHeader(header)) return;
+  openIconPicker({
+    doc: view.dom.ownerDocument,
+    anchor,
+    lucide: true,
+    emoji: NOTE_EMOJI,
+    current: currentCalloutIcon(header),
+    defaultLabel: t("Default icon"),
+    placeholder: t("Search icons"),
+    recent: {
+      load: () => app.loadLocalStorage(NOTE_EMOJI_RECENT_KEY),
+      save: (list) => app.saveLocalStorage(NOTE_EMOJI_RECENT_KEY, list),
+    },
+    bounds: () => view.dom.getBoundingClientRect(),
+    onPick: (choice) => {
+      // Only the header the card was opened for: when the note changed
+      // under the card, the row is found again by its text or left alone.
+      const now = view.state.doc;
+      const row = lineNo <= now.lines && now.line(lineNo).text === header ? now.line(lineNo) : null;
+      if (!row) return;
+      const next = setCalloutIconToken(row.text, choice);
+      if (next == null || next === row.text) return;
+      view.dispatch({ changes: { from: row.from, to: row.to, insert: next }, userEvent: "input.callout-icon" });
+    },
+    onClose: () => view.focus(),
+  });
+}
+
+/** The on-screen box of the icon of the Callout whose header is row
+ * `lineNo`: the in-place editor's lead when the caret is inside, else the
+ * rendered widget's own icon — or, for an emoji icon (the title's first
+ * character; no icon is drawn), the header row or title. Null when the
+ * header is not on screen. */
+function calloutIconRect(view: EditorView, lineNo: number): DOMRect | null {
+  const doc = view.state.doc;
+  if (lineNo < 1 || lineNo > doc.lines) return null;
+  const lineOf = (el: Element) => {
+    try {
+      return doc.lineAt(view.posAtDOM(el, 0)).number;
+    } catch {
+      return -1;
+    }
+  };
+  const shown = (el: Element | null | undefined) => {
+    const box = el?.getBoundingClientRect();
+    return box && box.width > 0 ? box : null;
+  };
+  for (const lead of Array.from(view.contentDOM.querySelectorAll<HTMLElement>(".nf-visual-callout-lead"))) {
+    const row = lead.closest<HTMLElement>(".cm-line");
+    if (row && lineOf(row) === lineNo) return shown(lead.querySelector(":scope > .callout-icon")) ?? shown(row);
+  }
+  for (const widget of Array.from(
+    view.contentDOM.querySelectorAll<HTMLElement>(".cm-embed-block.cm-callout")
+  )) {
+    if (lineOf(widget) !== lineNo) continue;
+    const title = widget.querySelector<HTMLElement>(":scope .callout > .callout-title");
+    return shown(title?.querySelector(":scope > .callout-icon")) ?? shown(title);
+  }
+  return null;
+}
+
+function openCalloutTypeMenu(app: App, view: EditorView, lineNo: number, evt: MouseEvent) {
+  // The icon's box now: the widget may be rebuilt before a row is picked.
+  const iconRect =
+    (evt.target as Element | null)?.closest?.(".callout-icon")?.getBoundingClientRect() ?? null;
+  const type = parseCalloutHeader(view.state.doc.line(lineNo).text)?.type;
+  const menu = trackMenu(new Menu().setUseNativeMenu(false));
   addCalloutTypeItems(menu, view, lineNo);
   menu.addSeparator();
+  // Colour and icon are the Callout's own; columns and toggles carry
+  // neither (a DOM menu, so the submenu is always there).
+  if (type && type !== COLS_TYPE && type !== COL_TYPE && type !== TOGGLE_TYPE) {
+    menu.addItem((item) => {
+      item.setTitle(t("Callout color")).setIcon("palette");
+      const withSub = item as unknown as { setSubmenu?: () => Menu };
+      if (typeof withSub.setSubmenu === "function") addCalloutColorItems(withSub.setSubmenu(), view, lineNo);
+    });
+    menu.addItem((item) =>
+      item
+        .setTitle(t("Icon…"))
+        .setIcon("smile")
+        .onClick(() => openCalloutIconPicker(app, view, lineNo, iconRect ?? pointRect(evt)))
+    );
+    menu.addSeparator();
+  }
   addCalloutFoldItem(menu, view, lineNo);
   addCalloutToQuoteItem(menu, view, lineNo);
   menu.showAtMouseEvent(evt);
@@ -8049,6 +11179,7 @@ function makeCalloutIconMenu(plugin: NotionFlowPlugin) {
         this.view = view;
         view.dom.addEventListener("mousedown", this.onMouseDown, true);
         view.dom.addEventListener("click", this.onClick, true);
+        view.contentDOM.addEventListener("pointerdown", this.onCornerPointerDown, true);
       }
 
       headerLineForIcon = (evt: Event): number | null => {
@@ -8114,12 +11245,16 @@ function makeCalloutIconMenu(plugin: NotionFlowPlugin) {
         const callout = fold.closest<HTMLElement>(".callout");
         if (callout?.dataset.callout?.toLowerCase() !== TOGGLE_TYPE) return null;
         const widget = fold.closest<HTMLElement>(".cm-embed-block.cm-callout");
-        if (!widget) return null;
+        return widget ? this.toggleHeaderLine(widget, callout) : null;
+      };
+
+      /** The source line of a rendered toggle inside a Callout widget. */
+      toggleHeaderLine = (widget: HTMLElement, callout: HTMLElement): number | null => {
         try {
           const doc = this.view.state.doc;
           // One widget can hold several toggles (a toggle inside a
           // toggle). DOM order and source order are both pre-order, so
-          // the clicked triangle's index picks its header line.
+          // the clicked toggle's index picks its header line.
           const toggles = Array.from(
             widget.querySelectorAll<HTMLElement>(".callout[data-callout]")
           ).filter((el) => el.dataset.callout?.toLowerCase() === TOGGLE_TYPE);
@@ -8139,6 +11274,28 @@ function makeCalloutIconMenu(plugin: NotionFlowPlugin) {
         }
       };
 
+      /** The header line of the empty toggle whose "Click to add content"
+       * hint this event hit. The hint is drawn on the Callout itself, below
+       * its title, only while the toggle is open and has no content. */
+      emptyToggleHintLine = (evt: MouseEvent): number | null => {
+        if (!plugin.settings.toggleBlocks) return null;
+        const target = evt.target as Element | null;
+        const callout = target?.closest?.<HTMLElement>(".callout");
+        if (!callout || callout.dataset.callout?.toLowerCase() !== TOGGLE_TYPE) return null;
+        if (
+          callout.classList.contains("is-collapsed") ||
+          callout.dataset.calloutFold === "-" ||
+          callout.querySelector(":scope > .callout-content")
+        ) {
+          return null;
+        }
+        const title = callout.querySelector<HTMLElement>(":scope > .callout-title");
+        if (!title || evt.clientY <= title.getBoundingClientRect().bottom) return null;
+        const widget = callout.closest<HTMLElement>(".cm-embed-block.cm-callout");
+        if (!widget || !this.view.contentDOM.contains(widget)) return null;
+        return this.toggleHeaderLine(widget, callout);
+      };
+
       /** The columns row whose hover ⋯ button this event hit, or null. */
       colsButtonBlock = (evt: Event): BlockRange | null => {
         if (!plugin.settings.columnLayout) return null;
@@ -8150,7 +11307,7 @@ function makeCalloutIconMenu(plugin: NotionFlowPlugin) {
         try {
           const doc = this.view.state.doc;
           const lineNo = doc.lineAt(this.view.posAtDOM(widget, 0)).number;
-          const block = getBlockRange(doc, lineNo, cachedFences(doc));
+          const block = columnsAwareBlockRange(doc, lineNo, cachedFences(doc));
           if (!block) return null;
           const header = parseCalloutHeader(doc.line(block.startLine).text);
           return header?.type === COLS_TYPE ? block : null;
@@ -8159,10 +11316,180 @@ function makeCalloutIconMenu(plugin: NotionFlowPlugin) {
         }
       };
 
+      /** Tears down a drag-to-resize in progress (null when idle). */
+      imageResize: ((commit: boolean) => void) | null = null;
+
+      /** A press within 8px of a rendered image's right edge starts a
+       * drag-to-resize: the width previews on the element itself and is
+       * written back as Obsidian's native `|N` suffix on release. */
+      startImageResize = (evt: MouseEvent): boolean => {
+        const img = evt.target as HTMLElement | null;
+        if (!img || typeof img.matches !== "function" || !img.matches(".image-embed img")) {
+          return false;
+        }
+        const embed = img.closest<HTMLElement>(".image-embed");
+        if (!embed || !this.view.contentDOM.contains(embed) || this.view.state.readOnly) {
+          return false;
+        }
+        const rect = img.getBoundingClientRect();
+        // An aligned row (styles.css, by the alt's left / center / right)
+        // moves the edges differently: a centred image grows on both sides,
+        // so the right edge follows the pointer at twice the width change;
+        // a right-aligned one keeps its right edge and is resized from the
+        // left edge instead.
+        const lineEl = embed.closest<HTMLElement>(".cm-line");
+        const rowAlign = lineEl ? getComputedStyle(lineEl).textAlign : "";
+        const fromLeft = rowAlign === "right" || rowAlign === "end";
+        const growth = rowAlign === "center" ? 2 : 1;
+        const edge = fromLeft ? rect.left : rect.right;
+        const near = fromLeft
+          ? evt.clientX >= edge - 2 && evt.clientX <= edge + 8
+          : evt.clientX >= edge - 8 && evt.clientX <= edge + 2;
+        if (!(rect.width > 0) || !near) return false;
+        let lineNo: number;
+        let at: number;
+        try {
+          const doc = this.view.state.doc;
+          const pos = this.view.posAtDOM(embed, 0);
+          const line = doc.lineAt(pos);
+          lineNo = line.number;
+          at = pos - line.from;
+          if (!hasImageEmbed(line.text, at)) return false;
+        } catch {
+          return false;
+        }
+        evt.preventDefault();
+        evt.stopPropagation();
+        this.imageResize?.(false);
+        const ownerDoc = this.view.dom.ownerDocument;
+        const startX = evt.clientX;
+        const startWidth = Math.round(rect.width);
+        let width = startWidth;
+        const readout = ownerDoc.createElement("div");
+        readout.className = "nf-image-resize-readout";
+        embed.classList.add("nf-image-resizing");
+        // The badge is position: fixed on the body and rides beside the
+        // pointer in viewport pixels, so the widget's own overflow
+        // clipping never hides it.
+        ownerDoc.body.appendChild(readout);
+        let pointerX = evt.clientX;
+        let pointerY = evt.clientY;
+        const show = () => {
+          readout.textContent = `${width} px`;
+          readout.style.left = `${Math.round(pointerX + 12)}px`;
+          readout.style.top = `${Math.round(pointerY - 28)}px`;
+          img.style.width = `${width}px`;
+        };
+        const move = (e: PointerEvent) => {
+          const dx = fromLeft ? startX - e.clientX : e.clientX - startX;
+          width = Math.max(40, Math.round(startWidth + growth * dx));
+          pointerX = e.clientX;
+          pointerY = e.clientY;
+          show();
+        };
+        const up = () => this.imageResize?.(true);
+        const cancel = () => this.imageResize?.(false);
+        const key = (e: KeyboardEvent) => {
+          if (e.key !== "Escape") return;
+          e.preventDefault();
+          e.stopPropagation();
+          cancel();
+        };
+        this.imageResize = (commit: boolean) => {
+          this.imageResize = null;
+          ownerDoc.removeEventListener("pointermove", move, true);
+          ownerDoc.removeEventListener("pointerup", up, true);
+          ownerDoc.removeEventListener("pointercancel", cancel, true);
+          ownerDoc.removeEventListener("keydown", key, true);
+          readout.remove();
+          embed.classList.remove("nf-image-resizing");
+          img.style.width = "";
+          if (commit && width !== startWidth) applyImageWidth(this.view, lineNo, width, at);
+        };
+        ownerDoc.addEventListener("pointermove", move, true);
+        ownerDoc.addEventListener("pointerup", up, true);
+        ownerDoc.addEventListener("pointercancel", cancel, true);
+        ownerDoc.addEventListener("keydown", key, true);
+        show();
+        return true;
+      };
+
+      /** Ends the feedback of a native corner drag in progress. */
+      cornerFeedback: (() => void) | null = null;
+
+      /**
+       * Obsidian's own resize corner (`.image-resize-corner`, bottom right)
+       * gets the edge drag's feedback: the accent outline and a live "N px"
+       * readout. Obsidian's handler calls preventDefault on pointerdown and
+       * captures the pointer, so no mousedown ever arrives: this listens in
+       * the capture phase, prevents nothing, and only watches. Obsidian
+       * writes the width itself on release.
+       */
+      onCornerPointerDown = (evt: PointerEvent) => {
+        if (evt.button !== 0 || !evt.isPrimary) return;
+        const corner = (evt.target as Element | null)?.closest?.(".image-resize-corner");
+        if (!corner || !this.view.contentDOM.contains(corner)) return;
+        const embed = corner.closest<HTMLElement>(".image-embed") ?? corner.parentElement;
+        const img = embed?.querySelector<HTMLImageElement>("img");
+        if (!embed || !img) return;
+        this.cornerFeedback?.();
+        const ownerDoc = this.view.dom.ownerDocument;
+        const win = ownerDoc.defaultView ?? window;
+        const readout = ownerDoc.createElement("div");
+        readout.className = "nf-image-resize-readout";
+        embed.classList.add("nf-image-resizing", "is-corner");
+        ownerDoc.body.appendChild(readout);
+        let pointerX = evt.clientX;
+        let pointerY = evt.clientY;
+        let frame = 0;
+        let shown = -1;
+        // Obsidian sets the width in its own animation frame, after this
+        // listener's: repaint until the width settles, one frame late at most.
+        const paint = () => {
+          frame = 0;
+          const width = Math.round(img.getBoundingClientRect().width);
+          readout.textContent = `${width} px`;
+          readout.style.left = `${Math.round(pointerX + 12)}px`;
+          readout.style.top = `${Math.round(pointerY - 28)}px`;
+          if (width !== shown) {
+            shown = width;
+            frame = win.requestAnimationFrame(paint);
+          }
+        };
+        const move = (e: PointerEvent) => {
+          if (e.pointerId !== evt.pointerId) return;
+          pointerX = e.clientX;
+          pointerY = e.clientY;
+          if (!frame) frame = win.requestAnimationFrame(paint);
+        };
+        const end = (e: PointerEvent) => {
+          if (e.pointerId === evt.pointerId) this.cornerFeedback?.();
+        };
+        this.cornerFeedback = () => {
+          this.cornerFeedback = null;
+          if (frame) win.cancelAnimationFrame(frame);
+          ownerDoc.removeEventListener("pointermove", move, true);
+          ownerDoc.removeEventListener("pointerup", end, true);
+          ownerDoc.removeEventListener("pointercancel", end, true);
+          ownerDoc.removeEventListener("lostpointercapture", end, true);
+          readout.remove();
+          embed.classList.remove("nf-image-resizing", "is-corner");
+        };
+        ownerDoc.addEventListener("pointermove", move, true);
+        ownerDoc.addEventListener("pointerup", end, true);
+        ownerDoc.addEventListener("pointercancel", end, true);
+        ownerDoc.addEventListener("lostpointercapture", end, true);
+        paint();
+      };
+
       onMouseDown = (evt: MouseEvent) => {
         if (evt.button !== 0) return;
         const eventTarget = evt.target as Element | null;
         if (eventTarget?.closest?.(".nf-columns-editor")) {
+          this.pendingCaret = null;
+          return;
+        }
+        if (this.startImageResize(evt)) {
           this.pendingCaret = null;
           return;
         }
@@ -8179,10 +11506,12 @@ function makeCalloutIconMenu(plugin: NotionFlowPlugin) {
         if (
           this.headerLineForIcon(evt) != null ||
           this.colsButtonBlock(evt) ||
-          this.toggleFoldLine(evt) != null
+          this.toggleFoldLine(evt) != null ||
+          this.emptyToggleHintLine(evt) != null
         ) {
           evt.preventDefault();
           evt.stopPropagation();
+          this.pendingCaret = null;
           return;
         }
         if (
@@ -8312,7 +11641,7 @@ function makeCalloutIconMenu(plugin: NotionFlowPlugin) {
         if (lineNo != null) {
           evt.preventDefault();
           evt.stopPropagation();
-          openCalloutTypeMenu(this.view, lineNo, evt);
+          openCalloutTypeMenu(plugin.app, this.view, lineNo, evt);
           return;
         }
         const foldLine = this.toggleFoldLine(evt);
@@ -8329,14 +11658,52 @@ function makeCalloutIconMenu(plugin: NotionFlowPlugin) {
               changes: { from: line.from, to: line.to, insert: next },
               userEvent: "input.toggle-fold",
             });
+            // Opening: the rebuilt widget eases its body in (styles.css).
+            if (header?.collapsed) markToggleFoldMotion(this.view, foldLine);
           }
+          return;
+        }
+        // The empty toggle's hint: write into the toggle, never its title.
+        const hintLine = this.emptyToggleHintLine(evt);
+        if (hintLine != null) {
+          evt.preventDefault();
+          evt.stopPropagation();
+          this.pendingCaret = null;
+          // In a rendered column: write the row and open the column on it.
+          const inColumn = plugin.settings.columnLayout && isLivePreviewEditor(this.view)
+            ? columnToggleBodyPlan(this.view.state.doc, hintLine)
+            : null;
+          if (inColumn) {
+            this.view.dispatch({
+              changes: inColumn.changes,
+              effects: setVisualColumnEffect.of({
+                from: inColumn.from,
+                to: inColumn.to,
+                column: inColumn.column,
+                cursor: inColumn.cursor,
+              }),
+              selection: { anchor: inColumn.from },
+              userEvent: inColumn.changes.length ? "input.toggle-body" : "select",
+            });
+            return;
+          }
+          const plan = emptyToggleBodyPlan(this.view.state.doc, hintLine);
+          if (plan) {
+            this.view.dispatch({
+              changes: plan.changes,
+              selection: { anchor: plan.anchor },
+              scrollIntoView: true,
+              userEvent: plan.changes.length ? "input.toggle-body" : "select",
+            });
+          }
+          this.view.focus();
           return;
         }
         const colsBlock = this.colsButtonBlock(evt);
         if (colsBlock) {
           evt.preventDefault();
           evt.stopPropagation();
-          const menu = new Menu().setUseNativeMenu(false);
+          const menu = trackMenu(new Menu().setUseNativeMenu(false));
           addColumnsMenuItems(menu, this.view, colsBlock);
           menu.showAtMouseEvent(evt);
           return;
@@ -8419,8 +11786,11 @@ function makeCalloutIconMenu(plugin: NotionFlowPlugin) {
       };
 
       destroy() {
+        this.imageResize?.(false);
+        this.cornerFeedback?.();
         this.view.dom.removeEventListener("mousedown", this.onMouseDown, true);
         this.view.dom.removeEventListener("click", this.onClick, true);
+        this.view.contentDOM.removeEventListener("pointerdown", this.onCornerPointerDown, true);
       }
     }
   );
@@ -8463,14 +11833,17 @@ function calloutRangeFromHeader(
   lineNo: number,
   fences: FenceRange[]
 ): BlockRange | null {
-  if (fenceAt(fences, lineNo) || !parseCalloutHeader(doc.line(lineNo).text)) {
+  // Only a header that opens its blockquote is one. A "[!type]" row further
+  // down the same quote — also after a quoted blank row ("> [!note] A\n>\n
+  // > [!tip] B") — is text of the box above, as Obsidian draws it; that box
+  // runs on through it.
+  if (fenceAt(fences, lineNo) || !calloutHeaderAt(doc, lineNo)) {
     return null;
   }
   const depth = quoteDepth(doc.line(lineNo).text);
   if (depth === 0) return null;
   const outerIndent = indentWidth(doc.line(lineNo).text);
   let endLine = lineNo;
-  let siblingStart: number | null = null;
   for (let n = lineNo + 1; n <= doc.lines; n++) {
     const fence = fenceAt(fences, n);
     const rowDepth = fence?.quoteDepth ?? quoteDepth(doc.line(n).text);
@@ -8478,17 +11851,6 @@ function calloutRangeFromHeader(
       ? indentWidth(doc.line(fence.startLine).text)
       : indentWidth(doc.line(n).text);
     if (rowDepth < depth || rowIndent !== outerIndent) break;
-    // Two same-depth Callouts separated by a quoted blank row are siblings,
-    // not one large outer Callout with the second painted as a child. Keep
-    // the separator with the first card, then stop before the next header.
-    if (
-      rowDepth === depth &&
-      parseCalloutHeader(doc.line(n).text) &&
-      RE_QUOTE_ONLY.test(doc.line(n - 1).text)
-    ) {
-      siblingStart = n;
-      break;
-    }
     endLine = n;
   }
 
@@ -8511,12 +11873,7 @@ function calloutRangeFromHeader(
     quoteDepth(doc.line(quoteGroup.startLine).text) === depth &&
     shallowestMarkedDepth === depth
   ) {
-    endLine = Math.max(
-      endLine,
-      siblingStart == null
-        ? quoteGroup.endLine
-        : Math.min(quoteGroup.endLine, siblingStart - 1)
-    );
+    endLine = Math.max(endLine, quoteGroup.endLine);
   }
   return { startLine: lineNo, endLine };
 }
@@ -8548,17 +11905,20 @@ export function calloutEditBlocks(
       n = fence.endLine;
       continue;
     }
-    const header = parseCalloutHeader(doc.line(n).text);
+    const header = calloutHeaderAt(doc, n);
     if (!header) continue;
     const range = calloutRangeFromHeader(doc, n, fences);
     if (!range || range.endLine < first || range.startLine > last) continue;
     const key = `${range.startLine}:${range.endLine}`;
     if (seen.has(key)) continue;
     seen.add(key);
+    const metaColor = calloutMetaColor(header.metadata);
     blocks.push({
       startLine: range.startLine,
       endLine: range.endLine,
-      colorVar: CALLOUT_COLOR_VARS[header.type] ?? "--callout-default",
+      colorVar: metaColor
+        ? `--nf-${metaColor}-rgb`
+        : CALLOUT_COLOR_VARS[header.type] ?? "--callout-default",
     });
   }
   return blocks;
@@ -8620,9 +11980,26 @@ export function visualAnalysisWindow(
   };
 }
 
-/** The triangle that stands in for "[!nf-toggle]±" while the caret is
- *  elsewhere in the block, so editing a toggle's body still looks like a
- *  toggle. Clicking it folds, exactly like the rendered one. */
+/** Whether a caret or either end of a selection sits strictly inside
+ *  `from`…`to`. A toggle header shows its "[!nf-toggle]±" source only then:
+ *  a caret at the title start, or a selection sweeping over the whole row,
+ *  keeps the triangle, as a Callout header keeps its lead. */
+export function selectionEntersSpan(
+  ranges: readonly { anchor: number; head: number }[],
+  from: number,
+  to: number
+): boolean {
+  return ranges.some(
+    (range) =>
+      (range.head > from && range.head < to) ||
+      (range.anchor > from && range.anchor < to)
+  );
+}
+
+/** The triangle that stands in for "[!nf-toggle]±" on a toggle's header,
+ *  the caret's own row included, so a toggle looks like a toggle while it
+ *  is edited (see `selectionEntersSpan` for the one exception). Clicking it
+ *  folds, exactly like the rendered one. */
 class ToggleMarkWidget extends WidgetType {
   constructor(readonly collapsed: boolean) {
     super();
@@ -8644,12 +12021,20 @@ class ToggleMarkWidget extends WidgetType {
   }
 }
 
-type VisualStructureKind = "quote" | "callout";
+type VisualStructureKind = "quote" | "callout" | "toggle";
 
 /** Stable inline space standing in for structural quote markers. Keeping
  * the gap as a widget (rather than merely making `>` transparent) prevents
  * the text column and caret geometry from changing when Live Preview swaps
- * a rendered block for editable lines. */
+ * a rendered block for editable lines.
+ *
+ * A "toggle" gap is a toggle row's whole prefix. Its levels split into
+ * quotes outside every box (`outerDepth`), Callout boxes around the toggle
+ * (`calloutDepth`), toggles (`toggleDepth`, each one content inset) and a
+ * plain quote inside the toggle (the rest). A header row passes the levels
+ * BEFORE its own marker: the triangle widget after it is that toggle's
+ * column. The width is written inline, so the text sits on the rendered
+ * toggle's column whatever the stylesheet says about Callout prefixes. */
 class VisualStructureGapWidget extends WidgetType {
   constructor(
     readonly kind: VisualStructureKind,
@@ -8667,7 +12052,9 @@ class VisualStructureGapWidget extends WidgetType {
      * quote nested inside it, which the box indents like the rendered one
      * does. Left unset, every extra level counts as outer — the shape this
      * widget saw before nesting inside a Callout was distinguished. */
-    readonly outerDepth: number | null = null
+    readonly outerDepth: number | null = null,
+    /** Toggle levels whose content inset this gap spends ("toggle" only). */
+    readonly toggleDepth = 0
   ) {
     super();
   }
@@ -8678,7 +12065,8 @@ class VisualStructureGapWidget extends WidgetType {
       other.depth === this.depth &&
       other.insideCode === this.insideCode &&
       other.calloutDepth === this.calloutDepth &&
-      other.outerDepth === this.outerDepth
+      other.outerDepth === this.outerDepth &&
+      other.toggleDepth === this.toggleDepth
     );
   }
 
@@ -8687,19 +12075,39 @@ class VisualStructureGapWidget extends WidgetType {
     el.className =
       `nf-visual-prefix nf-${this.kind}-prefix` +
       (this.insideCode ? " is-code" : "");
-    const depth = Math.max(1, this.depth);
+    const toggle = this.kind === "toggle";
+    // A toggle header at the top level stands for no level at all.
+    const depth = toggle ? Math.max(0, this.depth) : Math.max(1, this.depth);
     const callouts = Math.max(0, Math.min(depth, this.calloutDepth));
     const outer = Math.max(
       0,
       Math.min(depth - callouts, this.outerDepth ?? depth - callouts)
     );
+    const toggles = toggle
+      ? Math.max(0, Math.min(depth - callouts - outer, this.toggleDepth))
+      : 0;
     el.style.setProperty("--nf-prefix-depth", String(depth));
     el.style.setProperty("--nf-prefix-callout-depth", String(callouts));
     el.style.setProperty("--nf-prefix-outer-depth", String(outer));
     el.style.setProperty(
       "--nf-prefix-inner-depth",
-      String(Math.max(0, depth - callouts - outer))
+      String(Math.max(0, depth - callouts - outer - toggles))
     );
+    if (toggle) {
+      el.style.setProperty("--nf-prefix-toggle-depth", String(toggles));
+      // A quote level costs the shared quote inset, the same token the
+      // stylesheet spends on every other quote column (16px under the
+      // clean look), so the row does not jump when the caret enters.
+      el.style.width =
+        "calc(var(--nf-prefix-outer-depth,0) * var(--nf-quote-inset,0.7em)" +
+        " + var(--nf-prefix-callout-depth,0) * var(--nf-co-inset,39px)" +
+        " + var(--nf-prefix-toggle-depth,0) * var(--nf-toggle-content-inset,24px)" +
+        " + var(--nf-prefix-inner-depth,0) * var(--nf-co-quote-step,26px)" +
+        // A code row also clears the card's text padding, as a Callout's
+        // .nf-callout-prefix.is-code does.
+        (this.insideCode ? " + var(--nf-co-code-pad,16px)" : "") +
+        ")";
+    }
     el.setAttribute("aria-hidden", "true");
     return el;
   }
@@ -8707,13 +12115,17 @@ class VisualStructureGapWidget extends WidgetType {
 
 /** Notion-style Callout lead: the persisted `[!type]` token remains the
  * source of truth but is represented by its icon (and the default label
- * when the note has no custom title). */
-class VisualCalloutLeadWidget extends WidgetType {
+ * when the note has no custom title). `icon` is the header's own choice
+ * (calloutIconFromMetadata): a Lucide name, or "emoji" — then the title's
+ * first character is the icon and the lead draws none, so the emoji stays
+ * where the rendered Callout shows it. */
+export class VisualCalloutLeadWidget extends WidgetType {
   constructor(
     readonly type: string,
     readonly showDefaultTitle: boolean,
     readonly quoteDepth = 1,
-    readonly calloutDepth = 1
+    readonly calloutDepth = 1,
+    readonly icon: string | null = null
   ) {
     super();
   }
@@ -8723,7 +12135,8 @@ class VisualCalloutLeadWidget extends WidgetType {
       other.type === this.type &&
       other.showDefaultTitle === this.showDefaultTitle &&
       other.quoteDepth === this.quoteDepth &&
-      other.calloutDepth === this.calloutDepth
+      other.calloutDepth === this.calloutDepth &&
+      other.icon === this.icon
     );
   }
 
@@ -8731,7 +12144,8 @@ class VisualCalloutLeadWidget extends WidgetType {
     const el = view.dom.ownerDocument.createElement("span");
     el.className =
       "nf-visual-callout-lead" +
-      (this.showDefaultTitle ? " has-default-title" : "");
+      (this.showDefaultTitle ? " has-default-title" : "") +
+      (this.icon === "emoji" ? " is-emoji" : "");
     el.dataset.callout = this.type;
     const depth = Math.max(1, this.quoteDepth);
     const callouts = Math.max(1, Math.min(depth, this.calloutDepth));
@@ -8745,23 +12159,25 @@ class VisualCalloutLeadWidget extends WidgetType {
     );
     el.style.setProperty("--nf-prefix-inner-depth", "0");
 
-    const icon = el.createSpan({
-      cls: "callout-icon",
-      attr: {
-        role: "button",
-        // aria-label only. Obsidian renders it as a styled tooltip, so a
-        // matching `title` would stack the browser's native tooltip on top
-        // of Obsidian's and show the same words twice.
-        "aria-label": t("Change callout type"),
-      },
-    });
-    const entry = CALLOUT_TYPES.find((candidate) => candidate.type === this.type);
-    setIcon(icon, entry?.icon ?? "message-square");
+    if (this.icon !== "emoji") {
+      const icon = el.createSpan({
+        cls: "callout-icon",
+        attr: {
+          role: "button",
+          // aria-label only. Obsidian renders it as a styled tooltip, so a
+          // matching `title` would stack the browser's native tooltip on top
+          // of Obsidian's and show the same words twice.
+          "aria-label": t("Change callout type"),
+        },
+      });
+      const entry = CALLOUT_TYPES.find((candidate) => candidate.type === this.type);
+      setIcon(icon, this.icon ?? entry?.icon ?? "message-square");
+    }
 
     if (this.showDefaultTitle) {
       el.createSpan({
         cls: "nf-visual-callout-default-title",
-        text: t(entry?.label ?? this.type),
+        text: defaultCalloutTitle(this.type),
       });
     }
     return el;
@@ -8819,14 +12235,7 @@ class VisualCodeFenceWidget extends WidgetType {
       );
       if (!fence) return;
       const current = codeCaptionMeta(doc, fence);
-      setBlockCaptionMeta(
-        view,
-        "code",
-        fence.startLine,
-        current?.caption ?? "",
-        !this.collapsed,
-        true
-      );
+      codeFoldClick(view, fence.startLine, current?.caption ?? "", !this.collapsed);
     });
     const icon = el.createSpan({ cls: "nf-visual-code-icon" });
     setIcon(icon, "code-2");
@@ -8835,7 +12244,7 @@ class VisualCodeFenceWidget extends WidgetType {
     // control that changes it.
     const label = el.createEl("button", {
       cls: "nf-visual-code-language",
-      text: this.language || t("Code"),
+      text: languageLabel(this.language) || t("Code"),
       attr: { type: "button", "aria-label": t("Change language") },
     });
     label.addEventListener("mousedown", (evt) => {
@@ -8845,7 +12254,7 @@ class VisualCodeFenceWidget extends WidgetType {
     label.addEventListener("click", (evt) => {
       evt.preventDefault();
       evt.stopPropagation();
-      openCodeLanguageMenu(this.plugin, view, this.startLine, evt);
+      openCodeLanguageMenu(this.plugin, view, this.startLine);
     });
     // Reading view gets Obsidian's own copy button; Live Preview never did,
     // so the only way to lift code out of a note being edited was to select
@@ -8892,49 +12301,23 @@ function setFenceLanguage(view: EditorView, startLine: number, language: string)
   view.dispatch({ changes: plan, userEvent: "input.code-language" });
 }
 
-function openCodeLanguageMenu(
-  plugin: NotionFlowPlugin,
-  view: EditorView,
-  startLine: number,
-  evt: MouseEvent
-) {
+/** The chip's language picker: a searchable prompt that reads aliases (a
+ *  "js" fence has JavaScript checked, and picking it leaves "js" alone),
+ *  with "No language" and, for anything unlisted, "Other language…". */
+function openCodeLanguageMenu(plugin: NotionFlowPlugin, view: EditorView, startLine: number) {
   const current = fenceLanguageSpan(view.state.doc, startLine)?.language ?? "";
-  const known = CODE_LANGUAGES.some((entry) => entry.id === current.toLowerCase());
-  const menu = new Menu().setUseNativeMenu(false);
-  menu.addItem((item) =>
-    item
-      .setTitle(t("No language"))
-      .setChecked(!current)
-      .onClick(() => setFenceLanguage(view, startLine, ""))
+  openLanguagePicker(
+    plugin.app,
+    current,
+    (token) => setFenceLanguage(view, startLine, token),
+    () =>
+      new TextPromptModal(plugin.app, {
+        title: t("Code block language"),
+        placeholder: t("For example: kotlin"),
+        initial: current,
+        onSave: (value) => setFenceLanguage(view, startLine, value.trim()),
+      }).open()
   );
-  menu.addSeparator();
-  for (const entry of CODE_LANGUAGES) {
-    menu.addItem((item) =>
-      item
-        .setTitle(entry.label)
-        .setChecked(current.toLowerCase() === entry.id)
-        .onClick(() => setFenceLanguage(view, startLine, entry.id))
-    );
-  }
-  menu.addSeparator();
-  menu.addItem((item) =>
-    item
-      // A language already set but missing from the list is checked here,
-      // so the menu never shows a block as having no language when it has
-      // one it simply does not list.
-      .setTitle(t("Other language…"))
-      .setIcon("pencil")
-      .setChecked(!!current && !known)
-      .onClick(() =>
-        new TextPromptModal(plugin.app, {
-          title: t("Code block language"),
-          placeholder: t("For example: kotlin"),
-          initial: current,
-          onSave: (value) => setFenceLanguage(view, startLine, value.trim()),
-        }).open()
-      )
-  );
-  menu.showAtMouseEvent(evt);
 }
 
 class VisualCodeFenceEndWidget extends WidgetType {
@@ -8950,10 +12333,33 @@ class VisualCodeFenceEndWidget extends WidgetType {
   }
 }
 
-/** Clickable visual caption in place of its portable <small> source row. */
+/** How many characters into a rendered caption a click landed. The widget
+ * shows the caption's own text, so an offset inside its text node is the
+ * same offset in the document — as long as the source is not entity
+ * encoded, which the caller checks. */
+function captionClickOffset(node: HTMLElement, evt: MouseEvent): number {
+  // Typed structurally: `Range` in this file is CodeMirror's generic one.
+  const owner = node.ownerDocument as Document & {
+    caretRangeFromPoint?(
+      x: number,
+      y: number
+    ): { startContainer: Node; startOffset: number } | null;
+  };
+  const text = node.firstChild;
+  const range = owner.caretRangeFromPoint?.(evt.clientX, evt.clientY);
+  if (!range || !text || range.startContainer !== text) {
+    return node.textContent?.length ?? 0;
+  }
+  return range.startOffset;
+}
+
+/** A caption at rest: the row as the reader sees it. The caret is not on
+ * it, so nothing is being edited, and the whole row is one widget — which
+ * is also what keeps Obsidian's own inline-HTML embed off a row that is
+ * nothing but HTML. Clicking hands the row back to the editor with the
+ * caret where the click landed; from there the text is edited in place. */
 class VisualBlockCaptionWidget extends WidgetType {
   constructor(
-    readonly plugin: NotionFlowPlugin,
     readonly kind: BlockCaptionKind,
     readonly ownerLine: number,
     readonly caption: string,
@@ -8975,9 +12381,11 @@ class VisualBlockCaptionWidget extends WidgetType {
 
   toDOM(view: EditorView) {
     const el = view.dom.ownerDocument.createElement("span");
-    el.className = `nf-block-caption nf-${this.kind}-caption`;
-    if (this.kind === "code" && this.collapsed) {
-      el.classList.add("is-code-collapsed");
+    const folded = this.kind === "code" && this.collapsed;
+    el.className =
+      `nf-block-caption nf-${this.kind}-caption` +
+      (folded ? " is-code-collapsed" : "");
+    if (folded) {
       const fold = el.createEl("button", {
         cls: "nf-code-fold-toggle",
         attr: {
@@ -8994,41 +12402,84 @@ class VisualBlockCaptionWidget extends WidgetType {
       fold.addEventListener("click", (evt) => {
         evt.preventDefault();
         evt.stopPropagation();
-        setBlockCaptionMeta(
-          view,
-          "code",
-          this.ownerLine,
-          this.caption,
-          false,
-          true
-        );
+        codeFoldClick(view, this.ownerLine, this.caption, false);
       });
       const icon = el.createSpan({ cls: "nf-visual-code-icon" });
       setIcon(icon, "code-2");
       el.createSpan({
         cls: "nf-visual-code-language",
-        text: this.language || t("Code"),
+        text: languageLabel(this.language) || t("Code"),
       });
     }
     const text = el.createSpan({ cls: "nf-caption-text" });
-    text.setAttribute("role", "button");
-    text.setAttribute("tabindex", "0");
-    text.setAttribute("aria-label", t("Edit caption"));
     text.setAttribute("title", t("Edit caption"));
     text.textContent = this.caption || t("Add caption");
     if (!this.caption) text.classList.add("is-empty");
-    const open = (evt: Event) => {
-      evt.preventDefault();
-      evt.stopPropagation();
-      editBlockCaption(this.plugin, view, this.kind, this.ownerLine);
-    };
     text.addEventListener("mousedown", (evt) => {
       evt.preventDefault();
       evt.stopPropagation();
+      editBlockCaption(
+        view,
+        this.kind,
+        this.ownerLine,
+        this.caption ? captionClickOffset(text, evt) : 0
+      );
     });
-    text.addEventListener("click", open);
-    text.addEventListener("keydown", (evt) => {
-      if ((evt as KeyboardEvent).key === "Enter") open(evt);
+    return el;
+  }
+
+  ignoreEvent() {
+    return false;
+  }
+}
+
+/** The chrome a FOLDED code block shows on its caption row: the arrow that
+ * unfolds it, the code icon, and the language. It stands in for the row's
+ * opening tag, so the caption text right after it stays editable — the row
+ * is both the block's stand-in and its label. */
+class VisualCaptionLeadWidget extends WidgetType {
+  constructor(
+    readonly ownerLine: number,
+    readonly caption: string,
+    readonly language = ""
+  ) {
+    super();
+  }
+
+  eq(other: VisualCaptionLeadWidget) {
+    return (
+      other.ownerLine === this.ownerLine &&
+      other.caption === this.caption &&
+      other.language === this.language
+    );
+  }
+
+  toDOM(view: EditorView) {
+    const el = view.dom.ownerDocument.createElement("span");
+    el.className = "nf-caption-lead";
+    const fold = el.createEl("button", {
+      cls: "nf-code-fold-toggle",
+      attr: {
+        type: "button",
+        "aria-label": t("Expand code block"),
+        "aria-expanded": "false",
+      },
+    });
+    setIcon(fold, "chevron-right");
+    fold.addEventListener("mousedown", (evt) => {
+      evt.preventDefault();
+      evt.stopPropagation();
+    });
+    fold.addEventListener("click", (evt) => {
+      evt.preventDefault();
+      evt.stopPropagation();
+      codeFoldClick(view, this.ownerLine, this.caption, false);
+    });
+    const icon = el.createSpan({ cls: "nf-visual-code-icon" });
+    setIcon(icon, "code-2");
+    el.createSpan({
+      cls: "nf-visual-code-language",
+      text: languageLabel(this.language) || t("Code"),
     });
     return el;
   }
@@ -9103,32 +12554,9 @@ export function fenceVisualTokenRange(
   };
 }
 
-/**
- * The languages the code chip's menu offers, in the order it lists them.
- *
- * Deliberately a short list of common ones rather than every language
- * Prism can highlight: the menu is a shortcut, and anything missing is
- * still typable through "Other language…", which accepts any info string.
- */
-export const CODE_LANGUAGES: { id: string; label: string }[] = [
-  { id: "bash", label: "Bash" },
-  { id: "c", label: "C" },
-  { id: "cpp", label: "C++" },
-  { id: "csharp", label: "C#" },
-  { id: "css", label: "CSS" },
-  { id: "go", label: "Go" },
-  { id: "html", label: "HTML" },
-  { id: "java", label: "Java" },
-  { id: "javascript", label: "JavaScript" },
-  { id: "json", label: "JSON" },
-  { id: "markdown", label: "Markdown" },
-  { id: "mermaid", label: "Mermaid" },
-  { id: "python", label: "Python" },
-  { id: "rust", label: "Rust" },
-  { id: "sql", label: "SQL" },
-  { id: "typescript", label: "TypeScript" },
-  { id: "yaml", label: "YAML" },
-];
+/** The languages the code chip's picker lists (src/core/code-languages.ts),
+ *  kept under this name for the bundle's consumers. */
+export const CODE_LANGUAGES: { id: string; label: string }[] = CODE_LANGUAGE_LIST.map(({ id, label }) => ({ id, label }));
 
 /**
  * The language token on a fence's opening line: the FIRST word of the info
@@ -9230,8 +12658,19 @@ export function measureCalloutMetrics(
   // deliberately styled with different padding, so measuring one would
   // publish the wrong column for ordinary Callouts.
   const structural = new Set<string>([COLS_TYPE, COL_TYPE, TOGGLE_TYPE]);
+  // Only Obsidian's own top-level Callout widgets are probed: a `.callout`
+  // deeper in the tree belongs to an embed or a transclusion whose padding
+  // is not the column edit mode reproduces, and scoping the query keeps the
+  // measure phase from walking every rendered subtree. The unscoped query
+  // remains for editors whose widget wrapper differs (test doubles).
+  const root = view.contentDOM;
+  const rendered = root.querySelectorAll<HTMLElement>(
+    ":scope > .cm-embed-block.cm-callout .callout"
+  );
   const callouts = Array.from(
-    view.contentDOM.querySelectorAll<HTMLElement>(".callout")
+    rendered.length > 0
+      ? rendered
+      : root.querySelectorAll<HTMLElement>(".callout")
   ).filter(
     (el) =>
       !structural.has(el.dataset.callout ?? "") &&
@@ -9368,6 +12807,24 @@ export function measureCalloutMetrics(
   return learned ? next : null;
 }
 
+/** Two measurements that would publish the same column: every field lands
+ *  within half a pixel, which is below anything the CSS can show. */
+export function sameMetrics(
+  a: CalloutMetrics | null,
+  b: CalloutMetrics | null
+): boolean {
+  if (!a || !b) return a === b;
+  const keys: Array<keyof CalloutMetrics> = [
+    "contentInset",
+    "codeEnd",
+    "codePad",
+    "codeGap",
+    "topAir",
+    "bottomAir",
+  ];
+  return keys.every((key) => Math.abs(a[key] - b[key]) <= 0.5);
+}
+
 /** Publish the measured geometry as CSS variables the edit-mode rules read.
  *  Written on contentDOM so every row inherits one consistent column. */
 function applyCalloutMetrics(view: EditorView, metrics: CalloutMetrics) {
@@ -9387,20 +12844,256 @@ function applyCalloutMetrics(view: EditorView, metrics: CalloutMetrics) {
 /** Exported for tests: the decoration pass is the whole of what a block
  *  looks like while it is being edited, and the ranges it produces have to
  *  be checkable without an Obsidian window. */
+/** The concealed head of a Callout or toggle body row: from the line start
+ *  to the end of its "> " markers, where the row's text begins. A code row
+ *  of a fence nested in a list item or a quote has one too: its markers and
+ *  the item's indentation, up to fenceRowTextStart. */
+export interface HiddenPrefixZone {
+  from: number;
+  to: number;
+}
+
+/** A row drawn entirely as a widget — a code block's opener, shown as its
+ *  language chip — which a caret steps over: `before` is where a move back
+ *  lands (the end of the row above), `after` where a move forward lands
+ *  (the text start of the first code row). */
+export interface HiddenRowSkip {
+  from: number;
+  to: number;
+  before: number | null;
+  after: number | null;
+}
+
+/**
+ * Where the text of `fence`'s code row `text` begins: past its quote
+ * markers and the indentation that puts the block in a list item (the
+ * fence's own content column), but never into the code's own indentation.
+ * A caret left in front of a list item's column would, at the first
+ * keystroke, pull the row out of the item and cut the block in two.
+ */
+function fenceRowTextStart(text: string, fence: FenceRange): number {
+  const row = splitQuoteMarkers(text, fence.quoteDepth);
+  const column = splitQuoteMarkers(fence.bodyPrefix, fence.quoteDepth).rest.length;
+  const indent = row.rest.match(RE_LEADING_WS)?.[0].length ?? 0;
+  return row.prefix.length + Math.min(indent, column);
+}
+
+/** Where a caret carried forward over `fence`'s opener chip lands: the
+ *  text start of its first code row, or, for a block with no code rows,
+ *  the text start of the row after its closer. Null when there is none
+ *  (an empty block ending the document). */
+function codeOpenerAfter(doc: Text, fence: FenceRange): number | null {
+  const bodyRows = fence.closed
+    ? fence.endLine - fence.startLine - 1
+    : fence.endLine - fence.startLine;
+  if (bodyRows > 0) {
+    const next = doc.line(fence.startLine + 1);
+    return next.from + fenceRowTextStart(next.text, fence);
+  }
+  if (fence.endLine >= doc.lines) return null;
+  const next = doc.line(fence.endLine + 1);
+  return next.from + (quoteMarkerPrefix(next.text)?.length ?? 0);
+}
+
+/** Each editor state's hidden zones and skipped rows, for the selection
+ *  filter, which is handed states rather than views. Written by the
+ *  Callout edit plugin on every update, so a lookup by a transaction's
+ *  start state finds what that state was drawn with. */
+const hiddenPrefixZones = new WeakMap<
+  EditorState,
+  { zones: readonly HiddenPrefixZone[]; skips: readonly HiddenRowSkip[] }
+>();
+
+/**
+ * Carry every head that landed on a skipped row (a code block's opener
+ * chip) on past it, in the direction it was moving: forward to the first
+ * code row's text, back to the end of the row above. The opener's source
+ * sits behind the chip, so a caret resting there looks like it is before
+ * the code — and the first character typed goes in front of the ``` and
+ * turns the rest of the note into code. Null when no head moved.
+ *
+ * `placed`: the selection was set by code (Editor.setCursor after a slash
+ * snippet, a block operation parking the caret), not moved by a person.
+ * Such a placement has no direction to read — taking it for a move back
+ * would send a caret meant for the code to the row above, and the code
+ * typed next would land there — so a placed caret always goes forward into
+ * the block. A placed range is an operation's span and is left as it is.
+ *
+ * A forward range whose head stops exactly at the opener's line start
+ * (a triple-click on the row above, a drag or Shift+click to the row's
+ * left edge) ends at the line break before the opener and holds none of
+ * it: with its anchor at a line start it covers whole rows and stays as it
+ * is; from a mid-line anchor its head goes back to the end of the row
+ * above. Carried past the chip, a Backspace would take the ``` with it and
+ * turn the rest of the note into code. `doc` (the selection's document)
+ * enables that rule.
+ */
+export function stepOverHiddenRows(
+  before: EditorSelection,
+  after: EditorSelection,
+  skips: readonly HiddenRowSkip[],
+  placed = false,
+  doc?: Text
+): EditorSelection | null {
+  if (skips.length === 0) return null;
+  let moved = false;
+  const ranges = after.ranges.map((range, index) => {
+    if (placed && !range.empty) return range;
+    const skip = skips.find((row) => range.head >= row.from && range.head <= row.to);
+    if (!skip) return range;
+    if (doc && !range.empty && range.anchor < range.head && range.head === skip.from) {
+      if (doc.lineAt(range.anchor).from === range.anchor) return range;
+      if (skip.before != null) {
+        moved = true;
+        return EditorSelection.range(range.anchor, skip.before, range.goalColumn);
+      }
+    }
+    const old = (before.ranges[index] ?? before.main).head;
+    const back = !placed && range.head < old;
+    const target = back ? skip.before ?? skip.after : skip.after ?? skip.before;
+    if (target == null || target === range.head) return range;
+    moved = true;
+    return range.empty
+      ? EditorSelection.cursor(target, back ? -1 : 1, undefined, range.goalColumn)
+      : EditorSelection.range(range.anchor, target, range.goalColumn);
+  });
+  return moved ? EditorSelection.create(ranges, after.mainIndex) : null;
+}
+
+/**
+ * The Callout edit plugin's selection filter (exported for tests): keeps
+ * heads off the rows and markers the state was drawn without. A selection
+ * that comes with a doc change (typing, a snippet written with its caret)
+ * is left to the change. Only a "select" event (keys, pointer, search,
+ * undo) is a move with a direction; any other selection was placed by code
+ * (see `stepOverHiddenRows`).
+ */
+export function hiddenRowsSelectionFilter(
+  tr: Transaction
+): TransactionSpec | readonly TransactionSpec[] {
+  if (!tr.selection || tr.docChanged) return tr;
+  if (tr.isUserEvent("input.type.compose")) return tr;
+  const hidden = hiddenPrefixZones.get(tr.startState);
+  if (!hidden) return tr;
+  // No doc change: the start state's document is the selection's.
+  const doc = tr.startState.doc;
+  const stepped = stepOverHiddenRows(
+    tr.startState.selection,
+    tr.selection,
+    hidden.skips,
+    !tr.isUserEvent("select"),
+    doc
+  );
+  const selection = stepped ?? tr.selection;
+  const snapped = snapOutOfHiddenPrefix(selection, hidden.zones, doc);
+  const next = snapped ?? stepped;
+  return next ? [tr, { selection: next, sequential: true }] : tr;
+}
+
+/** The zone holding `pos` (from ≤ pos < to), or null. Zones are sorted
+ *  and one per row, so they never overlap. */
+function hiddenZoneAt(
+  zones: readonly HiddenPrefixZone[],
+  pos: number
+): HiddenPrefixZone | null {
+  let lo = 0;
+  let hi = zones.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const zone = zones[mid];
+    if (pos < zone.from) hi = mid - 1;
+    else if (pos >= zone.to) lo = mid + 1;
+    else return zone;
+  }
+  return null;
+}
+
+/**
+ * Keep the caret out of a Callout or toggle body row's hidden "> ".
+ *
+ * The markers are drawn as one gap, so every position in front of the
+ * text looks like the start of the text — but typing there lands before
+ * or between the markers ("x> ", ">x") and breaks the row out of its box.
+ * A head that falls into the zone (a click on the row's left edge, Home,
+ * a vertical move, ArrowRight from the row above) goes to the zone's end,
+ * where the text starts. Only heads move, so a range keeps its anchor.
+ * A forward range from a line start that ends at the zone's start (a
+ * triple-click on the row above, or a drag over whole rows) covers whole
+ * rows up to this row's line break, and is left as it is: pulled into the
+ * zone it would take this row's markers with it, and a Backspace would
+ * then drop the row out of its box. `doc` enables that rule. Null when no
+ * head needed moving.
+ */
+export function snapOutOfHiddenPrefix(
+  selection: EditorSelection,
+  zones: readonly HiddenPrefixZone[],
+  doc?: Text
+): EditorSelection | null {
+  if (zones.length === 0) return null;
+  let moved = false;
+  const ranges = selection.ranges.map((range) => {
+    const zone = hiddenZoneAt(zones, range.head);
+    if (!zone) return range;
+    if (
+      doc &&
+      !range.empty &&
+      range.anchor < range.head &&
+      range.head === zone.from &&
+      doc.lineAt(range.anchor).from === range.anchor
+    ) return range;
+    moved = true;
+    return range.empty
+      ? EditorSelection.cursor(zone.to, 1, range.bidiLevel ?? undefined, range.goalColumn)
+      : EditorSelection.range(range.anchor, zone.to, range.goalColumn);
+  });
+  return moved ? EditorSelection.create(ranges, selection.mainIndex) : null;
+}
+
+/**
+ * Where a leftward step from `head` goes when `head` is a body row's text
+ * start: the end of the row above, as it would from any other line start.
+ * The hidden markers in between are no stop — the snap would put the
+ * caret straight back, and the key would look dead. Null anywhere else.
+ */
+export function hiddenPrefixLeftTarget(
+  doc: Text,
+  head: number,
+  zones: readonly HiddenPrefixZone[]
+): number | null {
+  if (head <= 0) return null;
+  const zone = hiddenZoneAt(zones, head - 1);
+  if (!zone || zone.to !== head) return null;
+  const line = doc.lineAt(head);
+  if (line.number <= 1 || zone.from !== line.from) return null;
+  return doc.line(line.number - 1).to;
+}
+
 export function makeCalloutEditPlugin(plugin: NotionFlowPlugin) {
   return ViewPlugin.fromClass(
     class CalloutEditView {
       decorations: DecorationSet;
       /** Header replacements are structural atoms: arrows and pointer
        * placement must land on the visible title side, never inside the
-       * hidden `> [!type] ` source token. */
+       * hidden `> [!type] ` source token. Body rows' gap widgets join
+       * them, so a caret steps over a row's hidden "> " in one move. */
       hidden: DecorationSet = Decoration.none;
-      /** Last published geometry, so an unchanged remeasure writes nothing. */
+      /** Body rows' concealed heads (see `snapOutOfHiddenPrefix`). */
+      zones: readonly HiddenPrefixZone[] = [];
+      /** Code openers drawn as their chip (see `stepOverHiddenRows`). */
+      skips: readonly HiddenRowSkip[] = [];
+      /** Geometry last written to contentDOM's CSS variables. A remeasure
+       * that lands within 0.5px of it (sameMetrics) is dropped before the
+       * write, so a settled editor publishes nothing new. Null until a
+       * rendered Callout has been probed. */
       private metrics: CalloutMetrics | null = null;
-      private measuredWidth = -1;
 
       constructor(view: EditorView) {
-        this.decorations = this.build(view);
+        this.decorations = guard(
+          "callout editing",
+          () => Decoration.none,
+          () => this.build(view)
+        );
+        hiddenPrefixZones.set(view.state, { zones: this.zones, skips: this.skips });
         this.syncMetrics(view);
       }
 
@@ -9408,46 +13101,67 @@ export function makeCalloutEditPlugin(plugin: NotionFlowPlugin) {
         // The toggle triangle stands down on the row holding the caret,
         // so a plain cursor move has to rebuild too.
         if (update.docChanged || update.viewportChanged || update.selectionSet) {
-          this.decorations = this.build(update.view);
+          this.decorations = guard(
+            "callout editing",
+            () => this.decorations.map(update.changes),
+            () => this.build(update.view)
+          );
         }
+        hiddenPrefixZones.set(update.state, { zones: this.zones, skips: this.skips });
+        // When CodeMirror is about to rewrite contentDOM's style attribute
+        // (a tab-size change or new content attributes assign cssText),
+        // every published `--nf-co-*` variable goes with it. That rewrite
+        // happens after this update() runs, so the inline style cannot be
+        // checked here; the facet identities can, and dropping the shadow
+        // copy is what queues a re-publish. Facets keep identity while
+        // unchanged, so this is a cheap comparison and no DOM read.
+        const attrsRewritten =
+          update.state.tabSize !== update.startState.tabSize ||
+          update.state.facet(EditorView.contentAttributes) !==
+            update.startState.facet(EditorView.contentAttributes);
+        if (attrsRewritten) this.metrics = null;
         // A rendered Callout can appear or disappear on any of these, and
-        // the insets change when the pane resizes. Reading a few rects is
-        // cheap, but it is still gated below so a settled editor does no
-        // work per keystroke.
+        // the insets change when the pane resizes. A caret move alone
+        // cannot change the numbers a rendered Callout produces, so it
+        // schedules nothing: the measurement runs in CodeMirror's measure
+        // phase, never as a forced layout inside update().
         if (
           update.geometryChanged ||
           update.docChanged ||
           update.viewportChanged ||
-          update.selectionSet ||
           !this.metrics
         ) {
-          this.syncMetrics(
-            update.view,
-            update.geometryChanged ||
-              update.docChanged ||
-              update.viewportChanged ||
-              update.selectionSet
-          );
+          this.syncMetrics(update.view);
         }
       }
 
-      syncMetrics(view: EditorView, force = false) {
+      /** Probe a rendered Callout in the next measure phase. Keyed on the
+       * plugin so back-to-back requests coalesce into one read, and the
+       * write is skipped when the numbers already match what is published. */
+      syncMetrics(view: EditorView) {
         if (!plugin.settings.calloutEditing || !isLivePreviewEditor(view)) return;
-        const width = view.contentDOM.clientWidth;
-        // A settled editor at the same width needs no work. Document,
-        // viewport, selection and geometry changes force a new sample: they
-        // can reveal a better candidate Callout or change theme/font metrics
-        // without changing the pane width.
-        if (!force && width === this.measuredWidth && this.metrics) return;
-        const next = measureCalloutMetrics(view, this.metrics);
-        if (!next) return;
-        this.measuredWidth = width;
-        this.metrics = next;
-        applyCalloutMetrics(view, next);
+        view.requestMeasure<CalloutMetrics | null>({
+          key: this,
+          read: (v) => measureCalloutMetrics(v, this.metrics),
+          write: (next, v) => {
+            if (!next) return;
+            // The shadow copy alone cannot tell whether the variables are
+            // still on the element: compare against the live inline style
+            // too (reading the style attribute forces no layout), so a
+            // wiped contentDOM is republished even when the numbers match.
+            const published =
+              v.contentDOM.style.getPropertyValue("--nf-co-inset") !== "";
+            if (published && sameMetrics(next, this.metrics)) return;
+            this.metrics = next;
+            applyCalloutMetrics(v, next);
+          },
+        });
       }
 
       build(view: EditorView): DecorationSet {
         this.hidden = Decoration.none;
+        this.zones = [];
+        this.skips = [];
         if (
           (!plugin.settings.calloutEditing &&
             !plugin.settings.codeBlockEditing) ||
@@ -9460,15 +13174,6 @@ export function makeCalloutEditPlugin(plugin: NotionFlowPlugin) {
         const window = visualAnalysisWindow(doc, view.visibleRanges, fences);
         if (!window) return Decoration.none;
         const selections = selectionLineSpans(doc, view.state.selection.ranges);
-        // Only consulted for rows inside the window, so clamp it there:
-        // a select-all would otherwise allocate one entry per document
-        // line on every subsequent rebuild.
-        const caretLines = new Set<number>();
-        for (const span of selections) {
-          const first = Math.max(span.first, window.fromLine);
-          const last = Math.min(span.last, window.toLine);
-          for (let n = first; n <= last; n++) caretLines.add(n);
-        }
         // Rows holding a bare caret (no selected text). A sweep across the
         // block is deliberately excluded: revealing rows mid-drag would
         // reflow the very block being selected.
@@ -9507,10 +13212,34 @@ export function makeCalloutEditPlugin(plugin: NotionFlowPlugin) {
             );
           }
         );
-        const activeCalloutLines = new Set<number>();
-        for (const block of activeCallouts) {
+        // A Callout or toggle nested in a plain quote ("> quote" over
+        // "> > [!note]", or a quote that opens with "> > [!note]") gets no
+        // widget from Obsidian in Live Preview, at rest either. Its rows
+        // would show Obsidian's raw quote formatting until the caret
+        // arrived, and then everything would move; so such a block is drawn
+        // open whatever the caret does. A top-level Callout, and anything
+        // inside another Callout, is Obsidian's widget at rest.
+        const quotedCallouts = allCallouts.filter((block) => {
+          const text = doc.line(block.startLine).text;
+          const type = parseCalloutHeader(text)?.type;
+          return (
+            type !== COLS_TYPE &&
+            type !== COL_TYPE &&
+            quoteDepth(text) > 1 &&
+            !allCallouts.some(
+              (other) =>
+                other.startLine < block.startLine &&
+                other.endLine >= block.endLine
+            )
+          );
+        });
+        const openCallouts = activeCallouts.concat(
+          quotedCallouts.filter((block) => !activeCallouts.includes(block))
+        );
+        const openCalloutLines = new Set<number>();
+        for (const block of openCallouts) {
           for (let n = block.startLine; n <= block.endLine; n++) {
-            activeCalloutLines.add(n);
+            openCalloutLines.add(n);
           }
         }
         const typeOfCallout = (block: CalloutEditBlock) =>
@@ -9531,7 +13260,7 @@ export function makeCalloutEditPlugin(plugin: NotionFlowPlugin) {
         // Callout too. Paint those descendants even when the caret is not
         // inside the child itself, or the inner box collapses into raw rows.
         const visualCallouts = layeredCallouts.filter((candidate) =>
-          activeCallouts.some(
+          openCallouts.some(
             (active) =>
               candidate.startLine >= active.startLine &&
               candidate.endLine <= active.endLine
@@ -9590,7 +13319,7 @@ export function makeCalloutEditPlugin(plugin: NotionFlowPlugin) {
                       fence.startLine,
                       fence.endLine
                     ) ||
-                    activeCallouts.some(
+                    openCallouts.some(
                       (block) =>
                         fence.startLine >= block.startLine &&
                         fence.endLine <= block.endLine
@@ -9612,6 +13341,11 @@ export function makeCalloutEditPlugin(plugin: NotionFlowPlugin) {
         // manually interleaved by source position.
         const visualRanges: Range<Decoration>[] = [];
         const hiddenRanges: Range<Decoration>[] = [];
+        const zones: HiddenPrefixZone[] = [];
+        const skips: HiddenRowSkip[] = [];
+        /** Fence rows straight inside an open toggle → the Callout boxes
+         *  and toggles (that one included) their gap spends. */
+        const toggleCodeRows = new Map<number, { boxes: number; toggles: number }>();
         const builder = {
           add(from: number, to: number, decoration: Decoration) {
             visualRanges.push(decoration.range(from, to));
@@ -9676,10 +13410,40 @@ export function makeCalloutEditPlugin(plugin: NotionFlowPlugin) {
               typeOfCallout(block) === TOGGLE_TYPE;
             const blockIsVisual =
               isVisualCallout(block) && !blockIsToggle;
+            // An open toggle is not a box, but its rows still hide their
+            // "> ": the text has to stay on the rendered toggle's column.
+            // Its levels split into the Callout boxes and the toggles
+            // around it, which inset by different amounts.
+            const toggleIsVisual = blockIsToggle && isVisualCallout(block);
+            let parentBoxes = 0;
+            let parentToggles = 0;
+            for (const candidate of visualContainers) {
+              if (sameCallout(candidate, block)) continue;
+              if (
+                plugin.settings.toggleBlocks &&
+                typeOfCallout(candidate) === TOGGLE_TYPE
+              ) {
+                parentToggles++;
+              } else {
+                parentBoxes++;
+              }
+            }
+            // A Callout or toggle straight inside an open toggle: its
+            // parent layer is no box, and the toggle level insets by the
+            // toggle's content column, not a Callout's. The row says so
+            // (nf-co-parent-toggle plus the counts below) for the
+            // stylesheet to paint and place it.
+            const parentIsToggle =
+              !!parentBlock &&
+              isVisualCallout(block) &&
+              plugin.settings.toggleBlocks &&
+              typeOfCallout(parentBlock) === TOGGLE_TYPE;
 
             // Column scaffolding rows ("> [!nf-cols]", "> > [!nf-col]")
-            // are structure, not prose — fade them while editing.
-            const headType = parseCalloutHeader(line.text)?.type;
+            // are structure, not prose — fade them while editing. A
+            // "[!type]" row that does not open its quote is prose.
+            const header = calloutHeaderAt(doc, n);
+            const headType = header?.type;
             const meta = headType === COLS_TYPE || headType === COL_TYPE;
             const boundaryClasses =
               (n === block.startLine ? " nf-co-first" : "") +
@@ -9713,27 +13477,77 @@ export function makeCalloutEditPlugin(plugin: NotionFlowPlugin) {
               // token (no visual range to replace) has no widget, and
               // indenting it would pull its first row out of the box.
               (!headType || !!calloutHeaderVisualRange(line.text));
+            // A toggle row wraps at the toggle's content column (its header
+            // too: the triangle is one inset wide). The stylesheet owns the
+            // formula; the row says how many boxes and toggles hold it.
+            const toggleHang =
+              toggleIsVisual &&
+              !!prefix &&
+              !inFence &&
+              !visualFenceLines.has(n) &&
+              !quotedListMarker(line.text);
+            // A list row in an open Callout or toggle keeps its measured
+            // wrap (see above), but says what it is: its continuation
+            // belongs at the item's text column, after the bullet, which
+            // the stylesheet builds from the same prefix terms as a hang.
+            const qlist =
+              (blockIsVisual || toggleIsVisual) &&
+              !inFence &&
+              !visualFenceLines.has(n) &&
+              !!quotedListMarker(line.text);
+            // A fence straight inside an open toggle: its rows sit on the
+            // toggle's column too. The fence pass below sizes their gaps as
+            // toggle gaps; the row publishes the same counts for the card.
+            const toggleCode = toggleIsVisual && inFence;
+            if (toggleCode) {
+              toggleCodeRows.set(n, {
+                boxes: parentBoxes,
+                toggles: parentToggles + 1,
+              });
+            }
+            // Boxes around the block, and toggles around it (itself
+            // included when it is a toggle): one meaning on every row
+            // that carries them.
+            const toggleCounts = toggleHang || toggleCode || parentIsToggle;
             builder.add(
               line.from,
               line.from,
               Decoration.line({
                 attributes: {
-                  class: inFence
-                    ? "nf-co-code" + boundaryClasses
-                    : cls + (hang ? " nf-co-hang" : ""),
+                  class: (inFence
+                    ? "nf-co-code" + boundaryClasses +
+                      (toggleCode ? " nf-co-toggle-code" : "")
+                    : cls +
+                      (hang ? " nf-co-hang" : "") +
+                      (toggleHang ? " nf-co-hang nf-co-toggle-hang" : "") +
+                      (qlist ? " nf-co-qlist" : "")) +
+                    (parentIsToggle ? " nf-co-parent-toggle" : ""),
                   style:
-                    `--callout-color:var(${block.colorVar});` +
-                    `--nf-co-parent-color:var(${parentBlock?.colorVar ?? block.colorVar});` +
+                    `--callout-color:${calloutColorValue(block.colorVar)};` +
+                    `--nf-co-parent-color:${calloutColorValue(parentBlock?.colorVar ?? block.colorVar)};` +
+                    // The fill sources, on the row itself: styles.css resets
+                    // --nf-co-surface on .callout, so an ancestor would lose it.
+                    `--nf-co-surface:${calloutSurfaceValue(block.colorVar)};` +
+                    `--nf-co-parent-surface:${calloutSurfaceValue(parentBlock?.colorVar ?? block.colorVar)};` +
                     `--nf-co-depth:${calloutDepth};` +
+                    // The BOXES among those layers: every Callout around the
+                    // row, its own block included unless that is a toggle.
+                    // A rendered toggle has no box, so no air, end inset or
+                    // closing edge of its own; the stylesheet counts those in
+                    // boxes, never in depth.
+                    `--nf-co-boxes:${parentBoxes + (blockIsToggle ? 0 : 1)};` +
                     // Outer levels place the box; inner levels are placed by
                     // it. Only the first is a position for the box's layers.
                     `--nf-co-plain-depth:${plainQuoteDepth};` +
-                    `--nf-co-quote-depth:${levels.inner};`,
+                    `--nf-co-quote-depth:${levels.inner};` +
+                    (toggleCounts
+                      ? `--nf-co-toggle-boxes:${parentBoxes};` +
+                        `--nf-co-toggle-depth:${parentToggles + (blockIsToggle ? 1 : 0)};`
+                      : ""),
                 },
               })
             );
 
-            const header = parseCalloutHeader(line.text);
             if (blockIsVisual && prefix && !visualFenceLines.has(n)) {
               const leading =
                 line.text.match(RE_LEADING_WS)?.[0].length ?? 0;
@@ -9749,33 +13563,86 @@ export function makeCalloutEditPlugin(plugin: NotionFlowPlugin) {
                     header.type,
                     !hasCustomTitle,
                     rawQuoteDepth,
-                    calloutDepth
+                    calloutDepth,
+                    calloutIconFromMetadata(header.metadata)
                   ),
                 });
                 builder.add(tokenFrom, tokenTo, replacement);
                 hiddenRanges.push(replacement.range(tokenFrom, tokenTo));
               } else {
-                builder.add(
-                  line.from + leading,
-                  line.from + prefix.length,
-                  Decoration.replace({
-                    widget: new VisualStructureGapWidget(
-                      "callout",
-                      rawQuoteDepth,
-                      false,
-                      calloutDepth,
-                      levels.outer
-                    ),
-                  })
-                );
+                const gap = Decoration.replace({
+                  widget: new VisualStructureGapWidget(
+                    "callout",
+                    rawQuoteDepth,
+                    false,
+                    calloutDepth,
+                    levels.outer
+                  ),
+                });
+                builder.add(line.from + leading, line.from + prefix.length, gap);
+                // The row's "> " is one atom, and no caret rests inside it.
+                hiddenRanges.push(gap.range(line.from + leading, line.from + prefix.length));
+                zones.push({ from: line.from, to: line.from + prefix.length });
               }
             }
-            // The header's "[!nf-toggle]±" is scaffolding. Show the
-            // triangle it stands for instead — unless the caret is on that
-            // very row, where the source has to stay editable.
+            // A toggle row's "> " markers become the gap to its column, so
+            // entering the toggle shows no ">" and moves no text. On the
+            // header the gap ends at the "[!nf-toggle]±" token and spends
+            // only the levels before the toggle's own marker. Fence rows
+            // keep theirs, as a Callout's do.
+            const toggleHeader = blockIsToggle && n === block.startLine
+              ? parseToggleHeader(line.text)
+              : null;
+            // The header's "[!nf-toggle]±" is scaffolding: the triangle it
+            // stands for is drawn instead, on the caret's row too (a
+            // Callout header shows its lead the same way; the header key
+            // plans already treat the token as hidden). Only a caret or a
+            // selection end inside the token itself brings the source back.
+            const toggleMarked =
+              !!toggleHeader &&
+              !selectionEntersSpan(
+                view.state.selection.ranges,
+                line.from + toggleHeader.tokenFrom,
+                line.from + toggleHeader.tokenTo
+              );
+            if (toggleIsVisual && prefix && !visualFenceLines.has(n)) {
+              const leading =
+                line.text.match(RE_LEADING_WS)?.[0].length ?? 0;
+              const head = n === block.startLine;
+              const to = head
+                ? Math.max(prefix.length, toggleHeader?.tokenFrom ?? 0)
+                : prefix.length;
+              if (to > leading) {
+                const gap = Decoration.replace({
+                  widget: new VisualStructureGapWidget(
+                    "toggle",
+                    head ? rawQuoteDepth - 1 : rawQuoteDepth,
+                    false,
+                    parentBoxes,
+                    levels.outer,
+                    head ? parentToggles : parentToggles + 1
+                  ),
+                });
+                builder.add(line.from + leading, line.from + to, gap);
+                if (!head) {
+                  hiddenRanges.push(gap.range(line.from + leading, line.from + to));
+                  zones.push({ from: line.from, to: line.from + to });
+                }
+              }
+              // A marked header's gap and triangle are one atom, and its
+              // zone ends at the title, as a body row's ends at its text:
+              // ArrowLeft from the title goes on to the row above, and a
+              // click or vertical move into the markers lands on the title.
+              if (head && toggleHeader && toggleMarked) {
+                const tokenTo = line.from + toggleHeader.tokenTo;
+                hiddenRanges.push(
+                  Decoration.replace({}).range(line.from + leading, tokenTo)
+                );
+                zones.push({ from: line.from, to: tokenTo });
+              }
+            }
             if (!blockIsToggle || n !== block.startLine) continue;
-            const toggleHeader = parseToggleHeader(line.text);
-            if (!toggleHeader || caretLines.has(n)) continue;
+            if (!toggleHeader || !toggleMarked) continue;
             builder.add(
               line.from + toggleHeader.tokenFrom,
               line.from + toggleHeader.tokenTo,
@@ -9790,29 +13657,25 @@ export function makeCalloutEditPlugin(plugin: NotionFlowPlugin) {
         // Callouts are excluded unless active (handled above), avoiding any
         // overlap with Obsidian's rendered embed replacement.
         if (plugin.settings.calloutEditing) {
-          for (const range of view.visibleRanges) {
-            let pos = range.from;
-            while (pos <= range.to) {
-              const line = doc.lineAt(pos);
-              pos = line.to + 1;
-              if (
-                fenceAt(fences, line.number) ||
-                calloutLines.has(line.number)
-              ) continue;
-              const prefix = quoteMarkerPrefix(line.text);
-              if (!prefix) continue;
-              const leading = line.text.match(RE_LEADING_WS)?.[0].length ?? 0;
-              builder.add(
-                line.from + leading,
-                line.from + prefix.length,
-                Decoration.replace({
-                  widget: new VisualStructureGapWidget(
-                    "quote",
-                    quotePrefixDepth(prefix)
-                  ),
-                })
-              );
-            }
+          for (const n of visibleLineNumbers(doc, view.visibleRanges)) {
+            const line = doc.line(n);
+            if (
+              fenceAt(fences, line.number) ||
+              calloutLines.has(line.number)
+            ) continue;
+            const prefix = quoteMarkerPrefix(line.text);
+            if (!prefix) continue;
+            const leading = line.text.match(RE_LEADING_WS)?.[0].length ?? 0;
+            builder.add(
+              line.from + leading,
+              line.from + prefix.length,
+              Decoration.replace({
+                widget: new VisualStructureGapWidget(
+                  "quote",
+                  quotePrefixDepth(prefix)
+                ),
+              })
+            );
           }
         }
 
@@ -9820,60 +13683,50 @@ export function makeCalloutEditPlugin(plugin: NotionFlowPlugin) {
         // Markdown, but Live Preview presents it as a direct, clickable
         // caption. An inactive rendered Callout owns its inner DOM, so its
         // postprocessor handles those captions until the Callout is opened.
-        for (const range of view.visibleRanges) {
-          let pos = range.from;
-          while (pos <= range.to) {
-            const line = doc.lineAt(pos);
-            pos = line.to + 1;
-            const meta = parseBlockCaption(line.text);
-            if (!meta) continue;
-            if (
-              calloutLines.has(line.number) &&
-              !activeCalloutLines.has(line.number)
-            ) continue;
-            const previousLine = line.number - 1;
-            let ownerLine: number | null = null;
-            let language = "";
-            if (meta.kind === "code" && previousLine >= 1) {
-              const fence = fenceAt(fences, previousLine);
-              if (fence?.closed && fence.endLine === previousLine) {
-                ownerLine = fence.startLine;
-                language =
-                  fenceVisualTokenRange(doc, fence, false)?.language ?? "";
-              }
-            } else if (meta.kind === "table" && previousLine >= 1) {
-              // The owner is the table's FIRST row: that is what the caption
-              // editor and the block menu address it by.
-              const table = isTableRow(doc.line(previousLine).text)
-                ? getTableRange(doc, previousLine, fences)
-                : null;
-              if (table?.endLine === previousLine) ownerLine = table.startLine;
-            } else if (meta.kind === "image" && previousLine >= 1) {
-              const previousText = doc.line(previousLine).text;
-              const prefix = quoteMarkerPrefix(previousText) ?? "";
-              if (isImageBlockLine(previousText.slice(prefix.length))) {
-                ownerLine = previousLine;
-              }
-            }
-            if (ownerLine == null) continue;
-            builder.add(
-              line.from,
-              line.from,
-              Decoration.line({
-                // The kind rides on the line so the caption can adopt its
-                // owner's text column: a code card insets its text, an
-                // image starts at the content edge.
-                attributes: {
-                  class: `nf-caption-line nf-caption-line-${meta.kind}`,
-                },
-              })
-            );
+        for (const n of visibleLineNumbers(doc, view.visibleRanges)) {
+          const line = doc.line(n);
+          const meta = ownedBlockCaption(doc, line.number, fences);
+          if (!meta) continue;
+          if (
+            calloutLines.has(line.number) &&
+            !openCalloutLines.has(line.number)
+          ) continue;
+          const ownerLine = meta.ownerLine;
+          const ownerFence = meta.kind === "code" ? fenceAt(fences, ownerLine) : null;
+          const language = ownerFence
+            ? fenceVisualTokenRange(doc, ownerFence, false)?.language ?? "" : "";
+          builder.add(
+            line.from,
+            line.from,
+            Decoration.line({
+              // The kind rides on the line so the caption can adopt its
+              // owner's text column: a code card insets its text, an
+              // image starts at the content edge.
+              attributes: {
+                class:
+                  `nf-caption-line nf-caption-line-${meta.kind}` +
+                  (selectionTouchesLines(selections, line.number, line.number)
+                    ? " is-caption-editing" : "") +
+                  (meta.bodyTo === meta.bodyFrom ? " is-empty" : "") +
+                  (meta.kind === "code" && meta.collapsed
+                    ? " nf-caption-line-collapsed"
+                    : ""),
+              },
+            })
+          );
+          const bodyFrom = line.from + meta.bodyFrom;
+          const bodyTo = line.from + meta.bodyTo;
+          if (!selectionTouchesLines(selections, line.number, line.number)) {
+            // Caret away: one widget for the whole row. Not only because a
+            // caption should read as a caption — Obsidian renders a row
+            // that is nothing but HTML through its own inline embed, and
+            // that embed is atomic, so a click on the caption would select
+            // the entire row and the next keystroke would replace it.
             builder.add(
               line.from + meta.prefix.length,
               line.to,
               Decoration.replace({
                 widget: new VisualBlockCaptionWidget(
-                  plugin,
                   meta.kind,
                   ownerLine,
                   meta.caption,
@@ -9882,8 +13735,69 @@ export function makeCalloutEditPlugin(plugin: NotionFlowPlugin) {
                 ),
               })
             );
+            continue;
           }
+          // Caret on the row: the caption text is ordinary document text
+          // and is edited in place — a caption is one line of prose, and a
+          // dialog to change it is heavier than the thing it edits. Only
+          // the two tags are replaced, and both are atomic, so the caret
+          // reaches every position in the text and none outside it: a
+          // keystroke can never land past `</small>` and unmake the row.
+          const lead = Decoration.replace(
+            // A folded code block is represented by this row alone, so the
+            // chrome that stands for the block takes the opening tag's
+            // place. Everywhere else the tag simply goes.
+            meta.kind === "code" && meta.collapsed
+              ? {
+                  widget: new VisualCaptionLeadWidget(
+                    ownerLine,
+                    meta.caption,
+                    language
+                  ),
+                }
+              : {}
+          );
+          builder.add(line.from + meta.prefix.length, bodyFrom, lead);
+          hiddenRanges.push(lead.range(line.from + meta.prefix.length, bodyFrom));
+          if (bodyTo > bodyFrom) {
+            builder.add(
+              bodyFrom,
+              bodyTo,
+              Decoration.mark({ class: "nf-caption-text" })
+            );
+          }
+          const tail = Decoration.replace({});
+          builder.add(bodyTo, line.to, tail);
+          hiddenRanges.push(tail.range(bodyTo, line.to));
         }
+
+        // The gap standing in for a fence row's quote markers. Inside an
+        // open toggle it is a toggle gap: the toggle level costs the
+        // toggle's content inset, not a 39px Callout box, so the code does
+        // not jump when the caret enters.
+        const fenceGap = (
+          n: number,
+          prefix: string,
+          insideCode: boolean
+        ) => {
+          const toggle = toggleCodeRows.get(n);
+          return toggle
+            ? new VisualStructureGapWidget(
+                "toggle",
+                quotePrefixDepth(prefix),
+                insideCode,
+                toggle.boxes,
+                outerQuoteDepthAt(n),
+                toggle.toggles
+              )
+            : new VisualStructureGapWidget(
+                openCalloutLines.has(n) ? "callout" : "quote",
+                quotePrefixDepth(prefix),
+                insideCode,
+                visualCalloutDepthAt(n),
+                outerQuoteDepthAt(n)
+              );
+        };
 
         // Every visible fenced block uses one stable header and collapsed
         // footer. Code text stays in CodeMirror, preserving highlighting,
@@ -9933,6 +13847,16 @@ export function makeCalloutEditPlugin(plugin: NotionFlowPlugin) {
                 ),
               })
             );
+            // The chip is the whole row: no caret rests in front of it.
+            if (!hideBody) {
+              const opener = doc.line(fence.startLine);
+              skips.push({
+                from: opener.from,
+                to: opener.to,
+                before: fence.startLine > 1 ? doc.line(fence.startLine - 1).to : null,
+                after: codeOpenerAfter(doc, fence),
+              });
+            }
           }
           if (hideBody) {
             for (let n = fence.startLine + 1; n <= fence.endLine; n++) {
@@ -9984,13 +13908,7 @@ export function makeCalloutEditPlugin(plugin: NotionFlowPlugin) {
                   line.from + leading,
                   line.from + prefix.length,
                   Decoration.replace({
-                    widget: new VisualStructureGapWidget(
-                      activeCalloutLines.has(fence.startLine) ? "callout" : "quote",
-                      quotePrefixDepth(prefix),
-                      false,
-                      visualCalloutDepthAt(fence.startLine),
-                      outerQuoteDepthAt(fence.startLine)
-                    ),
+                    widget: fenceGap(fence.startLine, prefix, false),
                   })
                 );
               }
@@ -10009,32 +13927,79 @@ export function makeCalloutEditPlugin(plugin: NotionFlowPlugin) {
                 line.from + leading,
                 line.from + prefix.length,
                 Decoration.replace({
-                  widget: new VisualStructureGapWidget(
-                    activeCalloutLines.has(n)
-                      ? "callout"
-                      : "quote",
-                    quotePrefixDepth(prefix),
-                    // Inside an open Callout these are code rows, so the gap
-                    // also has to cover the card's text padding.
-                    activeCalloutLines.has(n),
-                    visualCalloutDepthAt(n),
-                    outerQuoteDepthAt(n)
-                  ),
+                  // Inside an open Callout these are code rows, so the gap
+                  // also has to cover the card's text padding.
+                  widget: fenceGap(n, prefix, openCalloutLines.has(n)),
                 })
               );
             }
           }
+          // A code row of a fence inside a list item or a quote begins at
+          // that container's column (fenceRowTextStart), and no caret may
+          // rest in front of it. Obsidian's own vertical move steps over
+          // the opener chip by itself — the chip skip never sees it — and
+          // lands on the row below at column 0; a click on the card's left
+          // edge lands there too. The first keystroke would then pull the
+          // row out of the item and cut the block in two. As a zone, the
+          // indentation snaps a head to the text, and ArrowLeft from the
+          // text goes on to the row above. The closer counts too: a caret
+          // on it reveals its "```", and it must reveal it in the item.
+          for (let n = fence.startLine + 1; n <= fence.endLine; n++) {
+            const line = doc.line(n);
+            const start = fenceRowTextStart(line.text, fence);
+            if (start > 0) zones.push({ from: line.from, to: line.from + start });
+          }
         }
         this.hidden = Decoration.set(hiddenRanges, true);
+        this.zones = zones.sort((a, b) => a.from - b.from);
+        this.skips = skips;
         return Decoration.set(visualRanges, true);
       }
     },
     {
       decorations: (v) => v.decorations,
-      provide: (extension) =>
-        EditorView.atomicRanges.of(
-          (view) => view.plugin(extension)?.hidden ?? Decoration.none
-        ),
+      provide: (extension) => {
+        // ArrowLeft (Shift extends; word-left too) from a body row's text
+        // start goes on to the row above: see hiddenPrefixLeftTarget.
+        const leftOverPrefix = (view: EditorView, extend: boolean) => {
+          if (view.composing || view.state.selection.ranges.length !== 1) return false;
+          const range = view.state.selection.main;
+          if (!extend && !range.empty) return false;
+          const zones = view.plugin(extension)?.zones;
+          if (!zones || zones.length === 0) return false;
+          const target = hiddenPrefixLeftTarget(view.state.doc, range.head, zones);
+          if (target == null) return false;
+          view.dispatch({
+            selection: extend
+              ? EditorSelection.range(range.anchor, target)
+              : EditorSelection.cursor(target),
+            scrollIntoView: true,
+            userEvent: "select",
+          });
+          return true;
+        };
+        return [
+          EditorView.atomicRanges.of(
+            (view) => view.plugin(extension)?.hidden ?? Decoration.none
+          ),
+          EditorState.transactionFilter.of(hiddenRowsSelectionFilter),
+          Prec.highest(
+            keymap.of([
+              {
+                key: "ArrowLeft",
+                run: (view) => leftOverPrefix(view, false),
+                shift: (view) => leftOverPrefix(view, true),
+              },
+              {
+                key: "Ctrl-ArrowLeft",
+                mac: "Alt-ArrowLeft",
+                run: (view) => leftOverPrefix(view, false),
+                shift: (view) => leftOverPrefix(view, true),
+              },
+            ])
+          ),
+        ];
+      },
     }
   );
 }
@@ -10140,10 +14105,13 @@ function sourceTextRows(
  * Where an empty block goes when it is inserted ABOVE `block`.
  *
  * The new row carries the container's markers and the block's own indent,
- * so it opens at the same column inside the same Callout or list. It needs
- * no separator of its own: an empty row IS the seam, which is the whole
- * reason this reaches a Callout's first block or a note's first line —
- * the two places Live Preview leaves no room to type.
+ * so it opens at the same column inside the same Callout or list — which is
+ * how this reaches a Callout's first block or a note's first line, the two
+ * places Live Preview leaves no room to type. Below the new row goes the
+ * seam its text will need once written (item 9's "style" seam): a blank row
+ * at the top level, a bare marker row inside a Callout or quote, and
+ * nothing above a list item, whose neighbour is the next item. Without it
+ * the words typed there would join the block below as one paragraph.
  */
 export function blockInsertAbovePlan(
   doc: Text,
@@ -10162,16 +14130,102 @@ export function blockInsertAbovePlan(
     ? firstText.match(RE_LEADING_WS)?.[0] ?? ""
     : "";
   const prefix = containerIndent + quotePrefix + " ".repeat(indentWidth(content));
-  return { from, insert: prefix + "\n", caret: from + prefix.length };
+  // The seam is asked about a stand-in paragraph: the new row is empty now,
+  // and an empty row needs no seam, but it will not stay empty.
+  const seam = RE_LIST.test(content)
+    ? null
+    : seamRowBetween(prefix + "x", firstText, containerIndent + quotePrefix, "style");
+  const insert = prefix + "\n" + (seam == null ? "" : seam + "\n");
+  return { from, insert, caret: from + prefix.length };
 }
 
-/** Insert a correctly-indented empty block above `block`, caret in it. */
+/**
+ * A bare list marker row — "- ", "1. ", "- [ ] ", inside quotes too — with
+ * no text of its own: its leading whitespace and its container's quote
+ * markers. Null for any other row.
+ */
+export function bareListMarkerRow(
+  lineText: string
+): { indent: string; containerPrefix: string } | null {
+  const containerPrefix = quoteMarkerPrefix(lineText) ?? "";
+  const m = lineText
+    .slice(containerPrefix.length)
+    .match(/^(\s*)([-*+]|\d+[.)])( \[.\])?\s*$/);
+  return m ? { indent: m[1], containerPrefix } : null;
+}
+
+/**
+ * The + beside a list item adds the next item of that list, not a block
+ * nested in it: a new row right after the item (no blank row, which would
+ * make the list loose) carrying the item's own marker — the same bullet,
+ * the next number with the same delimiter, an empty box for a to-do —
+ * inside the same container. Null when `block` does not open with a list
+ * item.
+ */
+export function listSiblingInsert(
+  doc: Text,
+  block: BlockRange
+): { from: number; insert: string; caret: number } | null {
+  const firstText = doc.line(block.startLine).text;
+  if (parseCalloutHeader(firstText)) return null;
+  const quotePrefix = block.quotePrefix ?? "";
+  const content = firstText.slice(
+    quotePrefix ? quoteMarkerPrefix(firstText)?.length ?? 0 : 0
+  );
+  if (listContentIndent(content) == null) return null;
+  const m = content.match(/^([ \t]*)([-*+]|(\d+)([.)]))[ \t]+(\[.\](?:[ \t]|$))?/);
+  if (!m) return null;
+  const marker =
+    (m[3] != null ? `${Number(m[3]) + 1}${m[4]} ` : `${m[2]} `) + (m[5] ? "[ ] " : "");
+  const containerIndent = quotePrefix
+    ? firstText.match(RE_LEADING_WS)?.[0] ?? ""
+    : "";
+  const from = doc.line(block.endLine).to;
+  const insert = "\n" + containerIndent + quotePrefix + m[1] + marker;
+  return { from, insert, caret: from + insert.length };
+}
+
+/**
+ * The + (or ⌘⌥⇧=, or the block menu's "above") on a list item adds the
+ * item BEFORE it in the same list, the mirror of listSiblingInsert: a row
+ * at the item's line start carrying its own marker — the same bullet, the
+ * item's own number and delimiter (renumbering is Obsidian's), an empty box
+ * for a to-do — inside the same container, with the caret after it. A bare
+ * row there would be a lazy continuation of the item above: the words typed
+ * into it would join that item's paragraph. Null when `block` does not open
+ * with a list item, or opens a Callout.
+ */
+export function listSiblingAboveInsert(
+  doc: Text,
+  block: BlockRange
+): { from: number; insert: string; caret: number } | null {
+  const firstText = doc.line(block.startLine).text;
+  if (parseCalloutHeader(firstText)) return null;
+  const quotePrefix = block.quotePrefix ?? "";
+  const content = firstText.slice(
+    quotePrefix ? quoteMarkerPrefix(firstText)?.length ?? 0 : 0
+  );
+  if (listContentIndent(content) == null) return null;
+  const m = content.match(/^([ \t]*)([-*+]|(\d+)([.)]))[ \t]+(\[.\](?:[ \t]|$))?/);
+  if (!m) return null;
+  const marker = (m[3] != null ? `${m[3]}${m[4]} ` : `${m[2]} `) + (m[5] ? "[ ] " : "");
+  const containerIndent = quotePrefix
+    ? firstText.match(RE_LEADING_WS)?.[0] ?? ""
+    : "";
+  const from = doc.line(block.startLine).from;
+  const row = containerIndent + quotePrefix + m[1] + marker;
+  return { from, insert: row + "\n", caret: from + row.length };
+}
+
+/** Insert a correctly-indented empty block above `block`, caret in it: the
+ *  item before it for a list item, else an empty row with its seam. */
 export function insertBlockAbove(
   view: EditorView,
   block: BlockRange,
   openSlashMenu: boolean
 ): void {
-  const plan = blockInsertAbovePlan(view.state.doc, block);
+  const plan =
+    listSiblingAboveInsert(view.state.doc, block) ?? blockInsertAbovePlan(view.state.doc, block);
   view.dispatch({
     changes: { from: plan.from, insert: plan.insert },
     selection: { anchor: plan.caret },
@@ -10188,6 +14242,17 @@ export function insertBlockBelow(
   openSlashMenu: boolean
 ): void {
   const doc = view.state.doc;
+  const sibling = listSiblingInsert(doc, block);
+  if (sibling) {
+    view.dispatch({
+      changes: { from: sibling.from, insert: sibling.insert },
+      selection: { anchor: sibling.caret },
+      userEvent: "input",
+    });
+    view.focus();
+    if (openSlashMenu) openSlashSuggest(view);
+    return;
+  }
   const end = doc.line(block.endLine).to;
   const firstText = doc.line(block.startLine).text;
   const quotePrefix = block.quotePrefix ?? "";
@@ -10241,6 +14306,29 @@ function openSlashSuggest(view: EditorView): void {
   }, 0);
 }
 
+/**
+ * A block selection whose text caret sits OUTSIDE the selected blocks:
+ * after leaving a column (Esc / Done) the caret waits on the line below the
+ * row, and after landing a widget block (a columns row, a Callout) it is
+ * parked beside it. The screen must then say one thing — the block is
+ * selected — so the caret and the empty-line hint stand down while this
+ * holds: Backspace, Delete, ⌘X, ⌘V and Tab visibly act on the selected
+ * block, and text typed or composed still lands on the waiting line.
+ *
+ * Set only by an explicit effect; the next edit or caret move (the writer
+ * typing there, a click, an arrow) ends it, as Escape does.
+ */
+export const blockCaretAwayEffect = StateEffect.define<boolean>();
+export const blockCaretAwayField = StateField.define<boolean>({
+  create: () => false,
+  update: (value, tr) => {
+    for (const effect of tr.effects) {
+      if (effect.is(blockCaretAwayEffect)) return effect.value;
+    }
+    return value && (tr.docChanged || tr.selection) ? false : value;
+  },
+});
+
 /** Keys that move the text caret rather than act on selected blocks. */
 const CARET_KEYS = new Set([
   "ArrowUp",
@@ -10253,7 +14341,49 @@ const CARET_KEYS = new Set([
   "PageDown",
 ]);
 
-function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
+/**
+ * The editor binding behind "Escape selects the caret's block", at the
+ * lowest precedence: CodeMirror runs every Escape binding in precedence
+ * order until one returns true, so an editable embed's Escape (leave the
+ * hover preview's editor), Obsidian's image-edit Escape and every other
+ * binding that owns the key run first; Obsidian's markdown binding returns
+ * false and lets it through. `of` builds the keymap (tests pass
+ * CodeMirror's real one).
+ */
+export function caretBlockEscapeKeymap(
+  run: (view: EditorView) => boolean,
+  of: (bindings: readonly KeyBinding[]) => Extension = (bindings) => keymap.of(bindings)
+): Extension {
+  return Prec.lowest(of([{ key: "Escape", run }]));
+}
+
+/** A modifier pressed on its own: not yet a key aimed at the blocks. */
+const MODIFIER_KEYS = new Set(["Shift", "Meta", "Control", "Alt", "AltGraph", "CapsLock", "Fn"]);
+
+/**
+ * Join the vertical spans of consecutive selected blocks into one span per
+ * contiguous run. Two neighbours join when the gap between them is at most
+ * 4 px or when only blank rows separate their blocks (`blankBetween[i]`
+ * describes the gap after `rects[i]`): blank seam rows are not blocks, so
+ * without the second rule two selected paragraphs would never touch.
+ */
+export function mergeSelectionRects(
+  rects: ReadonlyArray<{ top: number; bottom: number }>,
+  blankBetween: readonly boolean[]
+): Array<{ top: number; bottom: number }> {
+  const groups: Array<{ top: number; bottom: number }> = [];
+  rects.forEach((rect, i) => {
+    const last = groups[groups.length - 1];
+    if (last && (rect.top - last.bottom <= 4 || blankBetween[i - 1] === true)) {
+      last.bottom = Math.max(last.bottom, rect.bottom);
+    } else {
+      groups.push({ top: rect.top, bottom: rect.bottom });
+    }
+  });
+  return groups;
+}
+
+export function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
   return ViewPlugin.fromClass(
     class DragHandleView {
       view: EditorView;
@@ -10271,7 +14401,12 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
       selectionLayer: HTMLElement;
       selectionToolbar: HTMLElement;
       selectionCount: HTMLElement;
+      /** "More" on the selection toolbar: the block menu, shown for a
+       *  single selected block only. */
+      selectionMore: HTMLElement;
+      selectionLink: HTMLElement;
       selectedBlocks: BlockRange[] = [];
+      clipboard: BlockClipboard;
       /** The row a keyboard extension grows FROM: the marquee's start row,
        *  or the block Escape selected. Null when nothing is selected. */
       selectionAnchorLine: number | null = null;
@@ -10294,7 +14429,49 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
       activeLeafChangeRef: EventRef | null = null;
       focusCleanupTimer: number | null = null;
       hoverBlock: BlockRange | null = null;
-      pendingDrag: { x: number; y: number; block: BlockRange } | null = null;
+      /** The real block under the pointer, even while `hoverBlock` is the
+       *  span of a block selection the pointer is inside. */
+      hoverInnerBlock: BlockRange | null = null;
+      pendingDrag: {
+        x: number;
+        y: number;
+        block: BlockRange;
+        /** The block a handle click (no drag) opens the menu for. */
+        clickBlock: BlockRange;
+        /** The handle's box at mousedown: the menu opens beside it, and by
+         *  mouseup the controls may already be hidden. */
+        handle: { left: number; top: number } | null;
+      } | null = null;
+      /** The block whose menu is open. It stays highlighted until the menu
+       *  closes, so the menu's target stays visible while the pointer is
+       *  away over the menu. */
+      menuBlock: BlockRange | null = null;
+      menuHighlightFrame: number | null = null;
+      /** A landed selection (drop, menu move, Duplicate) is quiet: marks
+       *  and the landing flash, but no selection toolbar over the text
+       *  until the pointer comes onto the blocks or a block-mode key is
+       *  pressed. Kept as state, because scrolls re-render the marks. */
+      quietSelection = false;
+      /** The pointer when the selection went quiet, and whether it has
+       *  been outside the marks since: a pointer resting where the block
+       *  was dropped (or a synthetic move after the re-layout) is not a
+       *  hover onto the landed block. */
+      quietFrom: { x: number; y: number } | null = null;
+      quietArmed = false;
+      /** The newest pointer position seen by the editor. */
+      pointer: { x: number; y: number } | null = null;
+      /** The hover pointer while it is over the editor (cleared when it
+       *  leaves), with the document it last moved over: a settled scroll
+       *  re-runs the hover there (rehoverAfterScroll). */
+      lastPointer: { x: number; y: number; doc: Text } | null = null;
+      scrollSettleTimer: number | null = null;
+      /** The blocks travelling together when a block selection is dragged. */
+      dragSpanBlocks: BlockRange[] | null = null;
+      /** While in the future, the first selection mark wears `is-landed`
+       *  (the landing flash of a drop or keyboard move). Re-renders inside
+       *  the window keep the class so a frame-later re-render does not
+       *  cut the animation short. */
+      landedUntil = 0;
       dragging = false;
       dragBlock: BlockRange | null = null;
       dropColumnsTarget: BlockRange | null = null;
@@ -10303,6 +14480,10 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
       dropQuotePrefix: string | undefined = undefined;
       dropCandidatesLine = -1;
       dropCandidates: DropLevel[] = [];
+      /** Per drop candidate, its indicator offset from the content's left
+       *  edge (where a block dropped at that level shows its words);
+       *  cached with dropCandidates. */
+      dropCandidateX: number[] = [];
       fences: FenceRange[] = [];
       /** Row geometry of rendered Callout widgets, rebuilt per document. */
       calloutRowCache = new WeakMap<
@@ -10319,14 +14500,74 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
       scrollTimer: number | null = null;
       scrollSpeed = 0;
       handleKind: "block" | "table" = "block";
+      /** Set once destroy() has run: a frame or timer that outlived the
+       *  view must not touch its DOM again. */
+      destroyed = false;
+      /** The one pending selection re-render; scheduling again replaces
+       *  it, so a burst of edits paints the marks once. */
+      selectionFrame: number | null = null;
+      /** Pointer moves are coalesced per frame: the newest event wins and
+       *  the geometry is measured once, in `moveFrame`. */
+      lastMove: MouseEvent | null = null;
+      moveFrame: number | null = null;
+      /** Each hover / drag / drop-target pass gets a fresh id; the widget
+       *  scan below is reused inside one pass and rebuilt for the next. */
+      passId = 0;
+      /** One scan of the top-level widgets per pass. Rects are viewport
+       *  relative, so a scroll, an edit or a geometry change discards it. */
+      widgetScan: {
+        doc: Text;
+        scrollTop: number;
+        passId: number;
+        entries: Array<{
+          element: HTMLElement;
+          info: ReturnType<DragHandleView["widgetInfo"]> | undefined;
+        }>;
+      } | null = null;
+      /** What the last hover pass resolved to: the same row on the same
+       *  document at the same scroll needs no re-measure. */
+      lastHover: {
+        line: number;
+        doc: Text;
+        scrollTop: number;
+        selection: BlockRange[];
+      } | null = null;
 
-      onMouseMove = (e: MouseEvent) => this.handleMouseMove(e);
+      onMouseMove = (e: MouseEvent) => this.queueMove(e);
       onScroll = () => {
         this.hideHover();
-        if (this.selectedBlocks.length > 0) {
-          this.ownerWindow.requestAnimationFrame(() => this.renderBlockSelection());
-        }
+        if (this.selectedBlocks.length > 0) this.scheduleSelectionRender();
+        // A wheel scroll under a resting pointer sends no mousemove, so the
+        // controls would stay hidden: bring them back once it settles.
+        if (this.scrollSettleTimer != null) this.ownerWindow.clearTimeout(this.scrollSettleTimer);
+        this.scrollSettleTimer = this.ownerWindow.setTimeout(() => {
+          this.scrollSettleTimer = null;
+          this.rehoverAfterScroll();
+        }, 120);
       };
+      /** Hover again where the pointer rests, as a real move would. */
+      rehoverAfterScroll() {
+        const p = this.lastPointer;
+        if (
+          !canRehover({
+            destroyed: this.destroyed,
+            dragging: this.dragging,
+            pendingDrag: !!this.pendingDrag,
+            selecting: this.selecting,
+            pendingSelect: !!this.pendingSelect,
+            hasPointer: !!p,
+            enabled: plugin.settings.dragHandles,
+            editedSincePointer: !!p && p.doc !== this.view.state.doc,
+          }) ||
+          !p
+        ) return;
+        const r = this.view.scrollDOM.getBoundingClientRect();
+        if (p.x < r.left || p.x > r.right || p.y < r.top || p.y > r.bottom) return;
+        // A menu, modal or popover over the editor owns the pointer.
+        const target = this.view.dom.ownerDocument.elementFromPoint(p.x, p.y);
+        if (!target || !this.view.dom.contains(target)) return;
+        this.handleMouseMove({ clientX: p.x, clientY: p.y, target } as unknown as MouseEvent);
+      }
       onLeave = (e: MouseEvent) => {
         if (this.dragging || this.selecting) return;
         const t = e.relatedTarget as HTMLElement | null;
@@ -10335,14 +14576,56 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
           (t === this.controls || this.controls.contains(t))
         )
           return;
+        // A move still queued for its frame would bring the controls back
+        // for a pointer that has already left.
+        this.lastMove = null;
+        this.lastPointer = null;
         this.hideHover();
       };
-      onDocMove = (e: MouseEvent) => this.handleDragMove(e);
+      onDocMove = (e: MouseEvent) => this.queueMove(e);
       onDocUp = (e: MouseEvent) => this.handleDrop(e);
+      /** Both mousemove listeners feed one frame: the hover pass and the
+       *  drag pass each read layout, and a pointer reports far more moves
+       *  than the screen can paint. */
+      queueMove(e: MouseEvent) {
+        this.lastMove = e;
+        this.pointer = { x: e.clientX, y: e.clientY };
+        this.lastPointer = { x: e.clientX, y: e.clientY, doc: this.view.state.doc };
+        if (this.moveFrame != null) return;
+        this.moveFrame = this.ownerWindow.requestAnimationFrame(() => {
+          this.moveFrame = null;
+          this.flushMove();
+        });
+      }
+      /** Run the newest queued move now — the frame callback, and a drop
+       *  that must land where the pointer actually is, not a frame back. */
+      flushMove() {
+        const move = this.lastMove;
+        this.lastMove = null;
+        if (this.moveFrame != null) {
+          this.ownerWindow.cancelAnimationFrame(this.moveFrame);
+          this.moveFrame = null;
+        }
+        if (!move || this.destroyed) return;
+        if (this.dragging || this.pendingDrag) this.handleDragMove(move);
+        else this.handleMouseMove(move);
+      }
+      /** One selection render per frame, whatever asked for it. */
+      scheduleSelectionRender() {
+        if (this.destroyed) return;
+        if (this.selectionFrame != null) {
+          this.ownerWindow.cancelAnimationFrame(this.selectionFrame);
+        }
+        this.selectionFrame = this.ownerWindow.requestAnimationFrame(() => {
+          this.selectionFrame = null;
+          this.renderBlockSelection();
+        });
+      }
       onEditorMouseDown = (e: MouseEvent) => this.handleSelectionStart(e);
       onSelectMove = (e: MouseEvent) => this.handleSelectionMove(e);
       onSelectUp = (e: MouseEvent) => this.handleSelectionEnd(e);
       onKeyDown = (e: KeyboardEvent) => {
+        if (this.checkNested()) return;
         // The document listener is deliberately capture-phase, so guard the
         // brief blur → timer window too: a key meant for search/another pane
         // must never reach the old editor's block selection.
@@ -10351,19 +14634,26 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
           !this.selectionScopeIsCurrent()
         ) {
           this.clearBlockSelection();
+          this.releaseCaretAway();
           return;
         }
         if (e.key === "Escape") {
           e.preventDefault();
           e.stopPropagation();
           if (this.dragging || this.pendingDrag) this.endDrag();
-          else this.clearBlockSelection();
+          else {
+            this.clearBlockSelection();
+            this.releaseCaretAway();
+          }
           return;
         }
         if (
           this.selectedBlocks.length === 0 ||
           this.dragging || this.pendingDrag || this.selecting
         ) return;
+        // A key aimed at the blocks is the interaction a quiet landing
+        // waits for; a bare modifier press is not one yet.
+        if (!MODIFIER_KEYS.has(e.key)) this.leaveQuiet();
         const plainKey = !e.metaKey && !e.ctrlKey && !e.altKey;
         // Up/Down walk the selection block by block, Shift grows it — the
         // arrows keep meaning "move", they just move a block instead of a
@@ -10382,10 +14672,20 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
           this.editSelectedBlock();
           return;
         }
+        // Tab steps every selected block one level, the way it steps the
+        // caret's block outside block mode.
+        if (plainKey && e.key === "Tab") {
+          e.preventDefault();
+          e.stopPropagation();
+          this.indentSelectedBlocks(e.shiftKey ? -1 : 1, e.repeat);
+          return;
+        }
         // Moving the caret abandons the block selection. Leaving it painted
         // would show a highlight over blocks that the next keystroke has
-        // stopped being about; the key itself still reaches the editor.
-        if (CARET_KEYS.has(e.key)) {
+        // stopped being about; the key itself still reaches the editor. An
+        // arrow the selection Scope already claimed (Alt+Arrow moves the
+        // blocks) arrives defaultPrevented and is not a caret move.
+        if (CARET_KEYS.has(e.key) && !e.defaultPrevented) {
           this.clearBlockSelection();
           return;
         }
@@ -10415,37 +14715,95 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         else if (key === "d") this.duplicateSelectedBlocks();
         else this.selectAllBlocks();
       };
+      /** Open the column a right-edge drop just made (the row's last) in
+       *  the visual column editor. `line` is a row inside that column.
+       *  Without the editor (columns off, Source mode) the row is selected
+       *  whole instead, like any other widget landing. */
+      openDroppedColumn(line: number) {
+        const doc = this.view.state.doc;
+        const header = columnsHeaderAbove(doc, line);
+        if (header == null) return;
+        const block = columnsAwareBlockRange(doc, header, cachedFences(doc));
+        const layout = block
+          ? parseColumnsSource(
+              doc.sliceString(doc.line(block.startLine).from, doc.line(block.endLine).to).split("\n")
+            )
+          : null;
+        const last = layout ? layout.columns.length - 1 : 0;
+        // The caret waits after the dropped text, where writing continues.
+        const inner = layout ? columnInnerSource(layout, last) : null;
+        let cursor = 0;
+        if (inner) {
+          for (let n = inner.doc.lines; n >= 1; n--) {
+            const row = inner.doc.line(n);
+            if (row.text.trim()) {
+              cursor = row.to;
+              break;
+            }
+          }
+        }
+        this.view.focus();
+        if (!openVisualColumnAt(plugin, this.view, header, last, cursor)) {
+          this.landSelection(header, 1, false);
+        }
+      }
+
+      /** Show the text caret again after a selection that kept it away
+       *  (see blockCaretAwayField) ended without an edit or a caret move.
+       *  Dispatches, so only from an event handler. */
+      releaseCaretAway() {
+        if (this.view.state.field(blockCaretAwayField, false)) {
+          this.view.dispatch({ effects: blockCaretAwayEffect.of(false) });
+        }
+      }
       /** Escape with nothing selected yet: select the block the caret is in.
        *  Notion's own way into block mode, and the only entry point this
-       *  plugin had that was not a mouse gesture. */
-      onSelectKeyDown = (e: KeyboardEvent) => {
-        if (e.key !== "Escape" || e.defaultPrevented) return;
-        if (e.isComposing || e.keyCode === 229) return;
-        if (!plugin.settings.blockSelectKey || !plugin.settings.dragHandles) return;
-        if (this.selectedBlocks.length > 0) return;
-        if (this.dragging || this.pendingDrag || this.selecting) return;
-        if (!this.view.hasFocus) return;
+       *  plugin had that was not a mouse gesture. Run from a Prec.lowest
+       *  keymap (see onload), after every Escape binding of Obsidian's has
+       *  declined the key; Obsidian's own markdown binding marks the key
+       *  handled, so a plain keydown listener never saw it. Returns whether
+       *  it took the key; false leaves Escape to the rest (collapse a text
+       *  selection or extra cursors). */
+      selectCaretBlock(): boolean {
+        const view = this.view;
+        if (view.composing) return false;
+        if (!plugin.settings.blockSelectKey || !plugin.settings.dragHandles) return false;
+        if (this.checkNested()) return false;
+        if (this.selectedBlocks.length > 0) return false;
+        if (this.dragging || this.pendingDrag || this.selecting) return false;
+        if (!view.hasFocus) return false;
         // Vim's own Escape leaves insert mode, and a popover or menu that
-        // did not consume the key still owns it.
-        if (vimModeEnabled(plugin.app)) return;
+        // did not consume the key still owns it. In a Canvas card, Escape
+        // finishes editing the card; taking it would need a second press.
+        if (vimModeEnabled(plugin.app)) return false;
+        if (inCanvasCardEditor(view.dom)) return false;
+        // An editable embed (a hover preview, a footnote or note embed):
+        // Escape there leaves the embed's editor. Its own binding normally
+        // takes the key first; this is the backstop.
+        if (view.dom.closest(".hover-popover, .markdown-embed")) return false;
+        // A nested editor — a column, or one of Obsidian's table cell
+        // editors, which get registered extensions too: Escape there
+        // belongs to that editor.
+        if (view.dom.parentElement?.closest(".cm-editor") || view.dom.closest("td, th")) return false;
         // Rendered, not merely present: a hidden popup left in the DOM
         // would silently disable the key for the whole session.
         const popups = this.ownerDocument.querySelectorAll<HTMLElement>(
           ".modal-container, .suggestion-container, .menu, .nf-cmt-pop"
         );
         for (const popup of Array.from(popups)) {
-          if (popup.getClientRects().length > 0) return;
+          if (popup.getClientRects().length > 0) return false;
         }
-        const doc = this.view.state.doc;
+        const sel = view.state.selection;
+        if (sel.ranges.length > 1 || !sel.main.empty) return false;
+        const doc = view.state.doc;
         const fences = cachedFences(doc);
-        const line = doc.lineAt(this.view.state.selection.main.head).number;
+        const line = doc.lineAt(sel.main.head).number;
         const block = getBlockRange(doc, line, fences);
-        if (!block) return;
-        e.preventDefault();
-        e.stopPropagation();
+        if (!block) return false;
         this.selectionAnchorLine = block.startLine;
         this.setBlockSelection([block]);
-      };
+        return true;
+      }
       onEditorBlur = () => {
         if (this.focusCleanupTimer != null) {
           this.ownerWindow.clearTimeout(this.focusCleanupTimer);
@@ -10457,17 +14815,28 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
           if (
             this.selectedBlocks.length > 0 &&
             !this.selectionScopeIsCurrent()
-          ) this.clearBlockSelection();
+          ) {
+            this.clearBlockSelection();
+            // Focus may come back (a cancelled command palette) with no
+            // selection transaction to end the caret-away state.
+            this.releaseCaretAway();
+          }
         }, 0);
       };
+      // Every way out of a selection that is not an edit or a caret move
+      // shows the caret again (releaseCaretAway): nothing else would end a
+      // landing's caret-away state, and the editor would take keys with no
+      // caret, no tint and no hint on screen.
       onWindowBlur = () => {
         if (this.selectedBlocks.length > 0 || this.pendingSelect) {
           this.clearBlockSelection();
+          this.releaseCaretAway();
         }
       };
       onActiveLeafChange = () => {
         if (this.selectedBlocks.length > 0 || this.pendingSelect) {
           this.clearBlockSelection();
+          this.releaseCaretAway();
         }
       };
 
@@ -10480,6 +14849,14 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         this.ownerDocument = view.dom.ownerDocument;
         this.ownerWindow = this.ownerDocument.defaultView ?? window;
         this.nested = !!view.dom.parentElement?.closest(".cm-editor");
+        this.clipboard = new BlockClipboard({
+          view, operations: plugin.operations,
+          identity: () => sourcePathForEditorView(plugin.app.workspace, view),
+          selection: () => this.selectedBlocks,
+          available: () => plugin.settings.dragHandles && this.selectionScopeIsCurrent(),
+          clipboard: (this.ownerWindow as Window & typeof globalThis).navigator.clipboard,
+          failed: () => new Notice(t("Could not access the clipboard.")),
+        });
         this.fences = cachedFences(view.state.doc);
 
         this.controls = this.ownerDocument.body.createDiv({
@@ -10489,7 +14866,14 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
 
         this.plus = this.controls.createEl("button", {
           cls: "clickable-icon nf-plus-btn",
-          attr: { type: "button", "aria-label": t("Insert block below") },
+          attr: {
+            type: "button",
+            "aria-label": [
+              t("Insert block below"),
+              commandChord(plugin.app, "insert-block-below", blockActionChord("insert-block-below")),
+              t("Alt-click adds above"),
+            ].filter(Boolean).join(" · "),
+          },
         });
         setIcon(this.plus, "plus");
         this.plus.addEventListener("mousedown", (e) => {
@@ -10500,12 +14884,18 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         this.plus.addEventListener("click", (e) => {
           e.preventDefault();
           e.stopPropagation();
-          if (this.hoverBlock) this.insertBelow(this.hoverBlock);
+          if (!this.hoverBlock) return;
+          if (e.altKey) this.insertAbove(this.hoverBlock);
+          else this.insertBelow(this.hoverBlock);
         });
 
         this.handle = this.controls.createEl("button", {
           cls: "clickable-icon nf-drag-handle",
-          attr: { type: "button", "aria-label": t("Drag block") },
+          attr: {
+            type: "button",
+            "aria-label": t("Drag to move · Click for menu"),
+            "data-tooltip-position": "top",
+          },
         });
         setIcon(this.handle, "grip-vertical");
         this.handle.addEventListener("mousedown", (e) => this.startDrag(e));
@@ -10515,19 +14905,9 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
           if (e.detail !== 0 || !this.hoverBlock) return;
           e.preventDefault();
           e.stopPropagation();
-          const rect = this.handle.getBoundingClientRect();
-          openBlockMenu(
-            this.view,
+          this.openMenuFor(
             this.hoverBlock,
-            this.fences,
-            new MouseEvent("click", {
-              clientX: rect.left + rect.width / 2,
-              clientY: rect.bottom,
-            }),
-            plugin,
-            plugin.settings.slashCommands,
-            plugin.settings.columnLayout,
-            plugin.settings.toggleBlocks
+            blockMenuAnchor(this.handle.getBoundingClientRect())
           );
         });
 
@@ -10578,13 +14958,15 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
             run();
           });
         };
-        formatButton("bold", t("Bold"), () =>
+        // The Scope chords of armSelectionScope, named in the tooltips.
+        const withChord = (label: string, key: string) => `${label} · ${chordText(["Mod"], key)}`;
+        formatButton("bold", withChord(t("Bold"), "B"), () =>
           this.formatSelectedBlocks({ marker: "**", open: "<b>", close: "</b>" })
         );
-        formatButton("italic", t("Italic"), () =>
+        formatButton("italic", withChord(t("Italic"), "I"), () =>
           this.formatSelectedBlocks({ marker: "*", open: "<i>", close: "</i>" })
         );
-        formatButton("underline", t("Underline"), () =>
+        formatButton("underline", withChord(t("Underline"), "U"), () =>
           this.formatSelectedBlocks({ open: "<u>", close: "</u>" })
         );
         formatButton("strikethrough", t("Strikethrough"), () =>
@@ -10593,6 +14975,17 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         formatButton("remove-formatting", t("Clear formatting"), () =>
           this.clearFormattingOnSelectedBlocks()
         );
+        // Block color for every selected block that takes one, in one edit.
+        const colorButton = this.selectionToolbar.createEl("button", {
+          cls: "clickable-icon nf-block-selection-format nf-block-selection-color",
+          attr: { type: "button", "aria-label": t("Block color") },
+        });
+        setIcon(colorButton, "palette");
+        colorButton.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          this.openSelectionColorMenu(colorButton);
+        });
         this.selectionToolbar.createSpan({ cls: "nf-block-selection-divider" });
         const turnInto = this.selectionToolbar.createEl("button", {
           cls: "clickable-icon nf-block-selection-action",
@@ -10627,6 +15020,42 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
           event.stopPropagation();
           this.deleteSelectedBlocks();
         });
+        // A link to the one selected block, without leaving block mode.
+        this.selectionLink = this.selectionToolbar.createEl("button", {
+          cls: "clickable-icon nf-block-selection-action nf-block-selection-link",
+          attr: { type: "button", "aria-label": t("Copy link") },
+        });
+        setIcon(this.selectionLink, "link");
+        this.selectionLink.style.display = "none";
+        this.selectionLink.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          if (this.selectedBlocks.length !== 1) return;
+          copyBlockLink(plugin.app, this.view, this.selectedBlocks[0], this.fences, false);
+        });
+        // The full block menu, for the one block a selection can be. It
+        // ends block mode first, exactly like a click on the handle: the
+        // menu's Escape and the selection's Escape must not compete.
+        this.selectionMore = this.selectionToolbar.createEl("button", {
+          cls: "clickable-icon nf-block-selection-action nf-block-selection-more",
+          attr: { type: "button", "aria-label": t("More") },
+        });
+        setIcon(this.selectionMore, "ellipsis");
+        this.selectionMore.style.display = "none";
+        this.selectionMore.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          const rect = this.selectionMore.getBoundingClientRect();
+          if (this.selectedBlocks.length > 1) {
+            this.openSelectionPageMenu({ x: rect.left, y: rect.bottom + 2 });
+            return;
+          }
+          if (this.selectedBlocks.length !== 1) return;
+          const block = this.selectedBlocks[0];
+          this.clearBlockSelection();
+          this.releaseCaretAway();
+          this.openMenuFor(block, { x: rect.left, y: rect.bottom + 2 });
+        });
         const closeSelection = this.selectionToolbar.createEl("button", {
           cls: "clickable-icon nf-block-selection-close",
           attr: { type: "button", "aria-label": t("Clear block selection") },
@@ -10636,6 +15065,7 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
           event.preventDefault();
           event.stopPropagation();
           this.clearBlockSelection();
+          this.releaseCaretAway();
         });
         this.selectionToolbar.addEventListener("mousedown", (event) => {
           event.preventDefault();
@@ -10651,17 +15081,70 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
           view.scrollDOM.addEventListener("scroll", this.onScroll);
           view.scrollDOM.addEventListener("mouseleave", this.onLeave);
           view.contentDOM.addEventListener("blur", this.onEditorBlur, true);
-          // Bubble phase, and always listening: this is the ONE key that has
-          // to reach an editor with no block selection yet, and letting the
-          // suggester, a modal, or a menu handle its own Escape first is
-          // exactly what the bubble phase buys.
-          view.contentDOM.addEventListener("keydown", this.onSelectKeyDown);
           this.ownerWindow.addEventListener("blur", this.onWindowBlur);
           this.activeLeafChangeRef = plugin.app.workspace.on(
             "active-leaf-change",
             this.onActiveLeafChange
           );
         }
+      }
+
+      /** Whether this editor turned out to be nested. Obsidian builds a
+       *  table cell's editor on a detached element, so the constructor's
+       *  check cannot see the table yet; the first event after the editor
+       *  is attached can, and retires the block UI for good. */
+      checkNested(): boolean {
+        if (
+          !this.nested &&
+          this.view.dom.isConnected &&
+          (this.view.dom.parentElement?.closest(".cm-editor") ||
+            this.view.dom.closest("td, th, .cm-table-widget"))
+        ) {
+          this.retireAsNested();
+        }
+        return this.nested;
+      }
+
+      /** Undo what the constructor set up for a top-level editor: the
+       *  listeners and every element it added to the body. */
+      retireAsNested() {
+        this.nested = true;
+        // Only its own selection: clearing also drops a body class that
+        // the outer editor's selection may be using.
+        if (this.selectedBlocks.length > 0 || this.pendingSelect || this.selecting) {
+          this.clearBlockSelection();
+        }
+        this.hideHover();
+        if (this.moveFrame != null) {
+          this.ownerWindow.cancelAnimationFrame(this.moveFrame);
+          this.moveFrame = null;
+        }
+        if (this.scrollSettleTimer != null) {
+          this.ownerWindow.clearTimeout(this.scrollSettleTimer);
+          this.scrollSettleTimer = null;
+        }
+        this.lastMove = null;
+        this.lastPointer = null;
+        this.view.scrollDOM.removeEventListener("mousemove", this.onMouseMove, true);
+        this.view.scrollDOM.removeEventListener("mousedown", this.onEditorMouseDown, true);
+        this.view.scrollDOM.removeEventListener("scroll", this.onScroll);
+        this.view.scrollDOM.removeEventListener("mouseleave", this.onLeave);
+        this.view.contentDOM.removeEventListener("blur", this.onEditorBlur, true);
+        this.ownerWindow.removeEventListener("blur", this.onWindowBlur);
+        if (this.activeLeafChangeRef) {
+          plugin.app.workspace.offref(this.activeLeafChangeRef);
+          this.activeLeafChangeRef = null;
+        }
+        this.ownerDocument.removeEventListener("keydown", this.onKeyDown, true);
+        this.disarmSelectionScope();
+        this.controls.remove();
+        this.indicator.remove();
+        this.colIndicator.remove();
+        this.highlight.remove();
+        this.ghost.remove();
+        this.marquee.remove();
+        this.selectionLayer.remove();
+        this.selectionToolbar.remove();
       }
 
       /** Empty editor space starts a Notion-style marquee. Holding Alt/Option
@@ -10740,7 +15223,33 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
       }
 
       handleSelectionStart(e: MouseEvent) {
+        if (this.checkNested()) return;
         if (this.dragging || this.pendingDrag) return;
+        // Shift+click grows the selection from its anchor to the clicked
+        // row, the way it grows a text selection. Capture phase on
+        // scrollDOM, so CodeMirror's own shift-extend never sees the click.
+        if (
+          e.shiftKey &&
+          e.button === 0 &&
+          this.selectedBlocks.length > 0 &&
+          !(e.target as Element | null)?.closest?.(
+            ".nf-block-controls, .nf-block-selection-toolbar, .nf-block-menu-anchor, button, input"
+          )
+        ) {
+          const line = this.lineAtSelectionY(e.clientY, e.clientX);
+          const anchor = this.selectionAnchorLine ?? this.selectedBlocks[0].startLine;
+          this.setBlockSelection(
+            blocksInLineSpan(
+              this.view.state.doc,
+              Math.min(anchor, line),
+              Math.max(anchor, line),
+              this.fences
+            )
+          );
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
         const kind = this.marqueeStartKind(e);
         if (!kind) {
           // A right/middle click opens a menu rather than moving the caret,
@@ -10850,12 +15359,24 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         return { top: first.top, bottom: last ? last.bottom : first.bottom };
       }
 
-      renderBlockSelection() {
+      renderBlockSelection(landed = false) {
+        guard(
+          "block selection",
+          () => this.clearBlockSelection(),
+          () => this.renderBlockSelectionUnguarded(landed)
+        );
+      }
+
+      renderBlockSelectionUnguarded(landed: boolean) {
+        if (this.destroyed) return;
+        this.passId++;
         this.selectionLayer.empty();
         if (this.selectedBlocks.length === 0) {
           this.selectionToolbar.style.display = "none";
           return;
         }
+        if (landed) this.landedUntil = Date.now() + 400;
+        let flash = Date.now() < this.landedUntil;
         const content = this.view.contentDOM.getBoundingClientRect();
         // Marks are position:fixed, so nothing keeps them inside the editor
         // on its own — an unclipped one paints over the tab header, the
@@ -10866,7 +15387,9 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         let resolved = false;
         let visibleTop = Infinity;
         let visibleBottom = -Infinity;
-        const lines = this.view.state.doc.lines;
+        const doc0 = this.view.state.doc;
+        const lines = doc0.lines;
+        const painted: Array<{ block: BlockRange; top: number; bottom: number }> = [];
         for (const block of this.selectedBlocks) {
           // A render deferred to the next frame can land on a document the
           // selection no longer fits; measuring past its end would throw.
@@ -10882,23 +15405,54 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
           if (markBottom - markTop <= 0) continue;
           visibleTop = Math.min(visibleTop, markTop);
           visibleBottom = Math.max(visibleBottom, markBottom);
+          painted.push({ block, top: markTop, bottom: markBottom });
+        }
+        // One mark per contiguous run of blocks: blocks separated only by
+        // blank seam rows read as one selection, with one ring, not a
+        // ladder of boxes.
+        const blankBetween = painted.slice(1).map((next, i) => {
+          for (let n = painted[i].block.endLine + 1; n < next.block.startLine; n++) {
+            if (!RE_BLANK.test(doc0.line(n).text.replace(RE_QUOTE_PREFIX, ""))) return false;
+          }
+          return true;
+        });
+        for (const group of mergeSelectionRects(painted, blankBetween)) {
           const mark = this.selectionLayer.createDiv({ cls: "nf-multi-block-highlight" });
+          if (flash) {
+            mark.classList.add("is-landed");
+            flash = false;
+          }
           mark.style.left = `${content.left - 6}px`;
-          mark.style.top = `${markTop + 1}px`;
+          mark.style.top = `${group.top + 1}px`;
           mark.style.width = `${content.width + 12}px`;
-          // Rows are contiguous, so the marks are inset by a hair rather
-          // than grown: grown ones overlap, and every shared edge would
-          // then draw its outline twice.
-          mark.style.height = `${Math.max(1, markBottom - markTop - 2)}px`;
+          // Separate runs are inset by a hair rather than grown: grown ones
+          // would overlap where two runs meet and draw that edge twice.
+          mark.style.height = `${Math.max(1, group.bottom - group.top - 2)}px`;
         }
         if (!resolved) {
           this.selectionToolbar.style.display = "none";
           return;
         }
-        this.selectionCount.textContent = t("{n} blocks selected").replace(
-          "{n}",
-          String(this.selectedBlocks.length)
-        );
+        // Seam rows are never selected now, but a selection restored from
+        // elsewhere may still hold one; it is not a block to count.
+        const doc = this.view.state.doc;
+        const n =
+          this.selectedBlocks.filter((block) => block.endLine > doc.lines || !isBlankBlock(doc, block)).length ||
+          this.selectedBlocks.length;
+        this.selectionCount.textContent =
+          n === 1 ? t("1 block selected") : t("{n} blocks selected").replace("{n}", String(n));
+        this.selectionMore.style.display =
+          this.selectedBlocks.length === 1 || this.selectionPageSpan() ? "" : "none";
+        this.selectionLink.style.display =
+          this.selectedBlocks.length === 1 &&
+          blockLinkable(this.view.state.doc, this.selectedBlocks[0], this.fences)
+            ? ""
+            : "none";
+        // A quiet landing and a drag in flight show the marks only.
+        if (this.quietSelection || this.dragging) {
+          this.selectionToolbar.style.display = "none";
+          return;
+        }
         this.selectionToolbar.style.display = "flex";
         const toolbarWidth = this.selectionToolbar.offsetWidth || 220;
         const viewportWidth = this.ownerWindow.innerWidth;
@@ -10936,6 +15490,8 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         this.pendingSelect = null;
         this.selecting = false;
         this.selectedBlocks = [];
+        this.quietSelection = false;
+        this.quietFrom = null;
         this.selectionAnchorLine = null;
         this.ownerDocument.body.classList.remove("nf-selecting-blocks");
         this.marquee.style.display = "none";
@@ -10987,6 +15543,28 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         const doc = this.view.state.doc;
         const last = this.selectedBlocks[this.selectedBlocks.length - 1];
         if (!last) return;
+        // A columns row is rendered whole: its last line's end sits inside
+        // the widget, where typing would append to the last column. Resume
+        // on a line of its own below the row instead.
+        const head = doc.line(Math.min(last.startLine, doc.lines)).text;
+        if (
+          !last.quotePrefix &&
+          quoteDepth(head) === 1 &&
+          parseCalloutHeader(head)?.type === COLS_TYPE
+        ) {
+          const plan = columnExitPlan(doc, Math.min(last.endLine, doc.lines));
+          this.clearBlockSelection();
+          this.view.dispatch({
+            changes: plan.from === plan.to && !plan.insert
+              ? undefined
+              : { from: plan.from, to: plan.to, insert: plan.insert },
+            selection: { anchor: plan.cursor },
+            scrollIntoView: true,
+            userEvent: "input",
+          });
+          this.view.focus();
+          return;
+        }
         const pos = doc.line(Math.min(last.endLine, doc.lines)).to;
         this.clearBlockSelection();
         this.view.dispatch({ selection: { anchor: pos }, scrollIntoView: true });
@@ -11042,15 +15620,87 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         }
         if (result.skipped > 0) {
           new Notice(
-            t("Skipped {n} structural blocks.").replace(
-              "{n}",
-              String(result.skipped)
-            )
+            result.skipped === 1
+              ? t("Skipped 1 structural block.")
+              : t("Skipped {n} structural blocks.").replace("{n}", String(result.skipped))
           );
         }
         // Inline wrapping never adds or removes lines, so the line-number
         // based selection stays valid; only the on-screen rects moved.
-        this.ownerWindow.requestAnimationFrame(() => this.renderBlockSelection());
+        this.scheduleSelectionRender();
+      }
+
+      /** The Color button's menu: Text color and Background color for
+       *  every selected block that takes that kind (headings, code, tables
+       *  and containers are skipped), a value checked only when all of
+       *  them share it; one edit colours them all. */
+      openSelectionColorMenu(button: HTMLElement) {
+        const doc = this.view.state.doc;
+        const targets = this.selectedBlocks
+          .map((block) => ({ block, target: blockColorTarget(doc, block, this.fences) }))
+          .filter(({ target }) => target.text || target.background);
+        if (targets.length === 0) {
+          new Notice(t("Nothing to color in this block"));
+          return;
+        }
+        const shared = (kind: "text" | "bg") => {
+          const values = targets
+            .filter(({ target }) => (kind === "text" ? target.text : target.background))
+            .map(({ block }) => blockColorValues(doc, block)[kind]);
+          return values.length > 0 && values.every((value) => value === values[0]) ? values[0] : null;
+        };
+        const menu = trackMenu(tagBlockMenu(new Menu()).setUseNativeMenu(false));
+        addBlockColorItems(
+          menu,
+          { text: shared("text"), bg: shared("bg") },
+          {
+            text: targets.some(({ target }) => target.text),
+            background: targets.some(({ target }) => target.background),
+          },
+          (kind, color) => {
+            const now = this.view.state.doc;
+            const fences = cachedFences(now);
+            const changes: { from: number; to: number; insert: string }[] = [];
+            for (const { block } of targets) changes.push(...(blockColorChanges(now, block, fences, kind, color) ?? []));
+            // Blocks never share a row, but a nested pick could: keep the
+            // first edit of any overlap, in document order.
+            changes.sort((a, b) => a.from - b.from || a.to - b.to);
+            const kept = changes.filter((change, i) => i === 0 || change.from >= changes[i - 1].to);
+            if (kept.length === 0) return;
+            this.asSelfEdit(() => this.view.dispatch({ changes: kept, userEvent: "input.block-color" }));
+            this.scheduleSelectionRender();
+          }
+        );
+        const rect = button.getBoundingClientRect();
+        menu.showAtPosition({ x: rect.left, y: rect.bottom + 2 }, this.ownerDocument);
+      }
+
+      /** Several selected blocks in one run (blank rows between them at
+       *  most), as the span Move to… and Turn into page act on; null
+       *  when the selection is scattered or offers neither. */
+      selectionPageSpan(): BlockRange | null {
+        if (this.selectedBlocks.length < 2) return null;
+        const span = contiguousBlockSpan(this.view.state.doc, this.selectedBlocks);
+        if (!span || inColumnEditor(this.view)) return null;
+        const doc = this.view.state.doc;
+        return noteComposerEnabled(plugin.app) && !span.quotePrefix
+          ? span
+          : turnIntoPagePlan(doc, span, this.fences)
+            ? span
+            : null;
+      }
+
+      /** More, for a run of blocks: Move to… and Turn into page for the
+       *  whole run (the page is named after its first block). */
+      openSelectionPageMenu(at: { x: number; y: number }) {
+        const span = this.selectionPageSpan();
+        if (!span) return;
+        const menu = trackMenu(tagBlockMenu(new Menu()).setUseNativeMenu(false));
+        // Both act on the note itself: block mode ends first, as the one-
+        // block More does.
+        this.clearBlockSelection();
+        if (!addPageActionItems(menu, plugin.app, this.view, span, this.fences, plugin.operations)) return;
+        menu.showAtPosition(at, this.ownerDocument);
       }
 
       /** Clear-formatting reuses the selection-driven stripper: point the
@@ -11071,7 +15721,7 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         });
         this.asSelfEdit(() => clearInlineFormatting(this.view));
         this.view.dispatch({ selection: { anchor: home } });
-        this.ownerWindow.requestAnimationFrame(() => this.renderBlockSelection());
+        this.scheduleSelectionRender();
       }
 
       armSelectionScope() {
@@ -11098,6 +15748,44 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
             this.formatSelectedBlocks({ open: "<u>", close: "</u>" })
           );
         });
+        // The block-mode twins of the editor's own block chords: the same
+        // keys, acting on the whole selection instead of the caret's block.
+        scope.register(["Alt"], "ArrowUp", () => {
+          return this.runSelectionScopeCommand(() => this.moveSelectedBlocks(-1));
+        });
+        scope.register(["Alt"], "ArrowDown", () => {
+          return this.runSelectionScopeCommand(() => this.moveSelectedBlocks(1));
+        });
+        for (const entry of TURN_INTO) {
+          scope.register(TURN_INTO_MODIFIERS, entry.digit, () => {
+            return this.runSelectionScopeCommand(() =>
+              this.turnSelectedBlocksInto(entry.prefix, true)
+            );
+          });
+        }
+        for (const entry of WRAP_INTO) {
+          scope.register(TURN_INTO_MODIFIERS, entry.key, () => {
+            return this.runSelectionScopeCommand(() =>
+              this.wrapSelectedBlocksInto(entry.kind)
+            );
+          });
+        }
+        scope.register(["Mod"], "Enter", () => {
+          return this.runSelectionScopeCommand(() => this.toggleSelectedTasks());
+        });
+        const { below, above } = BLOCK_MODE_INSERT_CHORDS;
+        scope.register(below.modifiers, below.key, () => {
+          return this.runSelectionScopeCommand(() => {
+            const last = this.selectedBlocks[this.selectedBlocks.length - 1];
+            if (last) insertBlockBelow(this.view, last, plugin.settings.slashCommands);
+          });
+        });
+        scope.register(above.modifiers, above.key, () => {
+          return this.runSelectionScopeCommand(() => {
+            const first = this.selectedBlocks[0];
+            if (first) insertBlockAbove(this.view, first, plugin.settings.slashCommands);
+          });
+        });
         this.keyScope = scope;
         plugin.app.keymap.pushScope(scope);
       }
@@ -11119,6 +15807,7 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
           return true;
         }
         if (this.selecting || this.dragging || this.pendingDrag) return false;
+        this.leaveQuiet();
         run();
         return false;
       }
@@ -11143,20 +15832,24 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
       }
 
       /** Programmatic selection (duplicate result, select-all) re-arms the
-       * key handler that a marquee gesture normally attaches. */
-      setBlockSelection(blocks: BlockRange[]) {
+       * key handler that a marquee gesture normally attaches. `quiet`: a
+       * landing, shown without the selection toolbar (see quietSelection). */
+      setBlockSelection(blocks: BlockRange[], opts?: { quiet?: boolean }) {
         if (blocks.length === 0) {
           this.clearBlockSelection();
           return;
         }
         this.selectedBlocks = blocks;
+        this.quietSelection = !!opts?.quiet;
+        this.quietFrom = this.quietSelection && this.pointer ? { ...this.pointer } : null;
+        this.quietArmed = false;
         if (!this.selectionScopeIsCurrent()) {
           this.clearBlockSelection();
           return;
         }
         this.ownerDocument.addEventListener("keydown", this.onKeyDown, true);
         this.armSelectionScope();
-        this.ownerWindow.requestAnimationFrame(() => this.renderBlockSelection());
+        this.scheduleSelectionRender();
       }
 
       /** Cmd/Ctrl+C and +X. The selection survives a plain copy so a
@@ -11165,46 +15858,30 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         const span = this.selectedSpan();
         if (!span) return;
         const count = this.selectedBlocks.length;
-        try {
-          await navigator.clipboard.writeText(span.text);
-        } catch {
-          // A cut that never reached the clipboard must not delete the
-          // blocks it failed to carry.
-          new Notice(t("Could not write to the clipboard."));
-          return;
-        }
-        if (cut) {
-          this.deleteSelectedBlocks();
-        } else {
-          new Notice(t("Copied {n} blocks.").replace("{n}", String(count)));
-        }
+        await this.clipboard.copy(span.text, () => {
+          if (cut) this.deleteSelectedBlocks();
+          else {
+            new Notice(
+              count === 1 ? t("Copied 1 block.") : t("Copied {n} blocks.").replace("{n}", String(count))
+            );
+          }
+        });
       }
 
-      /** Cmd/Ctrl+V replaces the selected blocks with the clipboard text. */
+      /** Paste commits only to the selection that requested the clipboard. */
       async pasteOverSelectedBlocks() {
-        let clip = "";
-        try {
-          clip = await navigator.clipboard.readText();
-        } catch {
-          return;
-        }
-        if (!clip) return;
-        // Re-read the selection after the await: any document change in the
-        // meantime cleared it, so a stale span can never be overwritten.
-        const span = this.selectedSpan();
-        if (!span) return;
-        const insert = blockSelectionPasteInsert(
-          this.view.state.doc,
-          this.selectedBlocks,
-          clip
-        );
-        this.view.dispatch({
-          changes: { from: span.from, to: span.to, insert },
-          selection: { anchor: span.from + insert.length },
-          userEvent: "input.paste",
+        await this.clipboard.paste((clip) => {
+          const span = this.selectedSpan();
+          if (!span) return;
+          const insert = blockSelectionPasteInsert(this.view.state.doc, this.selectedBlocks, clip);
+          this.view.dispatch({
+            changes: { from: span.from, to: span.to, insert },
+            selection: { anchor: span.from + insert.length },
+            userEvent: "input.paste",
+          });
+          this.clearBlockSelection();
+          this.view.focus();
         });
-        this.clearBlockSelection();
-        this.view.focus();
       }
 
       /** Cmd/Ctrl+D inserts a copy below and selects it, ready to move. */
@@ -11212,9 +15889,32 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         const span = this.selectedSpan();
         if (!span) return;
         const doc = this.view.state.doc;
+        const first = this.selectedBlocks[0];
         const lastLine =
           this.selectedBlocks[this.selectedBlocks.length - 1].endLine;
         const lines = span.text.split("\n");
+        // Blocks of one level: the copy lands one seam below, the way the
+        // menu's Duplicate places it.
+        if (this.selectedBlocks.every((b) => b.quotePrefix === first.quotePrefix)) {
+          const copy = duplicateBlockChange(doc, {
+            startLine: first.startLine,
+            endLine: lastLine,
+            quotePrefix: first.quotePrefix,
+          });
+          this.view.dispatch({
+            changes: { from: copy.from, insert: copy.insert },
+            userEvent: "input.duplicate",
+          });
+          this.setBlockSelection(
+            blocksInLineSpan(
+              this.view.state.doc,
+              copy.copyLine,
+              copy.copyLine + lines.length - 1,
+              this.fences
+            )
+          );
+          return;
+        }
         const separator = needsProtectedSeam(lines[lines.length - 1], lines[0])
           ? "\n\n"
           : "\n";
@@ -11246,42 +15946,324 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         );
       }
 
+      /** Alt+Up/Down: move the whole selection past its neighbour as one
+       *  unit, in one transaction, and keep it selected where it lands. */
+      moveSelectedBlocks(dir: -1 | 1) {
+        const blocks = this.selectedBlocks;
+        const first = blocks[0];
+        const last = blocks[blocks.length - 1];
+        if (!first || !last) return;
+        if (!blocks.every((block) => block.quotePrefix === first.quotePrefix)) {
+          new Notice(t("Select blocks at the same level to move them"));
+          return;
+        }
+        const doc = this.view.state.doc;
+        const fences = cachedFences(doc);
+        const outer: BlockRange = {
+          startLine: first.startLine,
+          endLine: last.endLine,
+          quotePrefix: first.quotePrefix,
+        };
+        let target: number | null;
+        if (dir < 0) {
+          target = findPrevBlockStart(doc, fences, outer);
+        } else {
+          const next = findNextBlock(doc, fences, outer);
+          target = next ? next.endLine + 1 : null;
+        }
+        if (target == null) return;
+        const spanLines = outer.endLine - outer.startLine + 1;
+        let landed: number | null = null;
+        this.asSelfEdit(() => {
+          landed = moveBlock(
+            this.view,
+            outer,
+            target,
+            fences,
+            undefined,
+            vaultIndentUnit(plugin.app),
+            outer.quotePrefix
+          );
+        });
+        if (landed == null) return;
+        this.landSelection(landed, spanLines, Boolean(outer.quotePrefix));
+      }
+
+      /** Select the block(s) that just landed after a drop, duplicate or
+       *  keyboard move: caret on the first row, kept on screen, with a
+       *  landing flash so the eye finds where the block went. */
+      landSelection(landed: number, spanLines: number, inside = false) {
+        const doc = this.view.state.doc;
+        if (landed < 1 || landed > doc.lines) return;
+        // setBlockSelection stands down without focus; a drop ends on the
+        // document, a keyboard move may have left it on a widget.
+        this.view.focus();
+        // A block Live Preview draws as one widget (a columns row, a
+        // Callout, a table, an embed) is selected whole, and the caret stays
+        // OUT of it: a caret inside would tear the widget open into raw
+        // source, and the tint would cover rows the editor no longer shows.
+        // The caret waits right beside the box (the end of the row above,
+        // else the start of the row below) wherever it was: left elsewhere,
+        // hidden while the box is selected, a letter typed at once would
+        // land at that invisible spot, far from the block just moved.
+        const container = widgetContainerFor(doc, landed, spanLines, inside, cachedFences(doc));
+        if (container) {
+          const cFrom = doc.line(container.startLine).from;
+          const cTo = doc.line(container.endLine).to;
+          const head = this.view.state.selection.main.head;
+          const anchor = container.startLine > 1
+            ? doc.line(container.startLine - 1).to
+            : container.endLine < doc.lines
+              ? doc.line(container.endLine + 1).from
+              : head;
+          this.view.dispatch({
+            selection: { anchor },
+            effects: [
+              EditorView.scrollIntoView(cFrom, { y: "nearest" }),
+              blockCaretAwayEffect.of(anchor < cFrom || anchor > cTo),
+            ],
+          });
+          this.selectionAnchorLine = container.startLine;
+          this.setBlockSelection([container], { quiet: true });
+          if (this.selectedBlocks.length === 0) this.releaseCaretAway();
+          else this.renderBlockSelection(true);
+          return;
+        }
+        const from = doc.line(landed).from;
+        this.view.dispatch({
+          selection: { anchor: from },
+          effects: EditorView.scrollIntoView(from, { y: "nearest" }),
+        });
+        this.selectionAnchorLine = landed;
+        // A landing inside a Callout or columns container must select the
+        // row that landed, not the whole box the ">" markers belong to.
+        this.setBlockSelection(
+          landedBlocks(doc, landed, spanLines, inside, cachedFences(doc)),
+          { quiet: true }
+        );
+        this.renderBlockSelection(true);
+      }
+
+      /** End a quiet landing: the toolbar comes back with the next render. */
+      leaveQuiet() {
+        if (!this.quietSelection) return;
+        this.quietSelection = false;
+        this.quietFrom = null;
+        this.scheduleSelectionRender();
+      }
+
+      /** Pointer moves during a quiet landing: coming onto the selected
+       *  blocks (by height, so the handle's column counts too) ends it. */
+      quietPointerMove(e: MouseEvent) {
+        let inside = false;
+        for (const mark of Array.from(this.selectionLayer.children)) {
+          const rect = mark.getBoundingClientRect();
+          if (e.clientY >= rect.top && e.clientY <= rect.bottom) {
+            inside = true;
+            break;
+          }
+        }
+        if (!inside) {
+          this.quietArmed = true;
+          return;
+        }
+        const from = this.quietFrom;
+        const moved = !from || Math.hypot(e.clientX - from.x, e.clientY - from.y) > 16;
+        if (this.quietArmed || moved) this.leaveQuiet();
+      }
+
+      /** Retype every selected block in one transaction. The chords keep
+       *  the selection (a prefix swap never adds rows); the toolbar menu
+       *  ends block mode the way it always has. */
+      turnSelectedBlocksInto(prefix: string, keepSelection: boolean) {
+        if (this.selectedBlocks.length === 0) return;
+        const result = batchTurnIntoChanges(
+          this.view.state.doc,
+          this.selectedBlocks,
+          prefix,
+          this.fences
+        );
+        if (result.changes.length > 0) {
+          const dispatch = () =>
+            this.view.dispatch({
+              changes: result.changes,
+              userEvent: "input.turninto.batch",
+            });
+          if (keepSelection) this.asSelfEdit(dispatch);
+          else dispatch();
+        }
+        if (result.skipped > 0) {
+          new Notice(
+            result.skipped === 1
+              ? t("Skipped 1 structural block.")
+              : t("Skipped {n} structural blocks.").replace("{n}", String(result.skipped))
+          );
+        }
+        if (!keepSelection) this.clearBlockSelection();
+      }
+
+      /** Wrap every selected block into a Callout / toggle / code block in
+       *  one transaction, then re-select the wrapped result. */
+      wrapSelectedBlocksInto(kind: BlockWrapKind) {
+        if (kind === "toggle" && !plugin.settings.toggleBlocks) return;
+        const blocks = this.selectedBlocks;
+        if (blocks.length === 0) return;
+        const doc = this.view.state.doc;
+        const result = batchWrapIntoChanges(doc, blocks, kind, this.fences);
+        if (result.skipped > 0) {
+          new Notice(
+            result.skipped === 1
+              ? t("Skipped 1 structural block.")
+              : t("Skipped {n} structural blocks.").replace("{n}", String(result.skipped))
+          );
+        }
+        if (result.changes.length === 0) return;
+        const firstFrom = doc.line(blocks[0].startLine).from;
+        const lastTo = doc.line(blocks[blocks.length - 1].endLine).to;
+        const tr = this.view.state.update({
+          changes: result.changes,
+          userEvent: `input.${kind}.batch`,
+        });
+        this.view.dispatch(tr);
+        // The wrappers added rows, so the selection was cleared; find the
+        // span again through the change map, minus the seam rows a wrap
+        // may have sealed in around it.
+        const after = this.view.state.doc;
+        let startLine = after.lineAt(tr.changes.mapPos(firstFrom, -1)).number;
+        let endLine = after.lineAt(tr.changes.mapPos(lastTo, 1)).number;
+        if (startLine < endLine && RE_BLANK.test(after.line(startLine).text)) startLine++;
+        if (endLine > startLine && RE_BLANK.test(after.line(endLine).text)) endLine--;
+        this.selectionAnchorLine = startLine;
+        this.setBlockSelection(
+          blocksInLineSpan(after, startLine, endLine, cachedFences(after))
+        );
+      }
+
+      /** Mod+Enter: tick or untick every selected block. */
+      toggleSelectedTasks() {
+        const changes = toggleTaskLines(this.view.state.doc, this.selectedBlocks);
+        if (changes.length === 0) {
+          // The chord is swallowed by the Scope either way; say why.
+          new Notice(t("No block in the selection can take a to-do box"));
+          return;
+        }
+        // Boxes never add rows, so the selection survives the edit.
+        this.asSelfEdit(() =>
+          this.view.dispatch({ changes, userEvent: "input.task.batch" })
+        );
+      }
+
+      /** Tab / Shift+Tab: step every selected block one level. Bottom-up,
+       *  so a seam row sealed in beside a lower block never shifts the
+       *  rows of the blocks still to be stepped. */
+      indentSelectedBlocks(dir: -1 | 1, repeat = false) {
+        const blocks = this.selectedBlocks.slice();
+        const first = blocks[0];
+        const last = blocks[blocks.length - 1];
+        if (!first || !last) return;
+        const before = this.view.state.doc;
+        const fences = cachedFences(before);
+        const unit = vaultIndentUnit(plugin.app);
+        const firstBlank = RE_BLANK.test(before.line(first.startLine).text);
+        const lastBlank = RE_BLANK.test(before.line(last.endLine).text);
+        // Every block's change is built against the same starting
+        // document: the blocks are disjoint and each step reads only its
+        // own rows and neighbours, so the answers match what stepping them
+        // one at a time bottom-up would give — but they land as ONE
+        // transaction, so one Cmd+Z restores the whole selection.
+        const changes: InPlaceChange[] = [];
+        let skipped = 0;
+        for (const block of blocks) {
+          if (isBlankBlock(before, block)) continue;
+          const change = indentBlockChange(before, block, dir, fences, unit);
+          if (change) changes.push(change);
+          else skipped++;
+        }
+        const moved = changes.length;
+        // A selection with nowhere to go stays silent, like the caret's
+        // Tab does; a held key would otherwise stack a notice per repeat.
+        if (skipped > 0 && moved > 0 && !repeat) {
+          new Notice(
+            skipped === 1
+              ? t("Skipped 1 block with no level to move to.")
+              : t("Skipped {n} blocks with no level to move to.").replace("{n}", String(skipped))
+          );
+        }
+        if (moved === 0) return;
+        const tr = this.view.state.update({
+          changes: changes.map(({ from, to, insert }) => ({ from, to, insert })),
+          userEvent: "move.block.batch",
+        });
+        this.asSelfEdit(() => this.view.dispatch(tr));
+        // Re-select through the change set: the span's ends map to where
+        // the stepped rows now sit, minus a seam a step sealed in at
+        // either end.
+        const doc = this.view.state.doc;
+        let startLine = doc.lineAt(
+          tr.changes.mapPos(before.line(first.startLine).from)
+        ).number;
+        let endLine = Math.max(
+          startLine,
+          doc.lineAt(tr.changes.mapPos(before.line(last.endLine).to, 1)).number
+        );
+        if (
+          !firstBlank && startLine < endLine && RE_BLANK.test(doc.line(startLine).text)
+        ) startLine++;
+        if (
+          !lastBlank && endLine > startLine && RE_BLANK.test(doc.line(endLine).text)
+        ) endLine--;
+        this.selectionAnchorLine = startLine;
+        this.setBlockSelection(
+          blocksInLineSpan(doc, startLine, endLine, cachedFences(doc))
+        );
+      }
+
       openBatchTurnIntoMenu(evt: MouseEvent) {
         if (this.selectedBlocks.length === 0) return;
         const menuHost = this.ownerDocument.body.createDiv({ cls: "nf-block-menu-anchor" });
-        const menu = new Menu().setUseNativeMenu(false).setParentElement(menuHost);
-        menu.onHide(() => menuHost.remove());
-        for (const entry of TURN_INTO) {
-          menu.addItem((item) =>
-            item
-              .setTitle(entry.title)
-              .setIcon(entry.icon)
-              .onClick(() => {
-                const result = batchTurnIntoChanges(
-                  this.view.state.doc,
-                  this.selectedBlocks,
-                  entry.prefix,
-                  this.fences
-                );
-                if (result.changes.length > 0) {
-                  this.view.dispatch({
-                    changes: result.changes,
-                    userEvent: "input.turninto.batch",
-                  });
-                }
-                if (result.skipped > 0) {
-                  new Notice(
-                    t("Skipped {n} structural blocks.").replace(
-                      "{n}",
-                      String(result.skipped)
-                    )
-                  );
-                }
-                this.clearBlockSelection();
-              })
-          );
-        }
+        const menu = trackMenu(
+          tagBlockMenu(new Menu()).setUseNativeMenu(false).setParentElement(menuHost),
+          () => menuHost.remove()
+        );
+        // The type is checked only when every selected block shares it;
+        // a mixed selection has no current type to show.
+        const doc = this.view.state.doc;
+        const types = new Set(this.selectedBlocks.map((block) => {
+          const type = blockTypeAt(doc, block);
+          return type === "toggle" && !plugin.settings.toggleBlocks ? "callout" : type;
+        }));
+        const current = types.size === 1 ? [...types][0] : null;
+        addTurnIntoSection(menu, this.ownerDocument, plugin.app, {
+          current,
+          turnable: true,
+          wraps: WRAP_INTO.map((entry) => entry.kind).filter(
+            (kind) => kind !== "toggle" || plugin.settings.toggleBlocks
+          ),
+          inline: true,
+          onTurn: (entry) => this.turnSelectedBlocksInto(entry.prefix, false),
+          onWrap: (kind) => this.wrapSelectedBlocksInto(kind),
+        });
         menu.showAtMouseEvent(evt);
+      }
+
+      /** The whole block selection as one range when `lineNo` is inside
+       *  it and its blocks share one level; null otherwise. Hovering or
+       *  grabbing any selected row then means the selection as a unit. */
+      selectedSpanAt(lineNo: number): BlockRange | null {
+        const blocks = this.selectedBlocks;
+        if (blocks.length < 2) return null;
+        const first = blocks[0];
+        const last = blocks[blocks.length - 1];
+        if (lineNo < first.startLine || lineNo > last.endLine) return null;
+        if (!blocks.every((block) => block.quotePrefix === first.quotePrefix)) {
+          return null;
+        }
+        return {
+          startLine: first.startLine,
+          endLine: last.endLine,
+          quotePrefix: first.quotePrefix,
+          kind: "span",
+        };
       }
 
       /** Real visual rows for source text inside a pre-wrap widget. A source
@@ -11335,19 +16317,38 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         }
       }
 
-      widgetForPos(pos: number): { element: HTMLElement; info: NonNullable<ReturnType<DragHandleView["widgetInfo"]>> } | null {
-        const widgets = Array.from(
-          this.view.contentDOM.querySelectorAll<HTMLElement>(":scope > .cm-embed-block")
+      /** The top-level widgets of the current pass. Their geometry is
+       *  measured lazily and remembered for the rest of the pass, so the
+       *  several lookups one hover or drop-target pass makes (source row,
+       *  whole widget, Callout row, block rect) walk the DOM once. */
+      widgetEntries(): NonNullable<DragHandleView["widgetScan"]>["entries"] {
+        const doc = this.view.state.doc;
+        const scrollTop = this.view.scrollDOM.scrollTop;
+        const scan = this.widgetScan;
+        if (
+          scan &&
+          scan.doc === doc &&
+          scan.scrollTop === scrollTop &&
+          scan.passId === this.passId
+        ) return scan.entries;
+        const entries = Array.from(
+          this.view.contentDOM.querySelectorAll<HTMLElement>(":scope > .cm-embed-block"),
+          (element) => ({ element, info: undefined })
         );
-        for (const element of widgets) {
-          const info = this.widgetInfo(element);
-          const sourceEnd = info
-            ? this.view.state.doc.line(info.endLine).to
-            : -1;
+        this.widgetScan = { doc, scrollTop, passId: this.passId, entries };
+        return entries;
+      }
+
+      widgetForPos(pos: number): { element: HTMLElement; info: NonNullable<ReturnType<DragHandleView["widgetInfo"]>> } | null {
+        const doc = this.view.state.doc;
+        for (const entry of this.widgetEntries()) {
+          if (entry.info === undefined) entry.info = this.widgetInfo(entry.element);
+          const info = entry.info;
+          const sourceEnd = info ? doc.line(info.endLine).to : -1;
           if (
             info &&
             isWidgetSourcePosition(pos, info.from, sourceEnd)
-          ) return { element, info };
+          ) return { element: entry.element, info };
         }
         return null;
       }
@@ -11386,35 +16387,13 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         info: { startLine: number; endLine: number },
         doc: Text
       ): Array<{ block: BlockRange; element: HTMLElement }> | null {
-        const root = widget.querySelector<HTMLElement>(":scope > .callout");
-        if (!root || info.endLine > doc.lines) return null;
-        const title = root.querySelector<HTMLElement>(":scope > .callout-title");
-        if (!title) return null;
-        const group: BlockRange = {
-          startLine: info.startLine,
-          endLine: info.endLine,
-        };
-        const rows: Array<{ block: BlockRange; element: HTMLElement }> = [
-          // The title row stands for itself; hovering it resolves to the
-          // whole Callout through innerBlockAt().
-          { block: { startLine: group.startLine, endLine: group.startLine }, element: title },
-        ];
-        const content = root.querySelector<HTMLElement>(":scope > .callout-content");
-        const inner = quoteInnerBlocks(doc, group, this.fences);
-        if (!content) return inner.length === 0 ? rows : null;
-        let next = 0;
-        for (const child of Array.from(content.children)) {
-          const element = child as HTMLElement;
-          const items = element.matches("ul, ol")
-            ? Array.from(element.children).filter((li) => li.matches("li"))
-            : null;
-          for (const target of items ?? [element]) {
-            const block = inner[next++];
-            if (!block) return null;
-            rows.push({ block, element: target as HTMLElement });
-          }
-        }
-        return next === inner.length ? rows : null;
+        // Obsidian 1.13 renders `.cm-embed-block > .markdown-rendered >
+        // .callout`; looking for the Callout only as a direct child found
+        // nothing there, and every body row resolved to the whole box.
+        const root = renderedCalloutRoot<HTMLElement>(widget);
+        return root && info.endLine <= doc.lines
+          ? calloutRowsFromDom(root, info, doc, this.fences)
+          : null;
       }
 
       /** Rendered Callout row covering `lineNo`, smallest block first. */
@@ -11683,7 +16662,10 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         this.handleKind = kind;
         const table = kind === "table";
         this.handle.classList.toggle("is-table-block", table);
-        this.handle.setAttribute("aria-label", t(table ? "Drag table" : "Drag block"));
+        this.handle.setAttribute(
+          "aria-label",
+          t(table ? "Drag to move table · Click for menu" : "Drag to move · Click for menu")
+        );
         setIcon(this.handle, table ? "table" : "grip-vertical");
       }
 
@@ -11754,7 +16736,22 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
       }
 
       handleMouseMove(e: MouseEvent) {
-        if (this.dragging || this.pendingDrag) return;
+        guard(
+          "drag handle hover",
+          () => this.hideHover(),
+          () => this.handleMouseMoveUnguarded(e)
+        );
+      }
+
+      handleMouseMoveUnguarded(e: MouseEvent) {
+        if (this.checkNested()) return;
+        if (this.destroyed || this.dragging || this.pendingDrag) return;
+        if (this.quietSelection) this.quietPointerMove(e);
+        // While a block menu is open the pointer is on its way to the
+        // menu: the highlight stays on the menu's block, and no other
+        // block's controls pop up under the pointer on the way.
+        if (this.menuBlock) return;
+        this.passId++;
         const eventTarget = e.target as Element | null;
         if (eventTarget?.closest?.(".nf-columns-editor")) {
           this.hideHover();
@@ -11770,15 +16767,37 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
           return;
         }
         const line = this.view.state.doc.lineAt(pos);
+        // Still on the row the visible controls were measured for: nothing
+        // below would place them anywhere else, so skip the geometry.
+        const scrollTop = this.view.scrollDOM.scrollTop;
+        const last = this.lastHover;
+        if (
+          last &&
+          last.line === line.number &&
+          last.doc === this.view.state.doc &&
+          last.scrollTop === scrollTop &&
+          last.selection === this.selectedBlocks &&
+          this.controls.style.display !== "none"
+        ) return;
+        this.lastHover = {
+          line: line.number,
+          doc: this.view.state.doc,
+          scrollTop,
+          selection: this.selectedBlocks,
+        };
         // The smallest block the mouse is in — this is exactly what a drag
         // would move, and exactly what gets highlighted. Inside a Callout
         // that is the row itself; its title row still grabs the whole box.
-        const block = innerBlockAt(this.view.state.doc, line.number, this.fences);
-        if (!block) {
+        const inner = innerBlockAt(this.view.state.doc, line.number, this.fences);
+        if (!inner) {
           this.hideHover();
           return;
         }
+        // Inside a block selection the handle belongs to the selection as
+        // a whole: it sits on its first row and drags every block in it.
+        const block = this.selectedSpanAt(line.number) ?? inner;
         this.hoverBlock = block;
+        this.hoverInnerBlock = inner;
         const doc = this.view.state.doc;
         const pointed = this.view.dom.ownerDocument.elementFromPoint(e.clientX, e.clientY);
         const tableWidget =
@@ -11839,6 +16858,15 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
           return;
         }
         const contentRect = this.view.contentDOM.getBoundingClientRect();
+        // A rendered Callout or toggle centres on its title's words (the
+        // flat look pads its title bar unevenly), which sit lower than the
+        // widget's top plus a line height (7.9 px high before). A columns
+        // row hides its title (height 0) and keeps the top anchoring below,
+        // as does a table.
+        const titleRect = widgetAtStart?.element.classList.contains("cm-callout")
+          ? (widgetAtStart.element.querySelector(".callout-title-inner") ??
+              widgetAtStart.element.querySelector(".callout-title"))?.getBoundingClientRect() ?? null
+          : null;
         // Vertically center on the first line (headings are taller); for a
         // widget-rendered block (table) sit at its top edge instead.
         const firstRow = sourceRow ??
@@ -11850,6 +16878,8 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
                   calloutRect.top + this.view.defaultLineHeight
                 ),
               }
+            : titleRect && titleRect.height > 0
+            ? { top: titleRect.top, bottom: titleRect.bottom }
             : widgetAtStart
             ? {
                 top: widgetAtStart.info.rect.top,
@@ -11904,8 +16934,91 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
       hideHover() {
         if (this.dragging || this.pendingDrag || this.selecting || this.pendingSelect) return;
         this.controls.style.display = "none";
-        this.highlight.style.display = "none";
+        // The block of an open menu keeps its highlight; a scroll or a
+        // geometry change re-measures it instead.
+        if (this.menuBlock) this.refreshMenuHighlight();
+        else this.highlight.style.display = "none";
         this.hoverBlock = null;
+        this.hoverInnerBlock = null;
+        this.lastHover = null;
+      }
+
+      /** Open the block menu for `block` beside `anchor`, keeping the block
+       *  highlighted until the menu closes. */
+      openMenuFor(
+        block: BlockRange,
+        anchor: MouseEvent | { x: number; y: number; left?: boolean }
+      ) {
+        this.menuBlock = block;
+        guard(
+          "block menu highlight",
+          () => {
+            this.highlight.style.display = "none";
+          },
+          () => this.showHighlight(block)
+        );
+        try {
+          openBlockMenu(
+            plugin.app,
+            this.view,
+            block,
+            this.fences,
+            anchor,
+            plugin.settings.slashCommands,
+            plugin.settings.columnLayout,
+            plugin.settings.toggleBlocks,
+            (landed, span, inside) => this.landSelection(landed, span, inside),
+            () => this.releaseMenuBlock(block),
+            plugin.operations
+          );
+        } catch (err) {
+          // No menu will ever close to release it: hovering must not stay
+          // switched off.
+          this.releaseMenuBlock(block);
+          throw err;
+        }
+      }
+
+      /** The menu for `block` closed (a later menu may already own the
+       *  highlight; then this one has nothing to release). */
+      releaseMenuBlock(block: BlockRange) {
+        if (this.menuBlock !== block) return;
+        this.dropMenuHighlight();
+      }
+
+      dropMenuHighlight() {
+        this.menuBlock = null;
+        if (this.menuHighlightFrame != null) {
+          this.ownerWindow.cancelAnimationFrame(this.menuHighlightFrame);
+          this.menuHighlightFrame = null;
+        }
+        if (!this.destroyed && !this.dragging && !this.pendingDrag) {
+          this.highlight.style.display = "none";
+        }
+      }
+
+      /** Re-measure the open menu's highlight a frame later: the callers
+       *  include ViewPlugin.update, where reading layout is not allowed. */
+      refreshMenuHighlight() {
+        if (this.menuHighlightFrame != null || this.destroyed) return;
+        this.menuHighlightFrame = this.ownerWindow.requestAnimationFrame(() => {
+          this.menuHighlightFrame = null;
+          guard(
+            "block menu highlight",
+            () => {
+              this.highlight.style.display = "none";
+            },
+            () => {
+              const block = this.menuBlock;
+              if (!block || this.destroyed || this.dragging || this.pendingDrag) return;
+              if (block.endLine > this.view.state.doc.lines) {
+                this.highlight.style.display = "none";
+                return;
+              }
+              this.showHighlight(block);
+            }
+          );
+        });
       }
 
       /** "+" button: open a fresh line below the block and pop the slash
@@ -11916,14 +17029,34 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         this.highlight.style.display = "none";
       }
 
+      /** Alt-click on "+": the same, above the block. */
+      insertAbove(block: BlockRange) {
+        insertBlockAbove(this.view, block, plugin.settings.slashCommands);
+        this.controls.style.display = "none";
+        this.highlight.style.display = "none";
+      }
+
       /** Mousedown arms a *pending* drag; movement > 4px turns it into a
        *  real drag, a clean mouseup opens the block menu instead. */
       startDrag(e: MouseEvent) {
         if (e.button !== 0 || !this.hoverBlock) return;
         e.preventDefault();
         e.stopPropagation();
-        this.clearBlockSelection();
-        this.pendingDrag = { x: e.clientX, y: e.clientY, block: this.hoverBlock };
+        const hover = this.hoverBlock;
+        const clickBlock = this.hoverInnerBlock ?? hover;
+        // Grabbing a selected block takes the whole selection along, as one
+        // span; it stays painted so the drag shows what is moving.
+        const span = this.selectedSpanAt(hover.startLine);
+        const box = this.handle.getBoundingClientRect();
+        const handle = box.width > 0 ? { left: box.left, top: box.top } : null;
+        if (span) {
+          this.dragSpanBlocks = this.selectedBlocks.slice();
+          this.pendingDrag = { x: e.clientX, y: e.clientY, block: span, clickBlock, handle };
+        } else {
+          this.clearBlockSelection();
+          this.dragSpanBlocks = null;
+          this.pendingDrag = { x: e.clientX, y: e.clientY, block: hover, clickBlock, handle };
+        }
         // Capture phase: keep tracking even while the pointer crosses a
         // table widget that swallows bubbled mouse events.
         this.ownerDocument.addEventListener("mousemove", this.onDocMove, true);
@@ -11948,23 +17081,45 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         this.dropIndent = undefined;
         this.dropCandidatesLine = -1;
         this.dropCandidates = [];
+        this.dropCandidateX = [];
         this.ownerDocument.body.classList.add("nf-dragging");
         this.handle.classList.add("is-dragging");
         this.highlight.classList.add("is-dragging");
-        this.showGhost(this.dragBlock);
+        // A dragged selection keeps its marks; its toolbar would sit over
+        // the rows the pointer is aiming between.
+        this.selectionToolbar.style.display = "none";
+        this.showGhost(this.dragBlock, this.dragSpanBlocks?.length ?? 1);
       }
 
-      showGhost(block: BlockRange) {
+      /** `count` > 1: the ghost of a block selection — its first rows plus
+       *  a badge with the block count. */
+      showGhost(block: BlockRange, count = 1) {
         const doc = this.view.state.doc;
         const depth = quotePrefixDepth(block.quotePrefix);
         const source = doc.sliceString(
           doc.line(block.startLine).from,
-          doc.line(Math.min(block.endLine, block.startLine + 5)).to
+          doc.line(Math.min(block.endLine, block.startLine + (count > 1 ? 11 : 5))).to
         );
         // The ghost previews the block, not the container it is riding in.
         const raw = depth > 0 ? rewriteQuotePrefix(source, depth, "") : source;
         const lines = block.endLine - block.startLine + 1;
         this.ghost.empty();
+        if (count > 1) {
+          const rows = raw.split("\n").filter((row) => row.trim() !== "");
+          const preview = rows.slice(0, 3).join("\n");
+          this.ghost.createDiv({
+            cls: "nf-drag-ghost-text",
+            text:
+              (preview === "" ? t("Empty line") : preview.slice(0, 240)) +
+              (rows.length > 3 || lines > 12 || preview.length > 240 ? "\n…" : ""),
+          });
+          this.ghost.createDiv({
+            cls: "nf-drag-ghost-count",
+            text: t("{n} blocks").replace("{n}", String(count)),
+          });
+          this.ghost.style.display = "block";
+          return;
+        }
         this.ghost.createDiv({
           cls: "nf-drag-ghost-text",
           text: raw.trim() === "" ? t("Empty line") : raw.slice(0, 240),
@@ -11979,6 +17134,8 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
       }
 
       handleDragMove(e: MouseEvent) {
+        if (this.destroyed) return;
+        this.passId++;
         if (this.pendingDrag) {
           const dx = e.clientX - this.pendingDrag.x;
           const dy = e.clientY - this.pendingDrag.y;
@@ -12052,6 +17209,7 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
 
       updateDropTarget(x: number, y: number) {
         if (!this.dragBlock) return;
+        this.passId++;
 
         const colTarget = this.columnDropTarget(x, y);
         const colRect = colTarget ? this.blockRect(colTarget) : null;
@@ -12112,6 +17270,9 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         if (this.dropCandidatesLine !== target) {
           this.dropCandidatesLine = target;
           this.dropCandidates = cands;
+          this.dropCandidateX = cands.map((lvl, i) =>
+            this.dropLevelX(doc, target, lvl, i, contentRect.left)
+          );
         }
         const level = pickDropLevel(
           cands,
@@ -12124,7 +17285,10 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         this.dropQuotePrefix = level.quotePrefix;
 
         const visualLevel = Math.max(0, cands.indexOf(level));
-        const xOff = Math.min(visualLevel * this.visualIndentStep, contentRect.width / 2);
+        const xOff = Math.min(
+          this.dropCandidateX[visualLevel] ?? visualLevel * this.visualIndentStep,
+          contentRect.width / 2
+        );
         let indicatorY: number;
         if (target > doc.lines) {
           indicatorY = this.posY(doc.length, "bottom") ?? contentRect.bottom;
@@ -12139,13 +17303,34 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         this.showHighlight(this.dragBlock);
       }
 
+      /** The indicator's offset for drop level `lvl` (index `index` of
+       *  the candidates): where the dropped block's words will start, read
+       *  off the list item it nests into (dropLevelAnchor). A quote level,
+       *  or a level no item on screen matches, keeps the step formula. */
+      dropLevelX(doc: Text, target: number, lvl: DropLevel, index: number, contentLeft: number): number {
+        const fallback = index * this.visualIndentStep;
+        if (lvl.quotePrefix !== "") return fallback;
+        if (lvl.indent === 0) return 0;
+        const anchor = dropLevelAnchor(doc, target, lvl.indent, this.fences, this.dragBlock);
+        if (!anchor) return fallback;
+        const coords = this.view.coordsAtPos(doc.line(anchor.line).from + anchor.offset);
+        return coords ? Math.max(0, coords.left - contentLeft) : fallback;
+      }
+
       /** Tear down every drag affordance (shared by drop, Esc, destroy). */
       endDrag() {
         this.ownerDocument.removeEventListener("mousemove", this.onDocMove, true);
         this.ownerDocument.removeEventListener("mouseup", this.onDocUp, true);
-        this.ownerDocument.removeEventListener("keydown", this.onKeyDown, true);
+        // A span drag keeps its selection painted; a drag that ends without
+        // a move (Escape, released in place or outside the editor) must
+        // leave the key handler armed for it, or Escape/Backspace/arrows
+        // would stop reaching the blocks still shown selected.
+        if (this.selectedBlocks.length === 0) {
+          this.ownerDocument.removeEventListener("keydown", this.onKeyDown, true);
+        }
         this.stopAutoScroll();
         this.pendingDrag = null;
+        this.dragSpanBlocks = null;
         this.dragging = false;
         this.dragBlock = null;
         this.dropColumnsTarget = null;
@@ -12154,6 +17339,7 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         this.dropQuotePrefix = undefined;
         this.dropCandidatesLine = -1;
         this.dropCandidates = [];
+        this.dropCandidateX = [];
         this.dragStartX = 0;
         this.dragBaseIndent = 0;
         this.dragBaseQuotePrefix = "";
@@ -12166,9 +17352,15 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         this.controls.style.display = "none";
         this.highlight.style.display = "none";
         this.hoverBlock = null;
+        // A selection that survived (Escape, a release in place) gets its
+        // toolbar back, unless it is a quiet landing.
+        if (this.selectedBlocks.length > 0) this.scheduleSelectionRender();
       }
 
       handleDrop(e: MouseEvent) {
+        // A move still waiting for its frame decides where this lands.
+        this.flushMove();
+        this.pointer = { x: e.clientX, y: e.clientY };
         const pending = this.pendingDrag;
         const wasDragging = this.dragging;
         const block = this.dragBlock;
@@ -12177,22 +17369,24 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
         const dropQuotePrefix = this.dropQuotePrefix;
         const colTarget = this.dropColumnsTarget;
         this.endDrag();
+        let landed: number | null = null;
         if (pending) {
-          // Click without drag → block menu.
-          openBlockMenu(
-            this.view,
-            pending.block,
-            this.fences,
-            e,
-            plugin,
-            plugin.settings.slashCommands,
-            plugin.settings.columnLayout,
-            plugin.settings.toggleBlocks
+          // Click without drag → block menu, for the block under the
+          // pointer; a selection grabbed and released is just released.
+          if (pending.block.kind === "span") this.clearBlockSelection();
+          this.openMenuFor(
+            pending.clickBlock,
+            pending.handle ? blockMenuAnchor(pending.handle) : e
           );
         } else if (wasDragging && block && colTarget) {
-          dropAsColumn(this.view, block, colTarget);
+          // The new column opens in the visual column editor, ready to
+          // type: its ring is the landing feedback, and no caret or
+          // selection is left on the raw `> >` scaffolding.
+          const column = dropAsColumn(this.view, block, colTarget);
+          if (column != null) this.openDroppedColumn(column);
+          return;
         } else if (wasDragging && block && dropLine > 0) {
-          moveBlock(
+          landed = moveBlock(
             this.view,
             block,
             dropLine,
@@ -12202,14 +17396,39 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
             dropQuotePrefix
           );
         }
+        // The move cleared any selection; select what landed, where it
+        // landed, so the next key or drag already has it. A row that
+        // landed inside a Callout (or as a column) is selected as that row,
+        // not as the container its ">" markers now belong to.
+        if (landed != null && block) {
+          this.landSelection(
+            landed,
+            block.endLine - block.startLine + 1,
+            Boolean(dropQuotePrefix || block.quotePrefix) || colTarget != null
+          );
+        }
       }
 
       update(update: ViewUpdate) {
+        // A throw here would have CodeMirror retire the whole plugin —
+        // handles, block selection and drag alike — for the editor's life.
+        // Dropping the (possibly stale) selection is the safe recovery.
+        guard(
+          "drag handles",
+          () => this.clearBlockSelection(),
+          () => this.updateUnguarded(update)
+        );
+      }
+
+      updateUnguarded(update: ViewUpdate) {
         if (update.geometryChanged) this.listIndentCache = null;
+        if (update.geometryChanged || update.viewportChanged || update.docChanged) {
+          this.widgetScan = null;
+        }
         if (update.geometryChanged || update.viewportChanged) {
           this.hideHover();
           if (this.selectedBlocks.length > 0) {
-            this.ownerWindow.requestAnimationFrame(() => this.renderBlockSelection());
+            this.scheduleSelectionRender();
           }
         }
         if (update.docChanged) {
@@ -12225,24 +17444,49 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
             this.selectedBlocks[this.selectedBlocks.length - 1].endLine <=
               update.state.doc.lines
           ) {
-            this.ownerWindow.requestAnimationFrame(() => this.renderBlockSelection());
+            this.scheduleSelectionRender();
           } else {
             this.clearBlockSelection();
           }
           this.dropCandidatesLine = -1;
           this.dropCandidates = [];
+          this.dropCandidateX = [];
+          // An edit (a menu action, a sync) makes the open menu's line
+          // numbers stale: stop painting them.
+          if (this.menuBlock) this.dropMenuHighlight();
           // Hover geometry is stale after an edit; next mousemove re-shows.
           this.hideHover();
         }
       }
 
       destroy() {
+        this.destroyed = true;
+        if (this.moveFrame != null) {
+          this.ownerWindow.cancelAnimationFrame(this.moveFrame);
+          this.moveFrame = null;
+        }
+        if (this.scrollSettleTimer != null) {
+          this.ownerWindow.clearTimeout(this.scrollSettleTimer);
+          this.scrollSettleTimer = null;
+        }
+        this.lastMove = null;
+        this.lastPointer = null;
+        if (this.selectionFrame != null) {
+          this.ownerWindow.cancelAnimationFrame(this.selectionFrame);
+          this.selectionFrame = null;
+        }
+        if (this.menuHighlightFrame != null) {
+          this.ownerWindow.cancelAnimationFrame(this.menuHighlightFrame);
+          this.menuHighlightFrame = null;
+        }
+        this.menuBlock = null;
+        this.widgetScan = null;
+        this.clipboard.destroy();
         this.view.scrollDOM.removeEventListener("mousemove", this.onMouseMove, true);
         this.view.scrollDOM.removeEventListener("mousedown", this.onEditorMouseDown, true);
         this.view.scrollDOM.removeEventListener("scroll", this.onScroll);
         this.view.scrollDOM.removeEventListener("mouseleave", this.onLeave);
         this.view.contentDOM.removeEventListener("blur", this.onEditorBlur, true);
-        this.view.contentDOM.removeEventListener("keydown", this.onSelectKeyDown);
         this.ownerWindow.removeEventListener("blur", this.onWindowBlur);
         if (this.activeLeafChangeRef) {
           plugin.app.workspace.offref(this.activeLeafChangeRef);
@@ -12282,20 +17526,86 @@ function makeDragHandlePlugin(plugin: NotionFlowPlugin) {
 /* while the active line keeps its editable source marker.             */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Whether an edit leaves the list rendering (ordered-marker labels, list
+ * phases) exactly as it was, so the markers can be mapped instead of
+ * re-derived from a walk over the whole note (about 2 ms a key at 6,000
+ * lines). The source model (collectSourceListRendering) reads each row as
+ * blank, a list marker, a fence row, or other text at some indentation, and
+ * any unindented text row ends every open list the same way. So an edit is
+ * safe when every row it touches, before and after, is unindented, not
+ * blank, neither a list item nor a fence marker (bare or inside quote
+ * markers), and at one quote depth (a quoted fence ends where the depth
+ * drops); and the rows on either side are blank or the same kind of plain
+ * row. That keeps out edits that start, end or split a list (a new marker,
+ * a row emptied or filled, a list item's own row) and a typed ``` that
+ * turns the lists below it into code. Gives up (false) past ~200 rows.
+ */
+export function listRenderingUnaffected(before: Text, after: Text, changes: ChangeSet): boolean {
+  let checked = 0;
+  const listLike = (text: string): boolean => {
+    if (indentWidth(text) !== 0 || RE_LIST.test(text) || RE_FENCE_MARKER.test(text)) return true;
+    const quote = quoteMarkerPrefix(text);
+    if (!quote) return false;
+    const rest = text.slice(quote.length);
+    return RE_LIST.test(rest) || RE_FENCE_MARKER.test(rest);
+  };
+  const plain = (doc: Text, from: number, to: number, depth: { value: number | null }): boolean => {
+    const first = doc.lineAt(from).number;
+    const last = doc.lineAt(to).number;
+    for (let n = first; n <= last; n++) {
+      if (++checked > 200) return false;
+      const text = doc.line(n).text;
+      if (RE_BLANK.test(text) || listLike(text)) return false;
+      const d = quoteDepth(text);
+      if (depth.value == null) depth.value = d;
+      else if (d !== depth.value) return false;
+    }
+    for (const n of [first - 1, last + 1]) {
+      if (n < 1 || n > doc.lines) continue;
+      const text = doc.line(n).text;
+      if (!RE_BLANK.test(text) && listLike(text)) return false;
+    }
+    return true;
+  };
+  let unaffected = true;
+  changes.iterChangedRanges((fromA, toA, fromB, toB) => {
+    if (!unaffected) return;
+    const depth = { value: null as number | null };
+    if (!(plain(before, fromA, toA, depth) && plain(after, fromB, toB, depth))) unaffected = false;
+  });
+  return unaffected;
+}
+
 function makeListMarkerPlugin() {
   return ViewPlugin.fromClass(
     class ListMarkerView {
       decorations: DecorationSet;
 
       constructor(view: EditorView) {
-        this.decorations = this.build(view);
+        this.decorations = guard(
+          "list markers",
+          () => Decoration.none,
+          () => this.build(view)
+        );
       }
 
       update(update: ViewUpdate) {
-        const treeChanged = syntaxTree(update.startState) !== syntaxTree(update.state);
-        if (update.docChanged || treeChanged) {
-          this.decorations = this.build(update.view);
-        }
+        // The rendering model is a function of the document: Obsidian's
+        // tree carries no list containers, so every build reads the
+        // memoised source walk, and a tree that merely re-parses (each
+        // caret move and scroll) changes nothing. Only an edit rebuilds.
+        if (!update.docChanged) return;
+        this.decorations = guard(
+          "list markers",
+          () => this.decorations.map(update.changes),
+          () =>
+            // Typing in plain prose cannot move a list marker: skip the
+            // whole-note walk.
+            listRenderingUnaffected(update.startState.doc, update.state.doc, update.changes)
+              ? this.decorations.map(update.changes)
+              : this.build(update.view)
+        );
       }
 
       build(view: EditorView): DecorationSet {
@@ -12476,6 +17786,67 @@ function visualNestCss(depth: number): string {
   return `calc(${Array(depth).fill("var(--list-indent)").join(" + ")})`;
 }
 
+/** Whether a caret move between two rows of ONE document can make Live
+ *  Preview swap a rendered widget for its source (or back): the rows sit
+ *  in different fences, or in different blocks of which at least one is a
+ *  quote/Callout (top-level, quoted, or `- > quote` inside a list item).
+ *  A move inside one block, or between plain paragraphs, leaves the widget
+ *  layer as it was, so the nested-indent sync has nothing to redo. */
+export function caretMoveSwapsWidgets(
+  doc: Text,
+  oldLine: number,
+  newLine: number,
+  fences: FenceRange[] = cachedFences(doc)
+): boolean {
+  if (oldLine === newLine) return false;
+  if (fenceAt(fences, oldLine) !== fenceAt(fences, newLine)) return true;
+  const a = getBlockRange(doc, oldLine, fences);
+  const b = getBlockRange(doc, newLine, fences);
+  if (!a || !b) return true;
+  if (a.startLine === b.startLine && a.endLine === b.endLine) return false;
+  const quoted = (block: BlockRange) => {
+    if (block.quotePrefix != null) return true;
+    const head = doc.line(block.startLine).text;
+    return RE_QUOTE.test(head) || inlineListQuoteMarker(head) != null;
+  };
+  return quoted(a) || quoted(b);
+}
+
+/** One line's measured layer offsets, read in the measure phase and
+ *  written afterwards. `null` leaves a property as it is; `""` for the
+ *  quote continuation removes it. */
+interface LineLayerPlan {
+  el: HTMLElement;
+  nest: string | null;
+  cont: string | null;
+  inlineQuoteLeft: string | null;
+}
+
+/** What a rendered widget should carry, computed from the document once
+ *  per doc version and diffed against the DOM before any write. */
+interface WidgetPlan {
+  widget: HTMLElement;
+  nested: boolean;
+  nest: string;
+  mixed: boolean;
+  cut: string | null;
+  render: { block: BlockRange; indent: number } | null;
+}
+
+/** Document-derived facts about one widget element. Valid while the
+ *  document and the widget's rendered/source state are unchanged: the
+ *  element cannot move to other rows without the document changing. */
+interface WidgetFacts {
+  doc: Text;
+  hasSource: boolean;
+  startLine: number;
+  endLine: number;
+  depth: number;
+  mixed: boolean;
+  primary: BlockRange | null;
+  isCallout: boolean;
+}
+
 export function makeNestedIndentPlugin(plugin: NotionFlowPlugin) {
   return ViewPlugin.fromClass(
     class NestedIndentView {
@@ -12495,11 +17866,38 @@ export function makeNestedIndentPlugin(plugin: NotionFlowPlugin) {
         HTMLElement,
         { component: Component; signature: string; container: HTMLElement }
       >();
+      /** Per-widget facts, keyed on the element so a widget Obsidian keeps
+       * across caret moves is not re-resolved (posAtDOM, lineBlockAt, list
+       * depth) on every pass. Entries expire with the document. */
+      widgetFacts = new WeakMap<Element, WidgetFacts>();
+      destroyed = false;
+      /** One measure request for both layers: every DOM read (coords,
+       * rects, line elements) happens in `read`, every style/class write
+       * in `write`, so a pass never interleaves the two. Keyed on the
+       * plugin so repeated requests before the measure phase coalesce. */
+      measureRequest = {
+        key: this,
+        read: (): { widgets: WidgetPlan[]; lines: LineLayerPlan[] } | null =>
+          this.destroyed
+            ? null
+            : { widgets: this.readWidgets(), lines: this.readLineLayers() },
+        write: (
+          plan: { widgets: WidgetPlan[]; lines: LineLayerPlan[] } | null
+        ) => {
+          if (!plan || this.destroyed) return;
+          this.writeWidgets(plan.widgets);
+          this.writeLineLayers(plan.lines);
+        },
+      };
 
       constructor(view: EditorView) {
         this.view = view;
         this.fences = cachedFences(view.state.doc);
-        this.decorations = this.build(view);
+        this.decorations = guard(
+          "nested indent",
+          () => Decoration.none,
+          () => this.build(view)
+        );
         // The measured layer offsets live in each line's style attribute,
         // which CM and Obsidian's own indent styling rewrite on their own
         // schedule (decoration redraws, async font/metric passes). Losing
@@ -12513,7 +17911,7 @@ export function makeNestedIndentPlugin(plugin: NotionFlowPlugin) {
             if (!el.classList?.contains("nf-nested-block")) continue;
             const nest = el.style.getPropertyValue("--nf-nest");
             if (!nest || nest.includes("var(")) {
-              this.scheduleWidgetSync();
+              this.scheduleWidgetSyncFrame();
               return;
             }
           }
@@ -12536,20 +17934,44 @@ export function makeNestedIndentPlugin(plugin: NotionFlowPlugin) {
           this.codeSpans.clear();
         }
         if (update.docChanged || update.viewportChanged || update.geometryChanged) {
-          this.decorations = this.build(update.view);
+          this.decorations = guard(
+            "nested indent",
+            () => this.decorations.map(update.changes),
+            () => this.build(update.view)
+          );
+          this.scheduleWidgetSync();
+          return;
         }
-        // Selection changes swap rendered callouts for source-edit widgets
-        // without necessarily changing the document or viewport.
-        this.scheduleWidgetSync();
+        // A caret move can swap a rendered Callout or code block for its
+        // source (or back) without changing the document or viewport; a
+        // move that stays inside one block, or between plain paragraphs,
+        // cannot, and schedules nothing.
+        if (update.selectionSet) {
+          const doc = update.state.doc;
+          const oldLine = doc.lineAt(update.startState.selection.main.head).number;
+          const newLine = doc.lineAt(update.state.selection.main.head).number;
+          if (caretMoveSwapsWidgets(doc, oldLine, newLine, this.fences)) {
+            this.scheduleWidgetSync();
+          }
+        }
       }
 
+      /** Queue one read/write pass in CodeMirror's measure phase. */
       scheduleWidgetSync() {
+        if (this.destroyed) return;
+        this.view.requestMeasure(this.measureRequest);
+      }
+
+      /** The MutationObserver path: a style attribute is being rewritten
+       * right now (by CodeMirror or Obsidian), so wait for the next frame
+       * before queueing the measure rather than reacting mid-write. */
+      scheduleWidgetSyncFrame() {
+        if (this.destroyed) return;
         const win = this.view.dom.ownerDocument.defaultView ?? window;
         if (this.frame != null) win.cancelAnimationFrame(this.frame);
         this.frame = win.requestAnimationFrame(() => {
           this.frame = null;
-          this.syncWidgets();
-          this.syncLineLayers();
+          this.scheduleWidgetSync();
         });
       }
 
@@ -12601,10 +18023,14 @@ export function makeNestedIndentPlugin(plugin: NotionFlowPlugin) {
        * spaces-indented fence under a tab-indented list paints its
        * background past the first characters. After layout, replace the
        * estimate with the measured text position; background, quote rule,
-       * hover highlight, and handle anchor then share one x. */
-      syncLineLayers() {
+       * hover highlight, and handle anchor then share one x.
+       *
+       * This is the read half: every coordsAtPos/getBoundingClientRect
+       * happens here, in the measure phase, and nothing is written. */
+      readLineLayers(): LineLayerPlan[] {
         const view = this.view;
         const doc = view.state.doc;
+        const plans: LineLayerPlan[] = [];
         const fenceLefts = new Map<number, number | null>();
         // HyperMD only gives the FIRST line of a quote nested in a list the
         // list-line hanging indent (later lines' leading whitespace becomes
@@ -12618,64 +18044,71 @@ export function makeNestedIndentPlugin(plugin: NotionFlowPlugin) {
           indent: number;
           headOffset: number;
         } | null = null;
-        for (const range of view.visibleRanges) {
-          let pos = range.from;
-          while (pos <= range.to) {
-            const line = doc.lineAt(pos);
-            pos = line.to + 1;
-            const fence = fenceAt(this.fences, line.number);
-            const quote = !fence && RE_QUOTE.test(line.text);
-            const inlineQuote = !fence
-              ? inlineListQuoteMarker(line.text)
-              : null;
-            if (!quote && !inlineQuote && !(fence && fence.indent > 0)) continue;
-
-            if (inlineQuote) {
-              try {
-                const start = this.view.coordsAtPos(
-                  line.from + inlineQuote.from,
-                  1
-                );
-                const el = this.lineElement(line.from);
-                if (start && el) {
-                  const offset = start.left - el.getBoundingClientRect().left;
-                  if (Number.isFinite(offset) && offset >= 0) {
-                    el.style.setProperty("--nf-inline-quote-left", `${offset}px`);
-                  }
+        for (const n of visibleLineNumbers(doc, view.visibleRanges)) {
+          const line = doc.line(n);
+          const fence = fenceAt(this.fences, line.number);
+          const quote = !fence && RE_QUOTE.test(line.text);
+          const inlineQuote = !fence
+            ? inlineListQuoteMarker(line.text)
+            : null;
+          if (!quote && !inlineQuote && !(fence && fence.indent > 0)) continue;
+          if (inlineQuote) {
+            try {
+              const start = this.view.coordsAtPos(
+                line.from + inlineQuote.from,
+                1
+              );
+              const el = this.lineElement(line.from);
+              if (start && el) {
+                const offset = start.left - el.getBoundingClientRect().left;
+                if (Number.isFinite(offset) && offset >= 0) {
+                  plans.push({
+                    el,
+                    nest: null,
+                    cont: null,
+                    inlineQuoteLeft: `${offset}px`,
+                  });
                 }
-              } catch {
-                // The visible line was replaced between the viewport walk
-                // and measurement. The next animation frame recalculates it.
               }
-              continue;
+            } catch {
+              // The visible line was replaced between the viewport walk
+              // and measurement. The next pass recalculates it.
             }
+            continue;
+          }
 
-            const anchorLine = fence ? fence.startLine : line.number;
-            if (listNestingDepth(doc, anchorLine, this.fences) === 0) continue;
-            let left: number | null;
-            if (fence) {
-              if (!fenceLefts.has(fence.startLine)) {
-                fenceLefts.set(
-                  fence.startLine,
-                  this.measureFenceTextLeft(fence)
-                );
-              }
-              left = fenceLefts.get(fence.startLine) ?? null;
-            } else {
-              left = this.measureTextLeft(
-                line.from,
-                line.text,
-                indentWidth(line.text)
+          const anchorLine = fence ? fence.startLine : line.number;
+          if (listNestingDepth(doc, anchorLine, this.fences) === 0) continue;
+          let left: number | null;
+          if (fence) {
+            if (!fenceLefts.has(fence.startLine)) {
+              fenceLefts.set(
+                fence.startLine,
+                this.measureFenceTextLeft(fence)
               );
             }
-            if (left == null) continue;
-            const el = this.lineElement(line.from);
-            if (!el) continue;
-            const offset = left - el.getBoundingClientRect().left;
-            if (Number.isFinite(offset) && offset >= 0) {
-              el.style.setProperty("--nf-nest", `${offset}px`);
-            }
-            if (!quote || !Number.isFinite(offset)) continue;
+            left = fenceLefts.get(fence.startLine) ?? null;
+          } else {
+            left = this.measureTextLeft(
+              line.from,
+              line.text,
+              indentWidth(line.text)
+            );
+          }
+          if (left == null) continue;
+          const el = this.lineElement(line.from);
+          if (!el) continue;
+          const offset = left - el.getBoundingClientRect().left;
+          const plan: LineLayerPlan = {
+            el,
+            nest: null,
+            cont: null,
+            inlineQuoteLeft: null,
+          };
+          if (Number.isFinite(offset) && offset >= 0) {
+            plan.nest = `${offset}px`;
+          }
+          if (quote && Number.isFinite(offset)) {
             const indent = indentWidth(line.text);
             if (
               prevQuote &&
@@ -12683,19 +18116,49 @@ export function makeNestedIndentPlugin(plugin: NotionFlowPlugin) {
               prevQuote.indent === indent
             ) {
               const delta = prevQuote.headOffset - offset;
-              if (delta > 0.5) {
-                el.style.setProperty("--nf-quote-cont", `${delta}px`);
-              } else {
-                el.style.removeProperty("--nf-quote-cont");
-              }
+              plan.cont = delta > 0.5 ? `${delta}px` : "";
               prevQuote = {
                 lineNo: line.number,
                 indent,
                 headOffset: prevQuote.headOffset,
               };
             } else {
-              el.style.removeProperty("--nf-quote-cont");
+              plan.cont = "";
               prevQuote = { lineNo: line.number, indent, headOffset: offset };
+            }
+          }
+          if (plan.nest != null || plan.cont != null) plans.push(plan);
+        }
+        return plans;
+      }
+
+      /** The write half. Each property is compared with the line's live
+       * inline style, not a shadow copy: CodeMirror and Obsidian rewrite
+       * the style attribute on their own schedule (the MutationObserver
+       * above exists for that), and a stale shadow would skip the very
+       * rewrite that repairs a clobbered line. */
+      writeLineLayers(plans: LineLayerPlan[]) {
+        for (const plan of plans) {
+          const style = plan.el.style;
+          if (
+            plan.inlineQuoteLeft != null &&
+            style.getPropertyValue("--nf-inline-quote-left") !==
+              plan.inlineQuoteLeft
+          ) {
+            style.setProperty("--nf-inline-quote-left", plan.inlineQuoteLeft);
+          }
+          if (
+            plan.nest != null &&
+            style.getPropertyValue("--nf-nest") !== plan.nest
+          ) {
+            style.setProperty("--nf-nest", plan.nest);
+          }
+          if (plan.cont != null) {
+            const current = style.getPropertyValue("--nf-quote-cont");
+            if (plan.cont === "") {
+              if (current !== "") style.removeProperty("--nf-quote-cont");
+            } else if (current !== plan.cont) {
+              style.setProperty("--nf-quote-cont", plan.cont);
             }
           }
         }
@@ -12795,7 +18258,150 @@ export function makeNestedIndentPlugin(plugin: NotionFlowPlugin) {
         });
       }
 
-      syncWidgets() {
+      /** Document-derived facts about a widget, resolved once per document
+       * version (and per rendered/source state) and memoised on the
+       * element: a widget Obsidian keeps across caret moves keeps its rows.
+       * Throws (like posAtDOM) when the element has left the editor; the
+       * caller's try/catch skips that widget for the pass. */
+      widgetFactsFor(
+        widget: HTMLElement,
+        doc: Text,
+        isCallout: boolean,
+        hasSource: boolean
+      ): WidgetFacts {
+        const cached = this.widgetFacts.get(widget);
+        if (cached && cached.doc === doc && cached.hasSource === hasSource) {
+          return cached;
+        }
+        const pos = this.view.posAtDOM(widget, 0);
+        const layout = this.view.lineBlockAt(pos);
+        const startLine = doc.lineAt(layout.from).number;
+        const endLine = doc.lineAt(
+          Math.max(layout.from, layout.to > layout.from ? layout.to - 1 : layout.to)
+        ).number;
+        const fence = fenceAt(this.fences, startLine);
+        let facts: WidgetFacts;
+        if (!isCallout && !fence) {
+          facts = {
+            doc,
+            hasSource,
+            startLine,
+            endLine,
+            depth: 0,
+            mixed: false,
+            primary: null,
+            isCallout,
+          };
+        } else {
+          const primary = getBlockRange(doc, startLine, this.fences);
+          const mixed = hasSource && !!primary && primary.endLine < endLine;
+          const depth = fence
+            ? listNestingDepth(doc, fence.startLine, this.fences)
+            : mixed
+              ? (() => {
+                  let shallowest = Infinity;
+                  for (let n = startLine; n <= endLine; n++) {
+                    shallowest = Math.min(
+                      shallowest,
+                      listNestingDepth(doc, n, this.fences)
+                    );
+                    if (shallowest === 0) break;
+                  }
+                  return Number.isFinite(shallowest) ? shallowest : 0;
+                })()
+              : listNestingDepth(doc, startLine, this.fences);
+          facts = {
+            doc,
+            hasSource,
+            startLine,
+            endLine,
+            depth,
+            mixed,
+            primary,
+            isCallout,
+          };
+        }
+        this.widgetFacts.set(widget, facts);
+        return facts;
+      }
+
+      /** Read half of the widget sync: decide what every rendered Callout
+       * and code-block widget should carry. Only the mixed-widget cut
+       * needs layout (text-row rects); everything else is document state. */
+      readWidgets(): WidgetPlan[] {
+        const content = this.view.contentDOM;
+        const doc = this.view.state.doc;
+        const plans: WidgetPlan[] = [];
+        const seen = new Set<Element>();
+        const bare = (widget: HTMLElement): WidgetPlan => ({
+          widget,
+          nested: false,
+          nest: "",
+          mixed: false,
+          cut: null,
+          render: null,
+        });
+        for (const widget of Array.from(
+          content.querySelectorAll<HTMLElement>(
+            ":scope > .cm-embed-block.cm-callout, " +
+              ":scope > .cm-embed-block.cm-preview-code-block"
+          )
+        )) {
+          seen.add(widget);
+          try {
+            const isCallout = widget.classList.contains("cm-callout");
+            const source = isCallout && !widget.querySelector(".callout")
+              ? widget.querySelector<HTMLElement>("pre code") ??
+                widget.querySelector<HTMLElement>("pre")
+              : null;
+            const facts = this.widgetFactsFor(widget, doc, isCallout, !!source);
+            const { primary, depth, mixed } = facts;
+            const plan = bare(widget);
+            plan.nested = depth > 0;
+            plan.nest = depth > 0 ? visualNestCss(depth) : "";
+            plan.mixed = mixed;
+            if (isCallout && source && primary && !mixed && depth > 0) {
+              plan.render = {
+                block: primary,
+                indent: indentWidth(doc.line(primary.startLine).text),
+              };
+            }
+            if (mixed && source && primary) {
+              const rows = sourceTextRows(
+                source,
+                facts.endLine - facts.startLine + 1,
+                this.view.defaultLineHeight
+              );
+              const lastPrimaryRow = primary.endLine - facts.startLine;
+              const pre = source.closest<HTMLElement>("pre") ?? source;
+              const row = rows?.[lastPrimaryRow];
+              if (row) {
+                const cut = Math.max(0, row.bottom - pre.getBoundingClientRect().top);
+                plan.cut = `${cut}px`;
+              }
+            }
+            plans.push(plan);
+          } catch {
+            // A widget can be replaced between scheduling and measurement;
+            // the next view update annotates its replacement.
+          }
+        }
+        // A widget that still carries the plugin's classes but is no longer
+        // a Callout or code-block widget sheds them in the write pass.
+        for (const widget of Array.from(
+          content.querySelectorAll<HTMLElement>(
+            ":scope > .cm-embed-block.nf-nested-widget, :scope > .cm-embed-block.nf-mixed-widget"
+          )
+        )) {
+          if (!seen.has(widget)) plans.push(bare(widget));
+        }
+        return plans;
+      }
+
+      /** Write half: release renders whose widgets left the editor, then
+       * apply each plan, touching a class or property only when the DOM
+       * does not already hold it. */
+      writeWidgets(plans: WidgetPlan[]) {
         const content = this.view.contentDOM;
         const renderedWidgets = new Set([
           ...this.calloutRenders.keys(),
@@ -12806,88 +18412,35 @@ export function makeNestedIndentPlugin(plugin: NotionFlowPlugin) {
             this.releaseCalloutRender(widget);
           }
         }
-        for (const widget of Array.from(
-          content.querySelectorAll<HTMLElement>(
-            ":scope > .cm-embed-block.nf-nested-widget, :scope > .cm-embed-block.nf-mixed-widget"
-          )
-        )) {
-          widget.classList.remove(
-            "nf-nested-widget",
-            "nf-mixed-widget"
-          );
-          widget.style.removeProperty("--nf-nest");
-          widget.style.removeProperty("--nf-mixed-cut");
-        }
-        const doc = this.view.state.doc;
-        for (const widget of Array.from(
-          content.querySelectorAll<HTMLElement>(
-            ":scope > .cm-embed-block.cm-callout, " +
-              ":scope > .cm-embed-block.cm-preview-code-block"
-          )
-        )) {
-          try {
-            const pos = this.view.posAtDOM(widget, 0);
-            const layout = this.view.lineBlockAt(pos);
-            const startLine = doc.lineAt(layout.from).number;
-            const endLine = doc.lineAt(
-              Math.max(layout.from, layout.to > layout.from ? layout.to - 1 : layout.to)
-            ).number;
-            const isCallout = widget.classList.contains("cm-callout");
-            const source = isCallout && !widget.querySelector(".callout")
-              ? widget.querySelector<HTMLElement>("pre code") ??
-                widget.querySelector<HTMLElement>("pre")
-              : null;
-            const fence = fenceAt(this.fences, startLine);
-            if (!isCallout && !fence) continue;
-            const primary = getBlockRange(doc, startLine, this.fences);
-            const mixed = !!source && !!primary && primary.endLine < endLine;
-            const depth = fence
-              ? listNestingDepth(doc, fence.startLine, this.fences)
-              : mixed
-                ? (() => {
-                    let shallowest = Infinity;
-                    for (let n = startLine; n <= endLine; n++) {
-                      shallowest = Math.min(
-                        shallowest,
-                        listNestingDepth(doc, n, this.fences)
-                      );
-                      if (shallowest === 0) break;
-                    }
-                    return Number.isFinite(shallowest) ? shallowest : 0;
-                  })()
-                : listNestingDepth(doc, startLine, this.fences);
-
-            if (isCallout && source && primary && !mixed && depth > 0) {
-              this.renderNestedCallout(
-                widget,
-                primary,
-                indentWidth(doc.line(primary.startLine).text)
-              );
-            }
-
-            if (mixed && source && primary) {
-              widget.classList.add("nf-mixed-widget");
-              const rows = sourceTextRows(
-                source,
-                endLine - startLine + 1,
-                this.view.defaultLineHeight
-              );
-              const lastPrimaryRow = primary.endLine - startLine;
-              const pre = source.closest<HTMLElement>("pre") ?? source;
-              const row = rows?.[lastPrimaryRow];
-              if (row) {
-                const cut = Math.max(0, row.bottom - pre.getBoundingClientRect().top);
-                widget.style.setProperty("--nf-mixed-cut", `${cut}px`);
-              }
-            }
-            if (depth > 0) {
-              widget.classList.add("nf-nested-widget");
-              widget.style.setProperty("--nf-nest", visualNestCss(depth));
-            }
-          } catch {
-            // A widget can be replaced between animation scheduling and
-            // measurement; the next view update annotates its replacement.
+        const setOrRemove = (
+          style: CSSStyleDeclaration,
+          name: string,
+          value: string
+        ) => {
+          const current = style.getPropertyValue(name);
+          if (value === "") {
+            if (current !== "") style.removeProperty(name);
+          } else if (current !== value) {
+            style.setProperty(name, value);
           }
+        };
+        for (const plan of plans) {
+          const { widget } = plan;
+          if (plan.render) {
+            this.renderNestedCallout(
+              widget,
+              plan.render.block,
+              plan.render.indent
+            );
+          }
+          if (widget.classList.contains("nf-mixed-widget") !== plan.mixed) {
+            widget.classList.toggle("nf-mixed-widget", plan.mixed);
+          }
+          setOrRemove(widget.style, "--nf-mixed-cut", plan.mixed ? plan.cut ?? "" : "");
+          if (widget.classList.contains("nf-nested-widget") !== plan.nested) {
+            widget.classList.toggle("nf-nested-widget", plan.nested);
+          }
+          setOrRemove(widget.style, "--nf-nest", plan.nested ? plan.nest : "");
         }
       }
 
@@ -12934,151 +18487,165 @@ export function makeNestedIndentPlugin(plugin: NotionFlowPlugin) {
       build(view: EditorView): DecorationSet {
         const builder = new RangeSetBuilder<Decoration>();
         const doc = view.state.doc;
-        for (const range of view.visibleRanges) {
-          let pos = range.from;
-          while (pos <= range.to) {
-            const line = doc.lineAt(pos);
-            const f = fenceAt(this.fences, line.number);
-            const quote = !f && RE_QUOTE.test(line.text);
-            const inlineQuote = !f
-              ? inlineListQuoteMarker(line.text)
-              : null;
-            const code = !!f && f.indent > 0;
-            // A fence's body may contain empty or deliberately unindented
-            // source lines. They still belong to the opener's list level,
-            // so every painted code-background row uses the opener depth.
-            const depth = quote
-              ? listNestingDepth(doc, line.number, this.fences)
-              : code
-                ? listNestingDepth(doc, f.startLine, this.fences)
-                : 0;
-            if (depth > 0) {
-              builder.add(
-                line.from,
-                line.from,
-                Decoration.line({
-                  attributes: {
-                    class: quote
-                      ? "nf-nested-block nf-nested-quote"
-                      : "nf-nested-block",
-                    style: `--nf-nest:${visualNestCss(depth)};`,
-                  },
-                })
-              );
+        for (const n of visibleLineNumbers(doc, view.visibleRanges)) {
+          const line = doc.line(n);
+          const f = fenceAt(this.fences, line.number);
+          const quote = !f && RE_QUOTE.test(line.text);
+          const inlineQuote = !f
+            ? inlineListQuoteMarker(line.text)
+            : null;
+          const code = !!f && f.indent > 0;
+          // A fence's body may contain empty or deliberately unindented
+          // source lines. They still belong to the opener's list level,
+          // so every painted code-background row uses the opener depth.
+          const depth = quote
+            ? listNestingDepth(doc, line.number, this.fences)
+            : code
+              ? listNestingDepth(doc, f.startLine, this.fences)
+              : 0;
+          if (depth > 0) {
+            builder.add(
+              line.from,
+              line.from,
+              Decoration.line({
+                attributes: {
+                  class: quote
+                    ? "nf-nested-block nf-nested-quote"
+                    : "nf-nested-block",
+                  style: `--nf-nest:${visualNestCss(depth)};`,
+                },
+              })
+            );
+          }
+          // A fence or a list living inside a blockquote: HyperMD leaves
+          // those rows as plain quote text, so the plugin supplies the
+          // code-block chrome and the list bullet itself.
+          // An unclosed fence runs to the end of the document, but a
+          // quoted one really ends where its blockquote does — without
+          // this the rows below an in-progress ``` would all be painted
+          // as code while the user is still typing the opener.
+          const quotedFence =
+            f && f.quoteDepth > 0 && RE_QUOTE.test(line.text) ? f : null;
+          const quotedList =
+            !f && !inlineQuote ? quotedListMarker(line.text) : null;
+          if (quotedFence) {
+            const classes = ["nf-qcode"];
+            if (line.number === quotedFence.startLine) {
+              classes.push("nf-qcode-begin");
             }
-            // A fence or a list living inside a blockquote: HyperMD leaves
-            // those rows as plain quote text, so the plugin supplies the
-            // code-block chrome and the list bullet itself.
-            // An unclosed fence runs to the end of the document, but a
-            // quoted one really ends where its blockquote does — without
-            // this the rows below an in-progress ``` would all be painted
-            // as code while the user is still typing the opener.
-            const quotedFence =
-              f && f.quoteDepth > 0 && RE_QUOTE.test(line.text) ? f : null;
-            const quotedList =
-              !f && !inlineQuote ? quotedListMarker(line.text) : null;
-            if (quotedFence) {
-              const classes = ["nf-qcode"];
-              if (line.number === quotedFence.startLine) {
-                classes.push("nf-qcode-begin");
-              }
-              if (quotedFence.closed && line.number === quotedFence.endLine) {
-                classes.push("nf-qcode-end");
-              }
-              builder.add(
-                line.from,
-                line.from,
-                Decoration.line({
-                  attributes: {
-                    class: classes.join(" "),
-                    // The gap widget that stands in for the ">" markers sizes
-                    // itself from this depth. Publishing it on the line too
-                    // lets a wrapped row resume at the same text column —
-                    // the widget is inline, so the wrap cannot see its width.
-                    style: `--nf-prefix-depth:${quotePrefixDepth(
-                      quoteMarkerPrefix(line.text) ?? ""
-                    )};`,
-                  },
-                })
-              );
+            if (quotedFence.closed && line.number === quotedFence.endLine) {
+              classes.push("nf-qcode-end");
             }
-            if (quotedList) {
-              builder.add(
-                line.from,
-                line.from,
-                Decoration.line({
-                  attributes: {
-                    class: quotedList.ordered
+            builder.add(
+              line.from,
+              line.from,
+              Decoration.line({
+                attributes: {
+                  class: classes.join(" "),
+                  // The gap widget that stands in for the ">" markers sizes
+                  // itself from this depth. Publishing it on the line too
+                  // lets a wrapped row resume at the same text column —
+                  // the widget is inline, so the wrap cannot see its width.
+                  style: `--nf-prefix-depth:${quotePrefixDepth(
+                    quoteMarkerPrefix(line.text) ?? ""
+                  )};`,
+                },
+              })
+            );
+          }
+          if (quotedList) {
+            builder.add(
+              line.from,
+              line.from,
+              Decoration.line({
+                attributes: {
+                  class:
+                    (quotedList.ordered
                       ? "nf-qlist nf-qlist-ol"
-                      : "nf-qlist nf-qlist-ul",
-                  },
-                })
+                      : "nf-qlist nf-qlist-ul") +
+                    // A to-do's checkbox sits after the lead and keeps its
+                    // own column, so the lead's floor must spare it.
+                    (/^[ \t]+\[.\](?=[ \t]|$)/.test(line.text.slice(quotedList.to))
+                      ? " nf-qlist-task"
+                      : ""),
+                },
+              })
+            );
+          }
+          if (inlineQuote) {
+            builder.add(
+              line.from,
+              line.from,
+              Decoration.line({
+                attributes: { class: "nf-inline-list-quote" },
+              })
+            );
+            builder.add(
+              line.from + inlineQuote.from,
+              line.from + inlineQuote.to,
+              Decoration.mark({ class: "nf-inline-list-quote-marker" })
+            );
+            if (line.from + inlineQuote.to < line.to) {
+              builder.add(
+                line.from + inlineQuote.to,
+                line.to,
+                Decoration.mark({ class: "nf-inline-list-quote-content" })
               );
             }
-            if (inlineQuote) {
-              builder.add(
-                line.from,
-                line.from,
-                Decoration.line({
-                  attributes: { class: "nf-inline-list-quote" },
-                })
-              );
-              builder.add(
-                line.from + inlineQuote.from,
-                line.from + inlineQuote.to,
-                Decoration.mark({ class: "nf-inline-list-quote-marker" })
-              );
-              if (line.from + inlineQuote.to < line.to) {
+          }
+          if (quotedList) {
+            // The marker and the spaces after it, as one element: the
+            // bullet alone cannot floor the text at the list's column
+            // (--nf-list-col), since the space that follows it is plain
+            // text. Added before the marker at the same position and
+            // ending later, so CodeMirror draws it around the marker.
+            const gap = line.text.slice(quotedList.to).match(/^[ \t]*/)?.[0].length ?? 0;
+            builder.add(
+              line.from + quotedList.from,
+              line.from + quotedList.to + gap,
+              Decoration.mark({ class: "nf-qlist-lead" })
+            );
+            // Obsidian's own .list-bullet paints the dot, so a quoted
+            // bullet is the same glyph, size, and color as every other
+            // one in the vault — including themes that restyle it.
+            builder.add(
+              line.from + quotedList.from,
+              line.from + quotedList.to,
+              Decoration.mark({
+                class: quotedList.ordered
+                  ? "nf-qlist-marker"
+                  : "nf-qlist-marker list-bullet",
+              })
+            );
+          }
+          // Colour the code Obsidian left plain. Added last on the row so
+          // the builder still receives strictly increasing positions: the
+          // line decorations above all sit at line.from, these never do.
+          if (quotedFence && line.number > quotedFence.startLine) {
+            const spans = this.quotedCodeSpans(doc, quotedFence)?.get(
+              line.number
+            );
+            if (spans) {
+              const prefix = quoteMarkerPrefix(line.text)?.length ?? 0;
+              const limit = line.to - line.from - prefix;
+              for (const span of spans) {
+                const from = Math.min(span.from, limit);
+                const to = Math.min(span.to, limit);
+                if (to <= from) continue;
                 builder.add(
-                  line.from + inlineQuote.to,
-                  line.to,
-                  Decoration.mark({ class: "nf-inline-list-quote-content" })
+                  line.from + prefix + from,
+                  line.from + prefix + to,
+                  Decoration.mark({ class: span.cls })
                 );
               }
             }
-            if (quotedList) {
-              // Obsidian's own .list-bullet paints the dot, so a quoted
-              // bullet is the same glyph, size, and color as every other
-              // one in the vault — including themes that restyle it.
-              builder.add(
-                line.from + quotedList.from,
-                line.from + quotedList.to,
-                Decoration.mark({
-                  class: quotedList.ordered
-                    ? "nf-qlist-marker"
-                    : "nf-qlist-marker list-bullet",
-                })
-              );
-            }
-            // Colour the code Obsidian left plain. Added last on the row so
-            // the builder still receives strictly increasing positions: the
-            // line decorations above all sit at line.from, these never do.
-            if (quotedFence && line.number > quotedFence.startLine) {
-              const spans = this.quotedCodeSpans(doc, quotedFence)?.get(
-                line.number
-              );
-              if (spans) {
-                const prefix = quoteMarkerPrefix(line.text)?.length ?? 0;
-                const limit = line.to - line.from - prefix;
-                for (const span of spans) {
-                  const from = Math.min(span.from, limit);
-                  const to = Math.min(span.to, limit);
-                  if (to <= from) continue;
-                  builder.add(
-                    line.from + prefix + from,
-                    line.from + prefix + to,
-                    Decoration.mark({ class: span.cls })
-                  );
-                }
-              }
-            }
-            pos = line.to + 1;
           }
         }
         return builder.finish();
       }
 
       destroy() {
+        this.destroyed = true;
         const win = this.view.dom.ownerDocument.defaultView ?? window;
         if (this.frame != null) win.cancelAnimationFrame(this.frame);
         this.styleWatch.disconnect();
@@ -13122,148 +18689,6 @@ export function makeNestedIndentPlugin(plugin: NotionFlowPlugin) {
 /* without touching raw markup).                                       */
 /* ------------------------------------------------------------------ */
 
-/* Only the plugin's own exact shapes are matched, and style values are
- * restricted to a charset that cannot smuggle URLs or extra CSS
- * properties into the decoration (no ':', ';', '/' or quotes). The bare
- * <b>/<i>/<s> tags are what the toolbar writes inside fenced code blocks,
- * where Markdown markers would stay literal text. Comment anchors carry
- * their note in data-nf-cmt — the value is display-only text (tooltip,
- * modal, title attribute), never style or markup, so its charset only
- * excludes what would break the attribute itself. */
-const RE_NF_TAG =
-  /<span style="color:([-\w(),.%# ]{1,64})">|<mark style="background:([-\w(),.%# ]{1,64});color:inherit">|<span class="nf-cmt" data-nf-cmt="([^"<>]*)">|<span class="nf-(?:cell|tbl)-[a-z]{1,12}">|<[ubis]>|<\/(?:span|mark|u|b|i|s)>/g;
-
-/** Rendered style for each bare formatting tag the plugin understands. */
-const BARE_TAG_STYLES: Record<string, string> = {
-  u: "text-decoration:underline",
-  b: "font-weight:bold",
-  i: "font-style:italic",
-  s: "text-decoration:line-through",
-};
-
-export interface TagPair {
-  open: { from: number; to: number };
-  close: { from: number; to: number };
-  /** Inline style re-applied to the inner text, or null (cell markers). */
-  style: string | null;
-  /** Raw (still attribute-encoded) comment text of an nf-cmt anchor. */
-  comment: string | null;
-}
-
-/** Convert an offset measured in rendered/visible text back to its source
- * position while skipping concealed source ranges. */
-export function sourceOffsetFromVisibleOffset(
-  start: number,
-  end: number,
-  visibleOffset: number,
-  hiddenRanges: readonly { from: number; to: number }[]
-): number {
-  let source = start;
-  let remaining = Math.max(0, visibleOffset);
-  const hidden = hiddenRanges
-    .map((range) => ({
-      from: Math.max(start, range.from),
-      to: Math.min(end, range.to),
-    }))
-    .filter((range) => range.from < range.to)
-    .sort((a, b) => a.from - b.from || a.to - b.to);
-  for (const range of hidden) {
-    if (range.to <= source) continue;
-    const visible = Math.max(0, range.from - source);
-    if (remaining < visible || (remaining === visible && visible > 0)) {
-      return Math.min(end, source + remaining);
-    }
-    remaining -= visible;
-    source = range.to;
-  }
-  return Math.min(end, source + remaining);
-}
-
-/** All well-formed plugin color tag pairs in `text` (offsets into it). */
-export function findColorTagPairs(text: string): TagPair[] {
-  const pairs: TagPair[] = [];
-  type Open = {
-    from: number;
-    to: number;
-    el: "span" | "mark" | "u" | "b" | "i" | "s";
-    style: string | null;
-    comment: string | null;
-  };
-  const stack: Open[] = [];
-  RE_NF_TAG.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = RE_NF_TAG.exec(text))) {
-    const from = m.index;
-    const to = from + m[0].length;
-    if (m[0].startsWith("</")) {
-      const el = m[0].slice(2, -1) as Open["el"];
-      for (let i = stack.length - 1; i >= 0; i--) {
-        if (stack[i].el !== el) continue;
-        const open = stack.splice(i, 1)[0];
-        pairs.push({
-          open: { from: open.from, to: open.to },
-          close: { from, to },
-          style: open.style,
-          comment: open.comment,
-        });
-        break;
-      }
-    } else {
-      const bare = /^<([ubis])>$/.exec(m[0])?.[1];
-      stack.push({
-        from,
-        to,
-        el: bare
-          ? (bare as Open["el"])
-          : m[0].startsWith("<mark")
-            ? "mark"
-            : "span",
-        style: bare
-          ? BARE_TAG_STYLES[bare]
-          : m[1]
-            ? `color:${m[1]}`
-            : m[2]
-              ? `background:${m[2]}`
-              : null,
-        comment: m[3] ?? null,
-      });
-    }
-  }
-  return pairs;
-}
-
-export interface HtmlConcealPolicy {
-  concealHtml: boolean;
-  commenting: boolean;
-}
-
-/** Comment anchors and ordinary formatting tags have independent settings.
- * Keep this decision shared by decorations, atomic ranges, and boundary
- * deletion so no source token is protected unless it is actually hidden. */
-export function shouldConcealTagPair(
-  pair: Pick<TagPair, "comment">,
-  policy: HtmlConcealPolicy
-): boolean {
-  return pair.comment != null ? policy.commenting : policy.concealHtml;
-}
-
-/** The exact tag pairs hidden by the current HTML/comment settings. */
-export function concealedTagPairs(
-  text: string,
-  policy: HtmlConcealPolicy
-): TagPair[] {
-  return findColorTagPairs(text).filter((pair) =>
-    shouldConcealTagPair(pair, policy)
-  );
-}
-
-/** Whether the boundary-delete keymap has any concealed syntax to protect. */
-export function concealBoundaryProtectionEnabled(
-  policy: HtmlConcealPolicy & { concealMarkdown: boolean }
-): boolean {
-  return policy.concealMarkdown || policy.concealHtml || policy.commenting;
-}
-
 /* ------------------------------------------------------------------ */
 /* Comments (Notion-style annotations)                                 */
 /*                                                                     */
@@ -13275,307 +18700,6 @@ export function concealBoundaryProtectionEnabled(
 /* is inert HTML — the anchored text reads normally, the note stays     */
 /* invisible.                                                           */
 /* ------------------------------------------------------------------ */
-
-/** Comment text → attribute-safe form. Only what would break the
- * attribute or the tag shape is escaped, so CJK text stays readable in
- * source. Newlines become &#10; to keep the tag on one line. */
-export function encodeCommentAttr(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/\r?\n/g, "&#10;");
-}
-
-/** Inverse of encodeCommentAttr. `&amp;` is decoded LAST, so encoded
- * literals ("&amp;#10;") can never double-decode. */
-export function decodeCommentAttr(value: string): string {
-  return value
-    .replace(/&#10;/g, "\n")
-    .replace(/&quot;/g, '"')
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&amp;/g, "&");
-}
-
-/** The full anchor markup for a comment on `selected`, or null when the
- * selection cannot carry one (empty, or spanning lines). */
-export function buildCommentWrap(selected: string, comment: string): string | null {
-  if (!selected || selected.includes("\n")) return null;
-  const body = comment.trim();
-  if (!body) return null;
-  return `<span class="nf-cmt" data-nf-cmt="${encodeCommentAttr(body)}">${selected}</span>`;
-}
-
-/** Modal editor for one comment: write, save, or resolve (remove). */
-/** Notion-style inline comment editor: a small floating card anchored to
- * the commented text instead of a full-screen modal, so writing a note
- * never leaves the page. Enter saves (IME composition is respected, so
- * confirming Chinese input never submits), Shift+Enter breaks the line,
- * Esc cancels, and clicking elsewhere saves any change and closes. */
-class CommentPopover {
-  private el: HTMLDivElement | null = null;
-  private input: HTMLTextAreaElement | null = null;
-  private readonly initial: string;
-  private readonly doc: Document;
-  private readonly win: Window;
-
-  constructor(
-    private view: EditorView,
-    private anchor: number,
-    initial: string | null,
-    private onSave: (text: string) => void,
-    private onResolve: (() => void) | null
-  ) {
-    this.initial = initial ?? "";
-    this.doc = view.dom.ownerDocument;
-    this.win = this.doc.defaultView ?? window;
-  }
-
-  open() {
-    activeCommentPopover?.close();
-    activeCommentPopover = this;
-    const el = (this.el = this.doc.body.createDiv({ cls: "nf-cmt-pop" }));
-    el.setAttribute("aria-label", t("Comment"));
-    const input = (this.input = el.createEl("textarea", {
-      cls: "nf-cmt-input",
-      attr: { placeholder: t("Write a comment…"), rows: "3" },
-    }));
-    input.value = this.initial;
-    input.addEventListener("input", () => {
-      this.autogrow();
-      this.position();
-    });
-    input.addEventListener("keydown", this.onKeyDown);
-    const footer = el.createDiv({ cls: "nf-cmt-pop-footer" });
-    footer.createSpan({
-      cls: "nf-cmt-hint",
-      text: t("Enter saves · Shift+Enter breaks the line"),
-    });
-    const actions = footer.createDiv({ cls: "nf-cmt-pop-actions" });
-    if (this.onResolve) {
-      const resolve = this.onResolve;
-      const btn = actions.createEl("button", {
-        cls: "mod-warning",
-        text: t("Resolve"),
-      });
-      btn.addEventListener("click", () => {
-        this.close();
-        resolve();
-      });
-    }
-    const save = actions.createEl("button", { cls: "mod-cta", text: t("Save") });
-    save.addEventListener("click", () => this.submit());
-    this.doc.addEventListener("mousedown", this.onDocMouseDown, true);
-    this.doc.addEventListener("scroll", this.onReposition, true);
-    this.win.addEventListener("resize", this.onReposition);
-    this.autogrow();
-    this.position();
-    input.focus();
-    input.setSelectionRange(input.value.length, input.value.length);
-  }
-
-  private onKeyDown = (evt: KeyboardEvent) => {
-    // An IME composition owns Enter/Escape while it is open.
-    if (evt.isComposing || evt.keyCode === 229) return;
-    if (evt.key === "Escape") {
-      evt.preventDefault();
-      evt.stopPropagation();
-      this.close();
-      this.view.focus();
-      return;
-    }
-    if (evt.key === "Enter" && !evt.shiftKey) {
-      evt.preventDefault();
-      this.submit();
-    }
-  };
-
-  /** Clicking anywhere else keeps the click and commits any edit — losing
-   * a typed note to a stray click would be worse than saving it. */
-  private onDocMouseDown = (evt: MouseEvent) => {
-    if (this.el && evt.composedPath().includes(this.el)) return;
-    const text = (this.input?.value ?? "").trim();
-    this.close();
-    if (text && text !== this.initial.trim()) this.onSave(text);
-  };
-
-  private onReposition = () => this.position();
-
-  private autogrow() {
-    const input = this.input;
-    if (!input) return;
-    input.style.height = "auto";
-    input.style.height =
-      Math.min(input.scrollHeight + 2, Math.round(this.win.innerHeight * 0.4)) + "px";
-  }
-
-  private position() {
-    const el = this.el;
-    if (!el) return;
-    let coords: { left: number; top: number; bottom: number } | null = null;
-    try {
-      coords = this.view.coordsAtPos(
-        Math.min(this.anchor, this.view.state.doc.length)
-      );
-    } catch {
-      // The editor may already be gone; keep the card where it was.
-    }
-    const w = el.offsetWidth;
-    const h = el.offsetHeight;
-    const vw = this.win.innerWidth;
-    const vh = this.win.innerHeight;
-    let left: number;
-    let top: number;
-    if (coords) {
-      left = Math.min(Math.max(8, coords.left - 12), vw - w - 8);
-      top = coords.bottom + 8;
-      if (top + h > vh - 8) top = Math.max(8, coords.top - h - 8);
-    } else {
-      const rect = this.view.dom.getBoundingClientRect();
-      left = Math.min(Math.max(8, rect.left + 24), vw - w - 8);
-      top = Math.max(8, Math.min(vh - h - 8, rect.top + 48));
-    }
-    el.style.left = left + "px";
-    el.style.top = top + "px";
-  }
-
-  private submit() {
-    const text = (this.input?.value ?? "").trim();
-    this.close();
-    if (text) this.onSave(text);
-  }
-
-  close() {
-    if (activeCommentPopover === this) activeCommentPopover = null;
-    this.doc.removeEventListener("mousedown", this.onDocMouseDown, true);
-    this.doc.removeEventListener("scroll", this.onReposition, true);
-    this.win.removeEventListener("resize", this.onReposition);
-    this.el?.remove();
-    this.el = null;
-    this.input = null;
-  }
-}
-
-let activeCommentPopover: CommentPopover | null = null;
-
-/** Open the editor for the comment whose anchor contains `pos`. Saving
- * rewrites the open tag's attribute; resolving deletes both tags and
- * leaves the anchored text as plain prose. Both re-verify that the tags
- * still sit untouched before dispatching. */
-function openCommentAt(view: EditorView, pos: number) {
-  const doc = view.state.doc;
-  const line = doc.lineAt(pos);
-  const rel = pos - line.from;
-  const pair = findColorTagPairs(line.text).find(
-    (p) => p.comment != null && rel >= p.open.from && rel <= p.close.to
-  );
-  if (!pair) return;
-  const openText = line.text.slice(pair.open.from, pair.open.to);
-  const closeText = line.text.slice(pair.close.from, pair.close.to);
-  const open = { from: line.from + pair.open.from, to: line.from + pair.open.to };
-  const close = { from: line.from + pair.close.from, to: line.from + pair.close.to };
-  const intact = () =>
-    view.state.doc.sliceString(open.from, Math.min(open.to, view.state.doc.length)) ===
-      openText &&
-    view.state.doc.sliceString(close.from, Math.min(close.to, view.state.doc.length)) ===
-      closeText;
-  new CommentPopover(
-    view,
-    pos,
-    decodeCommentAttr(pair.comment ?? ""),
-    (text) => {
-      if (!intact()) return;
-      view.dispatch({
-        changes: {
-          from: open.from,
-          to: open.to,
-          insert: `<span class="nf-cmt" data-nf-cmt="${encodeCommentAttr(text)}">`,
-        },
-        userEvent: "input.comment",
-      });
-    },
-    () => {
-      if (!intact()) return;
-      view.dispatch({
-        changes: [
-          { from: open.from, to: open.to },
-          { from: close.from, to: close.to },
-        ],
-        userEvent: "delete.comment",
-      });
-    }
-  ).open();
-}
-
-/** Comment on the current selection: validate it, ask for the text, wrap. */
-function startAddComment(plugin: NotionFlowPlugin, view: EditorView) {
-  if (!plugin.settings.commenting) return;
-  const sel = view.state.selection.main;
-  const selected = view.state.sliceDoc(sel.from, sel.to);
-  if (!selected) {
-    new Notice(t("Select some text to comment on."));
-    return;
-  }
-  if (selected.includes("\n")) {
-    new Notice(t("Comments cover a single line of text."));
-    return;
-  }
-  const { from, to } = sel;
-  new CommentPopover(
-    view,
-    to,
-    null,
-    (text) => {
-      if (view.state.doc.sliceString(from, to) !== selected) return;
-      const wrap = buildCommentWrap(selected, text);
-      if (!wrap) return;
-      view.dispatch({
-        changes: { from, to, insert: wrap },
-        selection: { anchor: from + wrap.length },
-        userEvent: "input.comment",
-      });
-      view.focus();
-    },
-    null
-  ).open();
-}
-
-/** The 💬 marker rendered in place of a comment's closing tag. */
-class CommentIconWidget extends WidgetType {
-  constructor(readonly tooltip: string) {
-    super();
-  }
-
-  eq(other: CommentIconWidget) {
-    return other.tooltip === this.tooltip;
-  }
-
-  toDOM(view: EditorView): HTMLElement {
-    const el = view.dom.ownerDocument.createElement("span");
-    el.className = "nf-cmt-icon";
-    el.setAttribute("title", this.tooltip);
-    el.setAttribute("role", "button");
-    // The same 💬 the raw-element paths draw via CSS ::after, so the
-    // marker never changes shape when a line enters or leaves editing.
-    el.textContent = "💬";
-    el.addEventListener("mousedown", (evt) => {
-      evt.preventDefault();
-      evt.stopPropagation();
-    });
-    el.addEventListener("click", (evt) => {
-      evt.preventDefault();
-      evt.stopPropagation();
-      try {
-        openCommentAt(view, view.posAtDOM(el));
-      } catch {
-        // The widget may already be detached from the editor.
-      }
-    });
-    return el;
-  }
-}
 
 /**
  * Reading view shows fenced code as literal text, so the HTML formatting
@@ -13674,7 +18798,88 @@ export function renderCodeFormattingTags(codeEl: HTMLElement) {
   observer.observe(codeEl, { childList: true, subtree: true });
 }
 
-function makeConcealPlugin(plugin: NotionFlowPlugin) {
+/**
+ * The lines every selection range touches, as one comparable key
+ * ("2:6,9:9"). Live Preview reveals source for each of these lines and
+ * re-mounts its inline widgets for the lines that leave the set, so two
+ * states with equal keys leave the widgets alone: a caret sliding along
+ * one row, or a selection changing only within its rows.
+ */
+export function selectionLineKey(state: EditorState): string {
+  const doc = state.doc;
+  return state.selection.ranges
+    .map((r) => `${doc.lineAt(r.from).number}:${doc.lineAt(r.to).number}`)
+    .join(",");
+}
+
+/** Marks an element whose comment tooltip is already attached. */
+const COMMENT_TIP_ATTR = "data-nf-tip";
+
+/** The fallback tooltip for commented text when the hover card is off:
+ * Obsidian's own tooltip where the API has it, else a title attribute.
+ * The optional access keeps the plugin loadable on an older API. */
+function setCommentTooltip(el: HTMLElement, note: string) {
+  const setTooltip = Reflect.get(obsidianApi, "setTooltip") as
+    | ((el: HTMLElement, tooltip: string, options?: { delay?: number }) => void)
+    | undefined;
+  if (typeof setTooltip === "function") {
+    setTooltip(el, note, { delay: 300 });
+    el.setAttribute(COMMENT_TIP_ATTR, "");
+  } else {
+    el.setAttribute("title", note);
+  }
+}
+
+/**
+ * What to do with a non-empty DOM selection whose ends both fall inside one
+ * concealed tag pair. Only the stray selection a fresh single click on an
+ * inactive line's inline-HTML widget leaves behind is rewritten (to a caret
+ * at the clicked character), and a fresh double-click there selects the
+ * clicked word. Anything CodeMirror itself mirrored into the DOM — a
+ * keyboard or programmatic selection, a toolbar format's result, a drag —
+ * is a real selection and stays exactly as it is.
+ */
+/** A concealed tag pair in absolute document positions. */
+interface ConcealedPair {
+  openFrom: number;
+  openTo: number;
+  closeFrom: number;
+  closeTo: number;
+}
+
+export function strayConcealSelectionAction(i: {
+  domFrom: number;
+  domTo: number;
+  selFrom: number;
+  selTo: number;
+  fresh: boolean;
+  detail: number;
+  inEmbed: boolean;
+  /** The selection spans the whole element, tags included — the shape
+   *  Obsidian's widget selects on a click, which CodeMirror has usually
+   *  mirrored by the time the DOM reports it. */
+  whole?: boolean;
+}): "keep" | "caret" | "word" {
+  if (i.domFrom === i.selFrom && i.domTo === i.selTo && !i.whole) return "keep";
+  if (!i.fresh || !i.inEmbed) return "keep";
+  if (i.detail === 1) return "caret";
+  if (i.detail === 2) return "word";
+  return "keep";
+}
+
+/**
+ * Mark spec for the inner text of a concealed tag pair on the caret line.
+ * A highlight (`background:…`) also gets `nf-hl`, so the look's highlight
+ * shape (marker, underline band) matches the `<mark>` Live Preview renders
+ * on inactive lines and Reading view renders; other styles stay classless.
+ */
+export function concealMarkSpec(style: string): { class?: string; attributes: { style: string } } {
+  return /^background/.test(style)
+    ? { class: "nf-hl", attributes: { style } }
+    : { attributes: { style } };
+}
+
+export function makeConcealPlugin(plugin: NotionFlowPlugin) {
   return ViewPlugin.fromClass(
     class ConcealView {
       view: EditorView;
@@ -13684,33 +18889,54 @@ function makeConcealPlugin(plugin: NotionFlowPlugin) {
       /** Replace decorations only — the atomic ranges the cursor skips. */
       hidden: DecorationSet = Decoration.none;
       /** Concealed pairs (absolute positions) for the click handler. */
-      pairs: { openFrom: number; openTo: number; closeFrom: number; closeTo: number }[] = [];
+      pairs: ConcealedPair[] = [];
 
       mouseButtonDown = false;
-      lastClick = { x: 0, y: 0, time: 0, detail: 0 };
+      lastClick = { x: 0, y: 0, time: 0, detail: 0, inEmbed: false };
       onMouseDown = () => {
         this.mouseButtonDown = true;
       };
       onMouseUp = () => {
         this.mouseButtonDown = false;
       };
+      /** A key press starts something new: the click before it no longer
+       *  explains the selection that follows (Shift+Arrow, say). */
+      onKeyDown = () => {
+        this.lastClick.time = 0;
+      };
       onClick = (e: MouseEvent) => {
-        this.lastClick = { x: e.clientX, y: e.clientY, time: Date.now(), detail: e.detail };
+        const target = e.target as Element | null;
+        const embed = target?.closest?.(".cm-html-embed") ?? null;
+        this.lastClick = {
+          x: e.clientX,
+          y: e.clientY,
+          time: Date.now(),
+          detail: e.detail,
+          inEmbed: !!embed,
+        };
+        // A double-click on an inactive line's widget: the widget swallows
+        // it — the editor keeps its old selection and loses focus — and no
+        // pairs exist for a range CodeMirror has handed to a widget (it is
+        // outside visibleRanges). Select the clicked word in the source.
+        if (e.detail === 2 && embed && embed.closest(".cm-editor") === this.view.dom) {
+          const pair = this.embedPair(embed);
+          if (pair) {
+            this.lastClick.time = 0;
+            this.selectAtClick(pair, "word");
+          }
+        }
       };
 
-      /** Clicking Obsidian's rendered inline-HTML widget leaves (some
-       *  ~150ms later) a native DOM selection covering the whole element
-       *  while the editor selection stays put — the next keystroke would
-       *  wipe the entire markup through the DOM observer. Watch the DOM
-       *  selection and convert that stray full-element selection into an
-       *  editor caret at the clicked character, so a click edits colored
-       *  text exactly like plain text. Double-click keeps the selection
-       *  (deliberately select the whole colored segment), and drags are
-       *  never touched. */
+      /** Clicking Obsidian's rendered inline-HTML widget selects (some
+       *  ~150ms later) the whole element, tags included — the next
+       *  keystroke would wipe the entire markup. Watch the selection and
+       *  turn that stray full-element selection into a caret at the
+       *  clicked character, so a click edits colored text exactly like
+       *  plain text. Real selections (keyboard, toolbar, drags) are never
+       *  touched — see strayConcealSelectionAction. */
       onSelChange = () => {
         if (this.mouseButtonDown || this.pairs.length === 0) return;
         const fresh = Date.now() - this.lastClick.time < 1200;
-        if (fresh && this.lastClick.detail > 1) return;
         const dom = this.ownerDocument.getSelection();
         if (!dom || dom.isCollapsed || dom.rangeCount === 0) return;
         const range = dom.getRangeAt(0);
@@ -13733,15 +18959,53 @@ function makeConcealPlugin(plugin: NotionFlowPlugin) {
           (p) => from >= p.openFrom && from <= p.closeTo && to >= p.openFrom && to <= p.closeTo
         );
         if (!pair) return;
+        const main = this.view.state.selection.main;
+        const action = strayConcealSelectionAction({
+          domFrom: from,
+          domTo: to,
+          selFrom: main.from,
+          selTo: main.to,
+          fresh,
+          detail: this.lastClick.detail,
+          inEmbed: this.lastClick.inEmbed,
+          whole: from === pair.openFrom && to === pair.closeTo,
+        });
+        if (action === "keep") return;
+        // Consumed: the selectionchange our own dispatch causes must not
+        // come back through here.
+        this.lastClick.time = 0;
+        this.selectAtClick(pair, action);
+      };
+
+      /** The outermost concealed pair an inline-HTML widget renders. */
+      embedPair(embed: Element): ConcealedPair | null {
+        let at: number;
+        try {
+          at = this.view.posAtDOM(embed, 0);
+        } catch {
+          return null;
+        }
+        let best: TagPair | null = null;
+        for (const pair of cachedColorTagPairs(this.view.state.doc)) {
+          if (pair.open.from !== at || !shouldConcealTagPair(pair, plugin.settings)) continue;
+          if (!best || pair.close.to > best.close.to) best = pair;
+        }
+        return best
+          ? { openFrom: best.open.from, openTo: best.open.to, closeFrom: best.close.from, closeTo: best.close.to }
+          : null;
+      }
+
+      /** Put the editor selection where the last click landed in `pair`'s
+       *  rendered text: a caret at the clicked character, or the clicked
+       *  word. */
+      selectAtClick(pair: ConcealedPair, mode: "caret" | "word") {
         // Character-precise caret: the click offset inside the rendered
         // widget text mirrors the offset in the source inner text.
         let anchor = pair.closeFrom;
-        const caret = fresh
-          ? this.ownerDocument.caretRangeFromPoint?.(
-              this.lastClick.x,
-              this.lastClick.y
-            )
-          : null;
+        const caret = this.ownerDocument.caretRangeFromPoint?.(
+          this.lastClick.x,
+          this.lastClick.y
+        );
         if (caret) {
           let root: Node | null =
             caret.startContainer instanceof this.ownerWindow.Element
@@ -13770,83 +19034,145 @@ function makeConcealPlugin(plugin: NotionFlowPlugin) {
               }
               off += n.textContent?.length ?? 0;
             }
-            let markdownHidden: { from: number; to: number }[] = [];
-            if (plugin.settings.concealMarkdown) {
+            // Tags nested in the run never show; Markdown markers only hide
+            // on a live line — a rendered widget shows them literally.
+            const hidden: { from: number; to: number }[] = [];
+            for (const inner of cachedColorTagPairs(this.view.state.doc)) {
+              if (inner.open.from >= pair.openTo && inner.close.to <= pair.closeFrom) {
+                hidden.push(inner.open, inner.close);
+              }
+            }
+            if (plugin.settings.concealMarkdown && !root.classList.contains("cm-html-embed")) {
               const groups = collectInlineSyntaxGroups(
                 syntaxTree(this.view.state),
                 this.view.state.doc,
                 pair.openTo,
                 pair.closeFrom
               );
-              markdownHidden = groups
-                .filter(
-                  (group) =>
-                    !isInlineSyntaxGroupBeingEdited(
-                      group,
-                      this.view.state.selection.ranges
-                    )
-                )
-                .flatMap((group) => group.markers);
+              hidden.push(
+                ...groups
+                  .filter(
+                    (group) =>
+                      !isInlineSyntaxGroupBeingEdited(
+                        group,
+                        this.view.state.selection.ranges
+                      )
+                  )
+                  .flatMap((group) => group.markers)
+              );
             }
             anchor = sourceOffsetFromVisibleOffset(
               pair.openTo,
               pair.closeFrom,
               off,
-              markdownHidden
+              hidden
             );
           }
         }
         anchor = Math.min(Math.max(anchor, pair.openTo), pair.closeFrom);
+        if (mode === "word") {
+          const word = this.view.state.wordAt(anchor);
+          const range = word
+            ? clampRangeOutOfTags(
+                cachedColorTagPairs(this.view.state.doc),
+                Math.max(word.from, pair.openTo),
+                Math.min(word.to, pair.closeFrom)
+              )
+            : null;
+          if (range) {
+            this.view.dispatch({ selection: { anchor: range.from, head: range.to } });
+            this.view.focus();
+            return;
+          }
+        }
         this.view.dispatch({ selection: { anchor } });
         this.view.focus();
-      };
+      }
 
       constructor(view: EditorView) {
         this.view = view;
         this.ownerDocument = view.dom.ownerDocument;
         this.ownerWindow = (this.ownerDocument.defaultView ?? window) as Window &
           typeof globalThis;
-        this.build(view);
+        this.guardedBuild(view);
         this.scheduleCommentTitles(view);
+        this.detachHover = plugin.comments.attachHover(view);
         view.dom.addEventListener("mousedown", this.onMouseDown, true);
         view.dom.addEventListener("click", this.onClick, true);
+        view.dom.addEventListener("keydown", this.onKeyDown, true);
         this.ownerDocument.addEventListener("mouseup", this.onMouseUp, true);
         this.ownerDocument.addEventListener("selectionchange", this.onSelChange);
       }
 
+      /** Removes the comment hover-card listeners (see CommentController). */
+      detachHover: () => void = () => {};
+
       update(update: ViewUpdate) {
-        if (update.docChanged || update.viewportChanged) this.build(update.view);
+        if (update.docChanged || update.viewportChanged) this.guardedBuild(update.view);
         // Inactive lines render comment spans as Obsidian's own inline-HTML
         // widgets, which carry no tooltip. Widgets (re)mount after this
         // update — including when the caret merely leaves the line — so
         // top up the title attributes a frame later.
-        if (update.docChanged || update.viewportChanged || update.selectionSet) {
+        // Widgets only swap when the set of lines the selection touches
+        // changes (Live Preview reveals source for every line of every
+        // range, so collapsing, extending or adding a cursor re-mounts the
+        // widgets of the lines that leave it); a caret sliding along one
+        // row leaves them alone, and so does this.
+        const selLinesChanged =
+          update.selectionSet &&
+          selectionLineKey(update.startState) !== selectionLineKey(update.state);
+        if (update.docChanged || update.viewportChanged || selLinesChanged) {
           this.scheduleCommentTitles(update.view);
         }
       }
 
+      /** The one pending title pass; scheduling again replaces it. */
+      titleFrame: number | null = null;
+
       scheduleCommentTitles(view: EditorView) {
         if (!plugin.settings.commenting) return;
+        // The hover card reads the note straight from the element, so the
+        // tooltip pass is only the fallback for when the card is off.
+        if (plugin.settings.commentHoverCard) return;
         const win = view.dom.ownerDocument.defaultView ?? window;
-        win.requestAnimationFrame(() => {
+        if (this.titleFrame != null) win.cancelAnimationFrame(this.titleFrame);
+        this.titleFrame = win.requestAnimationFrame(() => {
+          this.titleFrame = null;
           for (const el of Array.from(
             view.contentDOM.querySelectorAll<HTMLElement>(
-              'span.nf-cmt[data-nf-cmt]:not([title])'
+              `span.nf-cmt[data-nf-cmt]:not([title]):not([${COMMENT_TIP_ATTR}])`
             )
           )) {
-            el.setAttribute(
-              "title",
-              decodeCommentAttr(el.getAttribute("data-nf-cmt") ?? "")
-            );
+            setCommentTooltip(el, decodeCommentAttr(el.getAttribute("data-nf-cmt") ?? ""));
           }
         });
       }
 
       destroy() {
+        if (this.titleFrame != null) {
+          this.ownerWindow.cancelAnimationFrame(this.titleFrame);
+          this.titleFrame = null;
+        }
+        this.detachHover();
         this.view.dom.removeEventListener("mousedown", this.onMouseDown, true);
         this.view.dom.removeEventListener("click", this.onClick, true);
+        this.view.dom.removeEventListener("keydown", this.onKeyDown, true);
         this.ownerDocument.removeEventListener("mouseup", this.onMouseUp, true);
         this.ownerDocument.removeEventListener("selectionchange", this.onSelChange);
+      }
+
+      /** build() behind the error boundary: a throw mid-scan leaves the
+       * sets it had already reset, so nothing half-built is published. */
+      guardedBuild(view: EditorView) {
+        guard(
+          "html conceal",
+          () => {
+            this.decorations = Decoration.none;
+            this.hidden = Decoration.none;
+            this.pairs = [];
+          },
+          () => this.build(view)
+        );
       }
 
       build(view: EditorView) {
@@ -13875,23 +19201,24 @@ function makeConcealPlugin(plugin: NotionFlowPlugin) {
               const note = decodeCommentAttr(pair.comment ?? "");
               hide.push(
                 Decoration.replace({
-                  widget: new CommentIconWidget(note),
+                  widget: new CommentIconWidget(note, plugin.comments),
                 }).range(close.from, close.to)
               );
               if (open.to < close.from) {
+                // With the hover card on, the note is read from the
+                // document when the pointer arrives; a title attribute
+                // would only add a second, plain tooltip.
                 marks.push(
                   Decoration.mark({
                     class: "nf-cmt-anchor",
-                    attributes: { title: note },
+                    ...(plugin.settings.commentHoverCard ? {} : { attributes: { title: note } }),
                   }).range(open.to, close.from)
                 );
               }
             } else {
               hide.push(Decoration.replace({}).range(close.from, close.to));
               if (pair.style && open.to < close.from) {
-                marks.push(
-                  Decoration.mark({ attributes: { style: pair.style } }).range(open.to, close.from)
-                );
+                marks.push(Decoration.mark(concealMarkSpec(pair.style)).range(open.to, close.from));
               }
             }
             this.pairs.push({
@@ -14097,6 +19424,23 @@ function isLivePreviewEditor(view: EditorView): boolean {
   );
 }
 
+/** Whether the table source at [from, to] is on screen as Live Preview's
+ *  table widget (rather than as raw rows). Reads the DOM, so it belongs
+ *  in event paths, never in a ViewPlugin update. */
+function tableRenderedAsWidget(view: EditorView, from: number, to: number): boolean {
+  for (const el of Array.from(view.contentDOM.querySelectorAll<HTMLElement>(".cm-table-widget"))) {
+    // Widgets of nested editors (a table inside a column) map elsewhere.
+    if (el.closest(".cm-content") !== view.contentDOM) continue;
+    try {
+      const pos = view.posAtDOM(el);
+      if (pos >= from && pos <= to) return true;
+    } catch {
+      /* detached mid-rebuild: not this table */
+    }
+  }
+  return false;
+}
+
 /* ------------------------------------------------------------------ */
 /* Heading markers on the active line                                  */
 /*                                                                     */
@@ -14178,8 +19522,30 @@ export function headingMarkerDeletePlan(
 ): BlockTextChange | null {
   const line = doc.lineAt(head);
   const [prefix] = collectHeadingPrefixes(doc, line.from, line.from, fences);
-  if (!prefix || prefix.to !== head) return null;
-  return { from: prefix.from, to: prefix.to, insert: "" };
+  if (prefix) return prefix.to === head ? { from: prefix.from, to: prefix.to, insert: "" } : null;
+  // An empty heading ("## " and nothing after it) is concealed under its
+  // placeholder while the caret sits at its end: Backspace there takes the
+  // whole marker, back to an empty paragraph.
+  const empty = emptyHeadingMarker(doc, line.number, fences);
+  if (!empty || empty.to !== head) return null;
+  return { from: empty.from, to: empty.to, insert: "" };
+}
+
+/** An empty heading line's "#…# " run and the whitespace after it, inside
+ *  its container's quote markers: `## ` or `> ### `. Null for anything
+ *  else, and inside fenced code. */
+const RE_EMPTY_HEADING = /^([ \t]{0,3})(#{1,6})[ \t]+$/;
+function emptyHeadingMarker(
+  doc: Text,
+  lineNo: number,
+  fences: FenceRange[]
+): (HeadingPrefix & { level: number }) | null {
+  const line = doc.line(lineNo);
+  const quote = quoteMarkerPrefix(line.text) ?? "";
+  const match = RE_EMPTY_HEADING.exec(line.text.slice(quote.length));
+  if (!match || fenceAt(fences, lineNo)) return null;
+  const from = line.from + quote.length + match[1].length;
+  return { from, to: line.to, level: match[2].length };
 }
 
 /**
@@ -14202,6 +19568,127 @@ export function emptyHintLine(
   return line.number;
 }
 
+/** What an empty block is waiting to become, which names its placeholder:
+ *  a blank row ("text", the slash-menu hint), an empty heading, list item,
+ *  to-do or plain-quote row. */
+export type EmptyHintKind =
+  | "text" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
+  | "bullet" | "number" | "todo" | "quote";
+
+export interface EmptyBlockHint {
+  lineNo: number;
+  kind: EmptyHintKind;
+  /** A heading's "#…# " run (its container's markers excluded), which Live
+   *  Preview conceals while the placeholder stands in for it. */
+  markerFrom?: number;
+  markerTo?: number;
+}
+
+/** An unchecked to-do with nothing after its box. A checked one gets no
+ *  placeholder: Obsidian strikes the row through, and the hint with it. */
+const RE_EMPTY_TODO = /^[ \t]*(?:[-*+]|\d+[.)])[ \t]+\[ \][ \t]+$/;
+
+/**
+ * Whether quoted row `lineNo` sits inside a Callout (or toggle, or columns
+ * box): some header above it opens a Callout whose depth every row in
+ * between keeps. Walks up the quote only — the one place the answer can
+ * come from — and gives up (a plain quote) after `limit` rows.
+ */
+function quotedRowInCallout(doc: Text, lineNo: number, limit = 400): boolean {
+  let min = quoteDepth(doc.line(lineNo).text);
+  for (let n = lineNo - 1; n >= 1 && lineNo - n <= limit; n--) {
+    const depth = quoteDepth(doc.line(n).text);
+    if (depth === 0) return false;
+    if (depth <= min && calloutHeaderAt(doc, n)) return true;
+    min = Math.min(min, depth);
+  }
+  return false;
+}
+
+/**
+ * The empty block holding a single caret, and what kind of block it is —
+ * the line Notion's placeholders label ("Heading 2", "List", "To-do",
+ * "Quote"; "Type / for commands" on a blank row). A blank row keeps
+ * emptyHintLine's rule (the caret anywhere on it); a typed marker needs the
+ * caret at the line end, where the block's text would start. Inside a
+ * Callout a blank row is plain "text" and a marker row gets nothing: the
+ * Callout's editing rows draw their own card, which a per-type placeholder
+ * would sit on. Reads only the caret's line, plus a short walk up a quote.
+ */
+export function emptyBlockHint(
+  doc: Text,
+  selection: { ranges: readonly { empty: boolean; head: number }[] },
+  fences: FenceRange[] = cachedFences(doc)
+): EmptyBlockHint | null {
+  if (selection.ranges.length !== 1 || !selection.ranges[0].empty) return null;
+  const head = selection.ranges[0].head;
+  const line = doc.lineAt(head);
+  const quote = quoteMarkerPrefix(line.text) ?? "";
+  const content = line.text.slice(quote.length);
+  const lineNo = line.number;
+  if (RE_BLANK.test(content)) {
+    if (fenceAt(fences, lineNo)) return null;
+    if (!quote) return { lineNo, kind: "text" };
+    return { lineNo, kind: quotedRowInCallout(doc, lineNo) ? "text" : "quote" };
+  }
+  if (head !== line.to || fenceAt(fences, lineNo)) return null;
+  if (quote && quotedRowInCallout(doc, lineNo)) return null;
+  const heading = emptyHeadingMarker(doc, lineNo, fences);
+  if (heading) {
+    const kind = `h${heading.level}` as EmptyHintKind;
+    return { lineNo, kind, markerFrom: heading.from, markerTo: heading.to };
+  }
+  if (RE_EMPTY_TODO.test(content)) return { lineNo, kind: "todo" };
+  const list = RE_LIST_MARKER.exec(content);
+  if (!list || list[0].length !== content.length) return null;
+  return { lineNo, kind: /\d/.test(list[2]) ? "number" : "bullet" };
+}
+
+/** Whether a placeholder kind shows under these settings. The slash hint
+ *  names the slash menu, so it stands down with it; a heading's placeholder
+ *  is on whenever headings are concealed, since the concealed marker would
+ *  otherwise leave the row looking blank. */
+export function emptyHintEnabled(
+  kind: EmptyHintKind,
+  settings: { emptyLineHint: boolean; slashCommands: boolean; concealHeadings: boolean }
+): boolean {
+  if (kind === "text") return settings.emptyLineHint && settings.slashCommands;
+  if (kind.startsWith("h")) return settings.concealHeadings || settings.emptyLineHint;
+  return settings.emptyLineHint;
+}
+
+/** The placeholder text for a kind; null for "text", whose string lives in
+ *  CSS (`--nf-empty-hint`). */
+function emptyHintLabel(kind: EmptyHintKind): string | null {
+  switch (kind) {
+    case "h1": return t("Heading 1");
+    case "h2": return t("Heading 2");
+    case "h3": return t("Heading 3");
+    case "h4": return t("Heading 4");
+    case "h5": return t("Heading 5");
+    case "h6": return t("Heading 6");
+    case "bullet":
+    case "number": return t("List");
+    case "todo": return t("To-do");
+    case "quote": return t("Quote");
+    default: return null;
+  }
+}
+
+/** The placeholder Live Preview shows in `view` right now, or null. Shared
+ *  by the hint and the heading-conceal plugins, so an empty heading marker
+ *  is concealed exactly while its placeholder stands in for it. */
+function activeEmptyHint(view: EditorView, settings: NotionFlowSettings): EmptyBlockHint | null {
+  if (!isLivePreviewEditor(view)) return null;
+  // The caret waits beside a selected block: no hint invites typing.
+  if (view.state.field(blockCaretAwayField, false)) return null;
+  // A table cell runs its own editor: an empty cell is a cell, not an
+  // empty block, and the slash menu does not open there.
+  if (view.dom.parentElement?.closest(".cm-editor")) return null;
+  const hint = emptyBlockHint(view.state.doc, view.state.selection);
+  return hint && emptyHintEnabled(hint.kind, settings) ? hint : null;
+}
+
 /**
  * Notion's empty-block hint. The text itself lives in CSS (`--nf-empty-hint`,
  * set from the translation once at load) because it is generated content:
@@ -14218,25 +19705,32 @@ function makeEmptyHintPlugin(plugin: NotionFlowPlugin) {
       }
 
       update(update: ViewUpdate) {
-        if (update.docChanged || update.viewportChanged || update.selectionSet) {
+        if (
+          update.docChanged ||
+          update.viewportChanged ||
+          update.selectionSet ||
+          update.startState.field(blockCaretAwayField, false) !==
+            update.state.field(blockCaretAwayField, false)
+        ) {
           this.build(update.view);
         }
       }
 
       build(view: EditorView) {
-        this.decorations = Decoration.none;
-        // The hint names the slash menu, so it stands down with it.
-        if (!plugin.settings.emptyLineHint || !plugin.settings.slashCommands) return;
-        if (!isLivePreviewEditor(view)) return;
-        // A table cell runs its own editor: an empty cell is a cell, not an
-        // empty block, and the slash menu does not open there.
-        if (view.dom.parentElement?.closest(".cm-editor")) return;
-        const doc = view.state.doc;
-        const lineNo = emptyHintLine(doc, view.state.selection);
-        if (lineNo == null) return;
-        this.decorations = Decoration.set([
-          Decoration.line({ class: "nf-empty-hint" }).range(doc.line(lineNo).from),
-        ]);
+        this.decorations = guard("empty hint", () => Decoration.none, () => {
+          const hint = activeEmptyHint(view, plugin.settings);
+          if (!hint) return Decoration.none;
+          // The blank-row hint keeps its CSS string; a typed block's
+          // placeholder rides on the line as data-nf-hint, so it is drawn in
+          // the row's own font (a heading's placeholder is heading-sized).
+          const label = emptyHintLabel(hint.kind);
+          return Decoration.set([
+            Decoration.line({
+              class: hint.kind === "text" ? "nf-empty-hint" : `nf-empty-hint nf-empty-hint-${hint.kind}`,
+              attributes: label == null ? undefined : { "data-nf-hint": label },
+            }).range(view.state.doc.line(hint.lineNo).from),
+          ]);
+        });
       }
     },
     { decorations: (view) => view.decorations }
@@ -14254,27 +19748,42 @@ function makeHeadingConcealPlugin(plugin: NotionFlowPlugin) {
       }
 
       update(update: ViewUpdate) {
-        if (update.docChanged || update.viewportChanged || update.selectionSet) {
+        if (
+          update.docChanged ||
+          update.viewportChanged ||
+          update.selectionSet ||
+          update.startState.field(blockCaretAwayField, false) !==
+            update.state.field(blockCaretAwayField, false)
+        ) {
           this.build(update.view);
         }
       }
 
       build(view: EditorView) {
-        this.decorations = Decoration.none;
-        this.hidden = Decoration.none;
-        if (!plugin.settings.concealHeadings) return;
-        if (!isLivePreviewEditor(view)) return;
-        if (view.visibleRanges.length === 0) return;
-        const doc = view.state.doc;
-        const first = view.visibleRanges[0];
-        const last = view.visibleRanges[view.visibleRanges.length - 1];
-        const selections = view.state.selection.ranges;
-        const hidden: Range<Decoration>[] = [];
-        for (const prefix of collectHeadingPrefixes(doc, first.from, last.to)) {
-          if (!headingPrefixHidden(prefix, selections)) continue;
-          hidden.push(Decoration.replace({}).range(prefix.from, prefix.to));
-        }
-        this.hidden = Decoration.set(hidden, true);
+        this.hidden = guard("heading conceal", () => Decoration.none, () => {
+          if (!plugin.settings.concealHeadings) return Decoration.none;
+          if (!isLivePreviewEditor(view)) return Decoration.none;
+          if (view.visibleRanges.length === 0) return Decoration.none;
+          const doc = view.state.doc;
+          const first = view.visibleRanges[0];
+          const last = view.visibleRanges[view.visibleRanges.length - 1];
+          const selections = view.state.selection.ranges;
+          const hidden: Range<Decoration>[] = [];
+          for (const prefix of collectHeadingPrefixes(doc, first.from, last.to)) {
+            if (!headingPrefixHidden(prefix, selections)) continue;
+            hidden.push(Decoration.replace({}).range(prefix.from, prefix.to));
+          }
+          // "## " with nothing after it yet: the marker is consumed the
+          // moment its space is typed, as in Notion, and the caret stays
+          // where the text will start — exactly while the "Heading 2"
+          // placeholder stands in for it (activeEmptyHint gates both).
+          // Stepping in front of it reveals it again, as for any heading.
+          const empty = activeEmptyHint(view, plugin.settings);
+          if (empty?.markerFrom != null && empty.markerTo != null && empty.markerTo > empty.markerFrom) {
+            hidden.push(Decoration.replace({}).range(empty.markerFrom, empty.markerTo));
+          }
+          return Decoration.set(hidden, true);
+        });
         this.decorations = this.hidden;
       }
     },
@@ -14288,32 +19797,99 @@ function makeHeadingConcealPlugin(plugin: NotionFlowPlugin) {
         ),
     }
   );
-  // Above the quote keymap's Backspace: inside "> # Title" both have an
-  // answer for the text start, and the heading marker is the inner one.
-  const escape = Prec.highest(
+  return [headingView, makeMarkerBackspaceKeymap(plugin, { headingMarkers: true })];
+}
+
+/**
+ * What Backspace at `head` does to a heading marker: removes it whole, or
+ * nothing (null). A concealed marker is taken whole — it is the only way
+ * back to a paragraph — and so is a visible one while the markers setting
+ * is on: "## " then goes in one step, as a list marker does, where core
+ * would leave "##Title". With both settings off Backspace stays core's.
+ */
+export function backspaceMarkerPlan(
+  settings: { markerBackspace: boolean; concealHeadings: boolean },
+  doc: Text,
+  head: number
+): BlockTextChange | null {
+  return settings.concealHeadings || settings.markerBackspace
+    ? headingMarkerDeletePlan(doc, head)
+    : null;
+}
+
+/**
+ * Backspace at the start of a block's text. Above the quote keymap's
+ * Backspace: inside "> # Title" both have an answer for the text start,
+ * and the heading marker is the inner one. The list marker rule sits in
+ * the same binding: with the markers setting on, Backspace at the start
+ * of a list item or to-do takes the whole marker in one step, Notion's
+ * ladder back to text — and the markers setting takes a visible heading
+ * marker whole too, the same step (see backspaceMarkerPlan). A concealed
+ * heading marker goes whole whatever that setting says. A column's child
+ * editor never conceals headings (`headingMarkers: false`), so there only
+ * the markers setting decides.
+ */
+export function makeMarkerBackspaceKeymap(
+  plugin: NotionFlowPlugin,
+  opts: { headingMarkers: boolean }
+) {
+  return Prec.highest(
     keymap.of([
       {
         key: "Backspace",
         run: (view) => {
-          if (!plugin.settings.concealHeadings) return false;
+          const { markerBackspace } = plugin.settings;
+          const concealHeadings = opts.headingMarkers && plugin.settings.concealHeadings;
+          if (!markerBackspace && !concealHeadings) return false;
           const selection = view.state.selection;
           if (selection.ranges.length !== 1 || !selection.main.empty) {
             return false;
           }
-          const plan = headingMarkerDeletePlan(view.state.doc, selection.main.head);
-          if (!plan) return false;
-          view.dispatch({
-            changes: plan,
-            selection: { anchor: plan.from },
-            scrollIntoView: true,
-            userEvent: "delete.backward",
-          });
-          return true;
+          const plan = backspaceMarkerPlan(
+            { markerBackspace, concealHeadings },
+            view.state.doc,
+            selection.main.head
+          );
+          if (plan) {
+            view.dispatch({
+              changes: plan,
+              selection: { anchor: plan.from },
+              scrollIntoView: true,
+              userEvent: "delete.backward",
+            });
+            return true;
+          }
+          return markerBackspace && listMarkerBackspace(view);
         },
       },
     ])
   );
-  return [headingView, escape];
+}
+
+/**
+ * Backspace directly after a list or task marker: the marker goes and the
+ * text stays where it is, at its depth — Notion's one-step return to
+ * plain text, where core merges the item into the line above. Code,
+ * table rows and column scaffolding are not lists whatever they spell.
+ * Returns false, touching nothing, when the caret is anywhere else.
+ */
+export function listMarkerBackspace(view: EditorView): boolean {
+  const selection = view.state.selection;
+  if (selection.ranges.length !== 1 || !selection.main.empty) return false;
+  const doc = view.state.doc;
+  const head = selection.main.head;
+  const line = doc.lineAt(head);
+  if (fenceAt(cachedFences(doc), line.number)) return false;
+  if (isTableRow(line.text)) return false;
+  if (isScaffoldCallout(parseCalloutHeader(line.text)?.type)) return false;
+  const plan = listMarkerBackspacePlan(line.text, head - line.from);
+  if (!plan) return false;
+  view.dispatch({
+    changes: { from: line.from + plan.from, to: line.from + plan.to },
+    selection: { anchor: line.from + plan.from },
+    userEvent: "delete",
+  });
+  return true;
 }
 
 function activeConcealedRanges(
@@ -14570,11 +20146,30 @@ function setBlockCaptionMeta(
   if (focusOwner) view.focus();
 }
 
+/** A fold or unfold click on a code block: a view action, so the caret
+ * stays where it is — it only moves (out below the block) when the rows it
+ * sits on are about to fold away. Every fold control goes through here;
+ * only caption editing hands the caret to the block. */
+export function codeFoldClick(
+  view: EditorView,
+  ownerLine: number,
+  caption: string,
+  collapse: boolean
+): void {
+  setBlockCaptionMeta(view, "code", ownerLine, caption, collapse, false);
+}
+
+/** Put the caret in a block's caption, adding an empty caption row when the
+ * block has none. Captions are edited in place — this is a caret move, not a
+ * dialog — so the menu item and the keyboard route land in the same place a
+ * click on the caption itself would. */
 function editBlockCaption(
-  plugin: NotionFlowPlugin,
   view: EditorView,
   kind: BlockCaptionKind,
-  ownerLine: number
+  ownerLine: number,
+  /** Characters into the caption text to put the caret at. Omitted, the
+   * caret lands at the end — the block menu has no place to aim at. */
+  offset?: number
 ) {
   const doc = view.state.doc;
   const fences = cachedFences(doc);
@@ -14588,27 +20183,421 @@ function editBlockCaption(
       : kind === "table"
         ? tableCaptionMeta(doc, table!.endLine)
         : imageCaptionMeta(doc, ownerLine);
-  new TextPromptModal(plugin.app, {
-    title: t("Edit caption"),
-    placeholder: t("Write a caption…"),
-    initial: current?.caption ?? "",
-    onSave: (caption) =>
-      setBlockCaptionMeta(
-        view,
-        kind,
-        fence?.startLine ?? ownerLine,
-        caption,
-        current?.collapsed ?? false
-      ),
-  }).open();
+  if (current) {
+    const line = doc.line(current.lineNo);
+    const length = current.bodyTo - current.bodyFrom;
+    // A click offset counts characters of the RENDERED caption. It only
+    // maps onto the source when the two are the same string; an entity
+    // ("&amp;") makes the source longer, so there the caret goes to the
+    // end rather than to a place computed from a different length.
+    const into =
+      offset != null && length === current.caption.length
+        ? Math.max(0, Math.min(length, offset))
+        : length;
+    view.dispatch({
+      selection: { anchor: line.from + current.bodyFrom + into },
+      scrollIntoView: true,
+    });
+    view.focus();
+    return;
+  }
+  const ownerEnd = fence?.endLine ?? table?.endLine ?? ownerLine;
+  const prefix =
+    kind === "code"
+      ? fence!.bodyPrefix
+      : captionPrefixForImage(doc.line(ownerLine).text);
+  const row = buildBlockCaption(kind, "", false, prefix, true);
+  if (!row) return;
+  const at = doc.line(ownerEnd).to;
+  view.dispatch({
+    changes: { from: at, insert: "\n" + row },
+    // Between the tags: the row ends with the closing tag, so the empty
+    // caption text begins exactly that many characters before its end.
+    selection: { anchor: at + 1 + row.length - "</small>".length },
+    scrollIntoView: true,
+    userEvent: "input.block-caption",
+  });
+  view.focus();
+}
+
+/** Elements matching `selector` in `doc`, or none for a document that can
+ *  no longer be queried (a window in teardown, a minimal stand-in). */
+function queryAllIn<E extends Element = Element>(doc: Document, selector: string): E[] {
+  return typeof doc.querySelectorAll === "function" ? Array.from(doc.querySelectorAll<E>(selector)) : [];
+}
+
+/** Resolve caption ownership before any rendering or automatic edit. A row
+ * inside code, an orphan, or a row belonging to another container is text. */
+export function ownedBlockCaption(
+  doc: Text,
+  lineNo: number,
+  fencesArg?: FenceRange[]
+): (BlockCaptionMeta & { ownerLine: number }) | null {
+  if (lineNo <= 1 || lineNo > doc.lines) return null;
+  // The cheap parse first: the caption keymap asks on every keystroke, and
+  // an ordinary row must not pay for a fence scan of a changed document.
+  const meta = parseBlockCaption(doc.line(lineNo).text);
+  if (!meta) return null;
+  const fences = fencesArg ?? cachedFences(doc);
+  if (fenceAt(fences, lineNo)) return null;
+  const previousLine = lineNo - 1;
+  const previousText = doc.line(previousLine).text;
+  if (meta.kind === "code") {
+    const fence = fenceAt(fences, previousLine);
+    // Closing fences may legally have extra indentation. Captions use the
+    // opener's body prefix, which is also what the caption command writes.
+    return fence?.closed && fence.endLine === previousLine && meta.prefix === fence.bodyPrefix
+      ? { ...meta, ownerLine: fence.startLine } : null;
+  }
+  if (meta.prefix !== structuralContentPrefix(previousText)) return null;
+  if (meta.kind === "table") {
+    const table = isTableRow(previousText) ? getTableRange(doc, previousLine, fences) : null;
+    return table?.endLine === previousLine ? { ...meta, ownerLine: table.startLine } : null;
+  }
+  return isImageBlockLine(previousText.slice(meta.prefix.length))
+    ? { ...meta, ownerLine: previousLine } : null;
+}
+
+/** The block a caption on row `lineNo` belongs to, by the same owner
+ *  rules the caption row itself follows (a code caption right after its
+ *  closer, a table caption after the table, an image caption after the
+ *  image row), or null when that row is no caption of `kind`. */
+function captionRowOwner(
+  doc: Text,
+  lineNo: number,
+  kind: string | undefined
+): { kind: BlockCaptionKind; ownerLine: number } | null {
+  const meta = parseBlockCaption(doc.line(lineNo).text);
+  if (!meta || meta.kind !== kind || lineNo < 2) return null;
+  if (meta.kind === "code") {
+    const fence = fenceAt(cachedFences(doc), lineNo - 1);
+    return fence?.closed && fence.endLine === lineNo - 1
+      ? { kind: meta.kind, ownerLine: fence.startLine }
+      : null;
+  }
+  if (meta.kind === "table") {
+    const table = isTableRow(doc.line(lineNo - 1).text)
+      ? getTableRange(doc, lineNo - 1, cachedFences(doc))
+      : null;
+    return table ? { kind: meta.kind, ownerLine: table.startLine } : null;
+  }
+  return { kind: meta.kind, ownerLine: lineNo - 1 };
+}
+
+/**
+ * The caption row behind a caption drawn inside a block widget — a rendered
+ * Callout in Live Preview. posAtDOM finds only the widget's first row, and a
+ * caption can sit anywhere in the box, so a search near that row misses the
+ * deeper ones (and may take a shallower caption for them). The widget's
+ * source block is resolved instead, and the caption is matched by its place
+ * among the widget's captions of the same kind: the rendered order is the
+ * source order. Undefined when the widget's block cannot be resolved (the
+ * caller then searches near the widget's row); null when it can but holds no
+ * matching row.
+ */
+function widgetCaptionLine(
+  view: EditorView,
+  widget: HTMLElement,
+  caption: HTMLElement,
+  kind: string | undefined
+): number | null | undefined {
+  // Only a rendered Callout spans rows of its own: any other block widget
+  // (an HTML row Obsidian embeds) stands for the caption's row itself.
+  if (!widget.matches(".cm-callout")) return undefined;
+  const doc = view.state.doc;
+  const fences = cachedFences(doc);
+  const first = doc.lineAt(view.posAtDOM(widget, 0)).number;
+  const range =
+    calloutRangeFromHeader(doc, first, fences) ??
+    quoteContainerRange(doc, first, fences);
+  if (!range) return undefined;
+  // A caption inside an embedded note is that note's, not this block's.
+  const own = (el: Element) => {
+    const embed = el.closest(".markdown-embed, .internal-embed");
+    return !embed || !widget.contains(embed);
+  };
+  if (!own(caption)) return null;
+  const drawn = Array.from(
+    widget.querySelectorAll<HTMLElement>("small.nf-caption")
+  ).filter((el) => el.dataset.nfKind === kind && own(el));
+  const index = drawn.indexOf(caption);
+  if (index < 0) return null;
+  const rows: number[] = [];
+  for (let n = range.startLine; n <= range.endLine; n++) {
+    const fence = fenceAt(fences, n);
+    if (fence) {
+      // Code text is never a caption, whatever it looks like.
+      n = fence.endLine;
+      continue;
+    }
+    if (parseBlockCaption(doc.line(n).text)?.kind === kind) rows.push(n);
+  }
+  return rows[index] ?? null;
+}
+
+/** The editor and owner line behind a rendered caption, for the controls
+ * that write its row back (Live Preview, rendered Callouts). Null in
+ * Reading view, which has no editor to reach. Exported for tests. */
+export function captionSourceTarget(
+  caption: HTMLElement
+): { view: EditorView; kind: BlockCaptionKind; ownerLine: number } | null {
+  const editorEl = caption.closest<HTMLElement>(".cm-editor");
+  const view = editorEl ? EditorView.findFromDOM(editorEl) : null;
+  if (!view) return null;
+  const kind = caption.dataset.nfKind;
+  const widget = caption.closest<HTMLElement>(".cm-embed-block");
+  if (widget && view.contentDOM.contains(widget)) {
+    try {
+      const lineNo = widgetCaptionLine(view, widget, caption, kind);
+      if (lineNo === null) return null;
+      if (lineNo !== undefined) {
+        const owner = captionRowOwner(view.state.doc, lineNo, kind);
+        return owner ? { view, ...owner } : null;
+      }
+    } catch {
+      // Fall back to the search near the widget's row below.
+    }
+  }
+  // A caption on its own row: its row, or one close by.
+  const anchors = [
+    caption,
+    widget,
+    caption.closest<HTMLElement>(".cm-line"),
+  ].filter((candidate): candidate is HTMLElement => !!candidate);
+  for (const anchor of anchors) {
+    try {
+      const near = view.state.doc.lineAt(view.posAtDOM(anchor, 0)).number;
+      for (
+        let lineNo = Math.max(1, near - 2);
+        lineNo <= Math.min(view.state.doc.lines, near + 2);
+        lineNo++
+      ) {
+        const owner = captionRowOwner(view.state.doc, lineNo, kind);
+        if (owner) return { view, ...owner };
+      }
+    } catch {
+      // Try the next DOM anchor; inline HTML widgets vary between
+      // Live Preview and rendered Callouts.
+    }
+  }
+  return null;
+}
+
+/** A rendered table, bare or inside a scroll wrapper (ours, or the one a
+ * theme or Obsidian adds). */
+const CAPTION_TABLE_OWNER =
+  ":scope > table, :scope > .nf-table-scroll > table, :scope > .table-wrapper > table";
+
+/**
+ * The rendered block a caption describes. `captionBlock` is the caption's
+ * paragraph (or the caption itself). An image sits in that same paragraph;
+ * a table or a code block is the element right before it. In Reading view
+ * every block is a section of its own, so a caption that opens its section
+ * (`section`) looks into the section before that one instead. Null while
+ * the owner is not in the document yet.
+ */
+export function captionOwnerIn(
+  captionBlock: Element,
+  kind: string | undefined,
+  section: Element | null = null
+): Element | null {
+  const previous = captionBlock.previousElementSibling;
+  if (kind === "image") {
+    return (
+      captionBlock.querySelector(".image-embed img, img") ??
+      previous?.querySelector(":scope > img") ??
+      (previous?.tagName === "IMG" ? previous : null)
+    );
+  }
+  const seam =
+    previous ??
+    (section && captionBlock.parentElement === section
+      ? section.previousElementSibling
+      : null);
+  if (!seam) return null;
+  if (kind === "table") {
+    return seam.tagName === "TABLE" ? seam : seam.querySelector(CAPTION_TABLE_OWNER);
+  }
+  if (kind === "code") {
+    if (seam.tagName === "PRE") return seam;
+    return previous ? null : seam.querySelector(":scope > pre");
+  }
+  return null;
+}
+
+/**
+ * Whether the caption row at 0-based `lineStart` of a note's source
+ * belongs to the block above it (ownedBlockCaption). Reading view hands
+ * over the file as it is on disk, so a CRLF note (Windows tools, Git's
+ * autocrlf) keeps a "\r" on every line: split as Obsidian's parser counts
+ * lines — CRLF, CR or LF each end one — so the row parses and `lineStart`
+ * stays aligned.
+ */
+export function captionOwnedInSource(text: string, lineStart: number): boolean {
+  return ownedBlockCaption(Text.of(text.split(/\r\n?|\n/)), lineStart + 1) != null;
+}
+
+/** Show a rendered code block's fold state: the block's collapsed class,
+ *  and its chevron's look, aria-expanded and label. */
+function syncCodeFold(pre: HTMLElement, fold: HTMLElement, collapsed: boolean): void {
+  pre.classList.toggle("nf-rendered-code-collapsed", collapsed);
+  fold.classList.toggle("is-collapsed", collapsed);
+  fold.setAttribute("aria-expanded", String(!collapsed));
+  fold.setAttribute("aria-label", t(collapsed ? "Expand code block" : "Collapse code block"));
+}
+
+/**
+ * Pair a rendered caption with its block: the classes that close the gap
+ * between them, and for code the fold button that honours the caption's
+ * saved collapsed state. Safe to call again for the same pair, and again
+ * with a newer caption: the block takes that caption's state.
+ */
+export function bindCaptionOwner(
+  caption: HTMLElement,
+  captionBlock: HTMLElement,
+  owner: Element | null
+): void {
+  const kind = caption.dataset.nfKind;
+  if (kind === "image") {
+    owner?.classList.add("nf-captioned-image");
+    captionBlock.classList.add("nf-image-caption-block");
+    return;
+  }
+  if (kind === "table") {
+    owner?.classList.add("nf-captioned-table");
+    captionBlock.classList.add("nf-table-caption-block");
+    return;
+  }
+  if (kind !== "code" || owner?.tagName !== "PRE") return;
+  const pre = owner as HTMLPreElement;
+  const collapsed = caption.dataset.nfCollapsed === "true";
+  pre.classList.add("nf-captioned-code");
+  captionBlock.classList.add("nf-code-caption-block");
+  // Reading view keeps an unchanged section's DOM: folding in Live Preview
+  // rewrites only the caption row, so only the caption's section renders
+  // again and binds to the <pre> kept from before. The block follows the
+  // caption's state, not the one it was drawn with.
+  const bound = pre.querySelector<HTMLElement>(":scope > .nf-rendered-code-fold");
+  if (bound) {
+    syncCodeFold(pre, bound, collapsed);
+    return;
+  }
+  const fold = pre.createEl("button", { cls: "nf-rendered-code-fold", attr: { type: "button" } });
+  syncCodeFold(pre, fold, collapsed);
+  setIcon(fold, "chevron-down");
+  fold.addEventListener("click", (evt) => {
+    evt.preventDefault();
+    evt.stopPropagation();
+    const nextCollapsed = !pre.classList.contains("nf-rendered-code-collapsed");
+    // This postprocessor also renders Callout bodies inside Live
+    // Preview, where an editor does exist. There the caption row is
+    // the single source of truth, so write the state back instead of
+    // styling the DOM: a class alone would be discarded the moment
+    // the Callout re-rendered. Reading view has no editor to reach,
+    // and folding stays a view-local affordance there.
+    const target = captionSourceTarget(caption);
+    if (target?.kind === "code") {
+      const doc = target.view.state.doc;
+      const fence = fenceAt(cachedFences(doc), target.ownerLine);
+      if (fence) {
+        // Folding is a view action: moving the caret into the block
+        // would open the surrounding Callout as a side effect.
+        codeFoldClick(
+          target.view,
+          fence.startLine,
+          codeCaptionMeta(doc, fence)?.caption ?? "",
+          nextCollapsed
+        );
+        return;
+      }
+    }
+    syncCodeFold(pre, fold, nextCollapsed);
+  });
+}
+
+/** The caption row that opens a Reading-view section, or null. */
+function sectionLeadCaption(
+  section: Element | null
+): { caption: HTMLElement; captionBlock: HTMLElement } | null {
+  const first = section?.firstElementChild as HTMLElement | null | undefined;
+  if (!first) return null;
+  const caption =
+    first.tagName === "P" ? (first.firstElementChild as HTMLElement | null) : first;
+  if (
+    !caption?.matches?.(
+      'small.nf-caption[data-nf-kind="code"], small.nf-caption[data-nf-kind="table"]'
+    )
+  ) {
+    return null;
+  }
+  return { caption, captionBlock: first };
 }
 
 const BLOCK_MENU_OPEN_CLASS = "nf-block-menu-open";
 const BLOCK_MENU_OPEN_EVENT = "nf:block-menu-open";
 
+/** Body classes set only while a gesture or menu lasts; unload clears
+ *  them in case the plugin goes away mid-gesture. */
+const TRANSIENT_BODY_CLASSES = [
+  BLOCK_MENU_OPEN_CLASS,
+  "nf-dragging",
+  "nf-resizing-columns",
+  "nf-selecting-blocks",
+] as const;
+
+/** Every plugin menu currently open. Unload hides them: a menu left open
+ *  after the plugin is disabled would still edit the note. */
+export const OPEN_PLUGIN_MENUS = new Set<Menu>();
+
+/**
+ * Track `menu` in OPEN_PLUGIN_MENUS until it hides, then run `onHide`.
+ * Obsidian's `Menu.onHide` REPLACES the previous callback, so this is the
+ * one place a plugin menu registers it: pass all hide-time cleanup here
+ * and never call `menu.onHide` again.
+ */
+export function trackMenu<M extends Menu>(menu: M, onHide?: () => void): M {
+  const hookable = menu as unknown as { onHide?: (callback: () => void) => unknown };
+  if (typeof hookable.onHide !== "function") return menu;
+  OPEN_PLUGIN_MENUS.add(menu);
+  hookable.onHide(() => {
+    OPEN_PLUGIN_MENUS.delete(menu);
+    onHide?.();
+  });
+  return menu;
+}
+
+/** Hide every tracked menu (their hide callbacks clean up after them). */
+export function hideTrackedMenus(): void {
+  for (const menu of [...OPEN_PLUGIN_MENUS]) {
+    try {
+      menu.hide();
+    } catch {
+      // Its window is already gone.
+    }
+    OPEN_PLUGIN_MENUS.delete(menu);
+  }
+}
+
+/**
+ * Obsidian's Menu appends its own element to the document body, never
+ * inside the parent element it is told about, so the plugin's menu rules
+ * (and its own click tests) can only find the menu by a class on the
+ * menu element itself. Tagged right after construction; a submenu is a
+ * Menu of its own and is tagged the same way.
+ */
+export function tagBlockMenu<M extends Menu>(menu: M): M {
+  const dom = (menu as unknown as { dom?: HTMLElement }).dom;
+  if (dom && typeof dom.addClass === "function") dom.addClass("nf-block-menu");
+  else dom?.classList?.add("nf-block-menu");
+  return menu;
+}
+
 function isBlockMenuTarget(target: EventTarget | null): boolean {
   const el = target as Element | null;
-  return typeof el?.closest === "function" && !!el.closest(".nf-block-menu-anchor");
+  return (
+    typeof el?.closest === "function" &&
+    !!el.closest(".nf-block-menu-anchor, .nf-block-menu")
+  );
 }
 
 /**
@@ -14658,6 +20647,401 @@ const WRAP_INTO: {
 ];
 
 /**
+ * The chord modifiers behind every turn-into / wrap-into shortcut, in the
+ * editor and in block mode alike.
+ *
+ * Notion's own modifier per platform, and for the same reason it split
+ * them: Ctrl+Alt IS AltGr on the European layouts, where claiming
+ * Ctrl+Alt+2 would take the key that types "@". Mod+Shift is free of
+ * that and is what Notion uses off macOS.
+ */
+export const TURN_INTO_MODIFIERS: ("Mod" | "Alt" | "Shift")[] = Platform.isMacOS
+  ? ["Mod", "Alt"]
+  : ["Mod", "Shift"];
+
+type BlockActionId =
+  | "open-block-menu"
+  | "insert-block-below"
+  | "insert-block-above"
+  | "move-block-up"
+  | "move-block-down"
+  | "duplicate-block";
+
+/**
+ * The default chords of the block actions the handle menu lists, for one
+ * platform. The command registrations read the same table, so a hint in
+ * the menu can never drift from the hotkey it describes; null means the
+ * command ships without a default there.
+ *
+ * "=" reads as "add". Enter is taken: Mod+Alt(+Shift)+Enter are core's
+ * open-link-in-new-split / -window, so on a link they opened a pane and
+ * elsewhere did nothing. Obsidian matches the physical key, so Shift's
+ * "+" and the Mac Option layer's "≠" still count as "=". Off macOS the two
+ * insert commands get no default at all, for the reason TURN_INTO_MODIFIERS
+ * gives: Windows reports AltGr as Ctrl+Alt, and Obsidian's matcher does not
+ * tell them apart, so Ctrl+Alt+= would eat the "}" (French), "~" (German)
+ * and "\" (Swedish, Finnish) typed with AltGr; the other free "=" chords
+ * are zoom. The + button, the block menu and block mode still insert.
+ */
+export function blockActionChords(
+  mac: boolean = Platform.isMacOS
+): Record<BlockActionId, Hotkey | null> {
+  return {
+    "open-block-menu": { modifiers: mac ? ["Mod", "Alt"] : ["Mod", "Shift"], key: "/" },
+    "insert-block-below": mac ? { modifiers: ["Mod", "Alt"], key: "=" } : null,
+    "insert-block-above": mac ? { modifiers: ["Mod", "Alt", "Shift"], key: "=" } : null,
+    "move-block-up": { modifiers: ["Alt"], key: "ArrowUp" },
+    "move-block-down": { modifiers: ["Alt"], key: "ArrowDown" },
+    "duplicate-block": { modifiers: ["Alt", "Shift"], key: "D" },
+  };
+}
+
+const BLOCK_ACTION_CHORDS = blockActionChords();
+
+/** This platform's default chord for a block action, or null. */
+function blockActionChord(id: BlockActionId): Hotkey | null {
+  return BLOCK_ACTION_CHORDS[id];
+}
+
+/**
+ * Block mode's own insert chords, the same on every platform: nothing is
+ * typed while blocks are selected, so an AltGr character cannot be lost.
+ */
+const BLOCK_MODE_INSERT_CHORDS = {
+  below: { modifiers: ["Mod", "Alt"] as Modifier[], key: "=" },
+  above: { modifiers: ["Mod", "Alt", "Shift"] as Modifier[], key: "=" },
+};
+
+/**
+ * Every default hotkey the plugin registers, by command id, for one
+ * platform (the turn-into modifiers differ). The command registrations
+ * read their hotkeys from here, so a test of this list is a test of what
+ * Obsidian is actually handed — in particular that no default takes a
+ * chord core Obsidian already binds.
+ */
+export function pluginDefaultHotkeys(
+  mac: boolean = Platform.isMacOS
+): { id: string; hotkey: Hotkey }[] {
+  const turnInto: Modifier[] = mac ? ["Mod", "Alt"] : ["Mod", "Shift"];
+  const list: { id: string; hotkey: Hotkey }[] = [];
+  for (const entry of TURN_INTO) {
+    list.push({ id: `turn-into-${entry.id}`, hotkey: { modifiers: turnInto, key: entry.digit } });
+  }
+  for (const entry of WRAP_INTO) {
+    list.push({ id: `wrap-into-${entry.kind}`, hotkey: { modifiers: turnInto, key: entry.key } });
+  }
+  const actions = blockActionChords(mac);
+  for (const id of Object.keys(actions) as BlockActionId[]) {
+    const chord = actions[id];
+    if (chord) list.push({ id, hotkey: chord });
+  }
+  // Mod+Enter alone is core's toggle-checkbox; Mod+\ is Notion's own
+  // clear-formatting chord.
+  list.push({ id: "exit-code-block", hotkey: { modifiers: ["Mod", "Shift"], key: "Enter" } });
+  list.push({ id: "clear-formatting", hotkey: { modifiers: ["Mod"], key: "\\" } });
+  list.push({ id: "add-comment", hotkey: { modifiers: ["Mod", "Shift"], key: "M" } });
+  list.push({ id: "apply-last-highlight-color", hotkey: { modifiers: ["Mod", "Shift"], key: "H" } });
+  // Core Obsidian has no underline command; ⌘U is Notion's chord for it.
+  list.push({ id: "toggle-underline", hotkey: { modifiers: ["Mod"], key: "U" } });
+  return list;
+}
+
+/** The block actions' names, as their commands and the handle menu show them. */
+const BLOCK_ACTION_LABELS: Record<BlockActionId, string> = {
+  "open-block-menu": "Open block menu",
+  "insert-block-below": "Insert block below",
+  "insert-block-above": "Insert block above",
+  "move-block-up": "Move block up",
+  "move-block-down": "Move block down",
+  "duplicate-block": "Duplicate block",
+};
+
+/** A chord as the menu prints it: "⌘⌥1" on a Mac, "Ctrl+Shift+1" elsewhere. */
+export function chordText(modifiers: readonly string[], key: string): string {
+  return chordLabel([...modifiers], key);
+}
+
+/**
+ * The chord a menu row shows for one of the plugin's commands: whatever
+ * the person bound in Obsidian's hotkey settings when that is known, else
+ * the plugin's default — or null when the person unbound it, or the
+ * command has no chord here. A row never names a key that does nothing.
+ */
+function commandChord(app: App | null, id: string, fallback: Hotkey | null): string | null {
+  return commandShortcut(app, `notion-flow:${id}`, fallback);
+}
+
+/**
+ * The editor's keyboard guide, assembled from the tables the commands and
+ * the block-selection keys read, with each command's current hotkey so a
+ * rebind shows up here too. A command without a chord (unbound by the
+ * person, or shipped without one, like Obsidian's inline code) has no row:
+ * the guide never shows a key that does nothing. Section titles and
+ * descriptions are keys the renderer translates; the chords are labelled
+ * here.
+ */
+export function editorHelpSections(
+  settings: NotionFlowSettings,
+  app: App | null = null
+): HelpSection[] {
+  const cmd = (id: string, fallback: Hotkey | null) => commandChord(app, id, fallback);
+  const appCmd = (id: string, fallback: string | null) => commandShortcut(app, id, fallback);
+  const key = (modifiers: readonly string[], k: string) => chordText(modifiers, k);
+  /** A row for each chord that exists; a row with none is left out. */
+  const rowsOf = (rows: { keys: (string | null)[]; desc: string }[]): HelpRow[] =>
+    rows.flatMap((row) =>
+      row.keys.every((k): k is string => k != null) ? [{ keys: row.keys, desc: row.desc }] : []
+    );
+
+  const turnInto: HelpRow[] = rowsOf([
+    ...TURN_INTO.map((entry) => ({
+      keys: [cmd(`turn-into-${entry.id}`, { modifiers: TURN_INTO_MODIFIERS, key: entry.digit })],
+      desc: entry.title,
+    })),
+    ...WRAP_INTO.filter((entry) => entry.kind !== "toggle" || settings.toggleBlocks).map((entry) => ({
+      keys: [cmd(`wrap-into-${entry.kind}`, { modifiers: TURN_INTO_MODIFIERS, key: entry.key })],
+      desc: entry.title,
+    })),
+  ]);
+
+  const blocks: HelpRow[] = rowsOf([
+    ...(Object.keys(BLOCK_ACTION_CHORDS) as BlockActionId[]).map((id) => ({
+      keys: [commandChord(app, id, blockActionChord(id))],
+      desc: BLOCK_ACTION_LABELS[id],
+    })),
+    { keys: [cmd("clear-formatting", { modifiers: ["Mod"], key: "\\" })], desc: "Clear formatting" },
+    { keys: [cmd("add-comment", { modifiers: ["Mod", "Shift"], key: "M" })], desc: "Add comment" },
+    {
+      keys: [cmd("apply-last-highlight-color", { modifiers: ["Mod", "Shift"], key: "H" })],
+      desc: "Apply last used highlight",
+    },
+    { keys: [cmd("exit-code-block", { modifiers: ["Mod", "Shift"], key: "Enter" })], desc: "Exit code block" },
+    // Only where it is bound: ⌘⌥T by default on macOS, nothing elsewhere.
+    {
+      keys: [appCmd("notion-flow:toggle-all-toggles", Platform.isMacOS ? "Mod+Alt+T" : null)],
+      desc: "Collapse or expand all toggles",
+    },
+  ]);
+
+  const selection: HelpRow[] = [
+    ...(settings.blockSelectKey
+      ? [{ keys: [key([], "Escape")], desc: "Select the block holding the caret" }]
+      : []),
+    { keys: [key([], "ArrowUp"), key([], "ArrowDown")], desc: "Select the block above or below" },
+    { keys: [key(["Shift"], "ArrowUp"), key(["Shift"], "ArrowDown")], desc: "Extend the selection" },
+    { keys: [key([], "Enter")], desc: "Return to writing after the selection" },
+    { keys: [key(["Mod"], "A")], desc: "Select all blocks" },
+    {
+      keys: [key(["Mod"], "C"), key(["Mod"], "X"), key(["Mod"], "V")],
+      desc: "Copy, cut, or paste over the selected blocks",
+    },
+    { keys: [key(["Mod"], "D")], desc: "Duplicate block" },
+    { keys: [key([], "Backspace"), key([], "Delete")], desc: "Delete block" },
+    {
+      keys: [key(["Mod"], "B"), key(["Mod"], "I"), key(["Mod"], "U")],
+      desc: "Bold, italic, or underline the selected text",
+    },
+    { keys: [key(["Mod"], "Enter")], desc: "Add or tick to-do boxes" },
+    { keys: [key(["Alt"], "ArrowUp"), key(["Alt"], "ArrowDown")], desc: "Move the selected blocks" },
+    { keys: [key([], "Tab"), key(["Shift"], "Tab")], desc: "Indent or outdent the selected blocks" },
+  ];
+
+  const toolbar: HelpRow[] = rowsOf([
+    { keys: [key(["Alt"], "F10")], desc: "Focus the formatting toolbar" },
+    { keys: [key([], "ArrowLeft"), key([], "ArrowRight")], desc: "Move between toolbar buttons" },
+    { keys: [key([], "Escape")], desc: "Return to the text" },
+    { keys: [appCmd("editor:toggle-bold", "Mod+B")], desc: "Bold" },
+    { keys: [appCmd("editor:toggle-italics", "Mod+I")], desc: "Italic" },
+    { keys: [appCmd("notion-flow:toggle-underline", "Mod+U")], desc: "Underline" },
+    { keys: [appCmd("editor:toggle-strikethrough", null)], desc: "Strikethrough" },
+    { keys: [appCmd("editor:toggle-code", null)], desc: "Inline code" },
+    { keys: [appCmd("editor:insert-link", "Mod+K")], desc: "Insert or edit link" },
+    { keys: [appCmd("notion-flow:open-text-color", null)], desc: "Text color" },
+    { keys: [appCmd("notion-flow:open-highlight-color", null)], desc: "Highlight color" },
+  ]);
+
+  const shorthand: HelpRow[] = [
+    ...(settings.slashCommands ? [{ keys: ["/"], desc: "Slash commands" }] : []),
+    ...(settings.inputRules
+      ? [
+          {
+            keys: [">!", "Space"],
+            desc: 'Callout; ">!tip" picks the type, a trailing + or - makes it foldable',
+          },
+          { keys: ["[]", "Space"], desc: "To-do" },
+        ]
+      : []),
+    { keys: ["#", "Space"], desc: "Heading 1" },
+    { keys: ["##", "Space"], desc: "Heading 2" },
+    { keys: ["-", "Space"], desc: "Bulleted list" },
+    { keys: ["1.", "Space"], desc: "Numbered list" },
+    { keys: [">", "Space"], desc: "Quote" },
+    { keys: ["```"], desc: "Code block" },
+  ];
+
+  const sections: HelpSection[] = [
+    { title: "Turn into", rows: turnInto },
+    { title: "Blocks", rows: blocks },
+    { title: "Block selection", rows: selection },
+  ];
+  if (settings.floatingToolbar) sections.push({ title: "Formatting toolbar", rows: toolbar });
+  sections.push({ title: "Markdown shorthand", rows: shorthand });
+  return sections;
+}
+
+/**
+ * A menu row title with a faint chord hint at its right edge, the way
+ * Notion's block menu teaches its shortcuts. MenuItem.setTitle takes a
+ * DocumentFragment, so the hint is a real span (`.nf-menu-hint`) the
+ * stylesheet can push to the edge; without a hint the plain title is
+ * returned.
+ */
+export function menuTitleWithHint(
+  ownerDoc: Document,
+  title: string,
+  hint: string | null
+): string | DocumentFragment {
+  if (!hint) return title;
+  const fragment = ownerDoc.createDocumentFragment();
+  fragment.createSpan({ cls: "nf-menu-title", text: title });
+  // A plain space keeps an unstyled row readable ("Move up ⌥↑").
+  fragment.appendChild(ownerDoc.createTextNode(" "));
+  fragment.createSpan({ cls: "nf-menu-hint", text: hint });
+  return fragment;
+}
+
+export type BlockType =
+  | "text" | "h1" | "h2" | "h3" | "todo" | "bullet" | "number" | "quote"
+  | "callout" | "toggle";
+
+/**
+ * Which of the turn-into types a block already is, read off its first
+ * row's prefix (the quote markers of the containers the block sits in are
+ * skipped, as is list nesting indentation). A Callout or toggle header is
+ * that container, not a quote; the columns scaffolding, and anything else
+ * the menu cannot retype into — a deeper heading, a table row — reads as
+ * text.
+ */
+export function blockTypeAt(doc: Text, block: BlockRange): BlockType {
+  const text = doc.line(block.startLine).text;
+  const content = splitQuoteMarkers(
+    text,
+    quotePrefixDepth(block.quotePrefix ?? "")
+  ).rest;
+  // A "[!type]" row in the middle of a quote is its text (see opensQuote).
+  const opens = opensQuote(doc, block.startLine);
+  if (opens && parseToggleHeader(content)) return "toggle";
+  const callout = opens ? parseCalloutHeader(content) : null;
+  if (callout) return isScaffoldCallout(callout.type) ? "text" : "callout";
+  const m = content.replace(/^[ \t]+/, "").match(RE_LINE_PREFIX);
+  if (!m) return "text";
+  const prefix = m[1];
+  if (prefix.startsWith("#")) {
+    const level = prefix.trimEnd().length;
+    return level === 1 ? "h1" : level === 2 ? "h2" : level === 3 ? "h3" : "text";
+  }
+  if (prefix.startsWith(">")) return "quote";
+  if (/\[.\]\s$/.test(prefix)) return "todo";
+  return /^\d/.test(prefix) ? "number" : "bullet";
+}
+
+/**
+ * The Turn-into rows shared by the handle menu and the block-selection
+ * menu: every TURN_INTO entry with the block's current type checked, a
+ * separator, then the containers the block may be wrapped into — each
+ * row carrying its chord. In the handle menu they sit behind one
+ * "Turn into · <current>" row when Obsidian offers submenus (a label plus
+ * the same rows inline when it does not); `inline` puts them straight
+ * into a menu that is nothing but this section. A Callout or toggle reads
+ * as itself ("Turn into · Callout"), its own container row ticked.
+ */
+export function addTurnIntoSection(
+  menu: Menu,
+  ownerDoc: Document,
+  app: App | null,
+  options: {
+    current: BlockType | null;
+    turnable: boolean;
+    wraps: BlockWrapKind[];
+    inline?: boolean;
+    onTurn: (entry: (typeof TURN_INTO)[number]) => void;
+    onWrap: (kind: BlockWrapKind) => void;
+  }
+): boolean {
+  const { current, turnable, wraps, onTurn, onWrap } = options;
+  // A Callout or toggle is already its container: that row is listed,
+  // ticked and inert, even though wrapping it again is not on offer.
+  const isCurrentWrap = (kind: BlockWrapKind) =>
+    (kind === "callout" || kind === "toggle") && current === kind;
+  const listedWraps = WRAP_INTO.filter(
+    (entry) => wraps.includes(entry.kind) || isCurrentWrap(entry.kind)
+  );
+  if (!turnable && listedWraps.length === 0) return false;
+  const populate = (target: Menu) => {
+    if (turnable) {
+      for (const entry of TURN_INTO) {
+        target.addItem((item) =>
+          item
+            .setTitle(menuTitleWithHint(ownerDoc, entry.title, commandChord(
+              app,
+              `turn-into-${entry.id}`,
+              { modifiers: TURN_INTO_MODIFIERS, key: entry.digit }
+            )))
+            .setIcon(entry.icon)
+            .setChecked(current === entry.id)
+            .onClick(() => onTurn(entry))
+        );
+      }
+      if (listedWraps.length > 0) target.addSeparator();
+    }
+    for (const entry of listedWraps) {
+      const isCurrent = isCurrentWrap(entry.kind);
+      target.addItem((item) =>
+        item
+          .setTitle(menuTitleWithHint(ownerDoc, entry.title, commandChord(
+            app,
+            `wrap-into-${entry.kind}`,
+            { modifiers: TURN_INTO_MODIFIERS, key: entry.key }
+          )))
+          .setIcon(entry.icon)
+          .setChecked(isCurrent)
+          .onClick(() => {
+            if (!isCurrent) onWrap(entry.kind);
+          })
+      );
+    }
+  };
+  if (options.inline) {
+    populate(menu);
+    return true;
+  }
+  const label = !current
+    ? null
+    : current === "callout"
+      ? t("Callout")
+      : current === "toggle"
+        ? t("Toggle")
+        : turnable
+          ? TURN_INTO.find((entry) => entry.id === current)?.title ?? null
+          : null;
+  let placed = false;
+  menu.addItem((item) => {
+    item.setTitle(label ? `${t("Turn into")} · ${label}` : t("Turn into")).setIcon("replace");
+    const withSub = item as unknown as { setSubmenu?: () => Menu };
+    if (typeof withSub.setSubmenu === "function") {
+      populate(tagBlockMenu(withSub.setSubmenu()));
+      placed = true;
+    } else {
+      // No submenu support: the row becomes the section's label and the
+      // rows follow it inline, as the menu always listed them.
+      item.setTitle(t("Turn into")).setIsLabel(true);
+    }
+  });
+  if (!placed) populate(menu);
+  return true;
+}
+
+/**
  * Whether a line prefix can retype this block.
  *
  * A fenced code block or a table is a structure the prefix would corrupt.
@@ -14678,14 +21062,15 @@ export function canTurnBlockInto(
   return !isScaffoldCallout(parseCalloutHeader(first)?.type);
 }
 
-/** A quote or Callout spanning more than its own first row. */
+/** A quote or Callout spanning more than its own first row. Only the
+ *  levels of the containers the block sits in are skipped: a Callout
+ *  nested in another keeps its own ">" and is a quote block too. */
 function isMultiLineQuoteBlock(doc: Text, block: BlockRange): boolean {
   if (block.endLine <= block.startLine) return false;
   const text = doc.line(block.startLine).text;
-  const content = block.quotePrefix
-    ? text.slice(quoteMarkerPrefix(text)?.length ?? 0)
-    : text;
-  return RE_QUOTE.test(content);
+  return RE_QUOTE.test(
+    splitQuoteMarkers(text, quotePrefixDepth(block.quotePrefix ?? "")).rest
+  );
 }
 
 /**
@@ -14702,19 +21087,8 @@ export function turnBlockInto(
   fences: FenceRange[]
 ): boolean {
   const doc = view.state.doc;
-  if (!canTurnBlockInto(doc, block, fences)) return false;
-  const line = doc.line(block.startLine);
-  const whole = isMultiLineQuoteBlock(doc, block)
-    ? turnQuoteBlockInto(doc, block, prefix)
-    : null;
-  // Inside a Callout the "> " markers are the container, not the block:
-  // rewrite what they hold and leave them standing.
-  const markers = block.quotePrefix ? quoteMarkerPrefix(line.text) ?? "" : "";
-  const change = whole ?? {
-    from: line.from,
-    to: line.to,
-    insert: markers + applyLinePrefix(line.text.slice(markers.length), prefix),
-  };
+  const change = turnBlockChange(doc, block, prefix, fences);
+  if (!change) return false;
   view.dispatch({
     changes: change,
     selection: turnCaret(doc, view.state.selection.main, change),
@@ -14744,10 +21118,14 @@ function turnCaret(
   const rows = change.insert.split("\n");
   // A title-less Callout header leaves no row behind, so the block can end
   // up one row shorter than it started; clamp rather than run off the end.
-  const index = Math.min(
+  let index = Math.min(
     caretLine.number - doc.lineAt(change.from).number,
     rows.length - 1
   );
+  // A container retyped by its title gains a blank row under the title,
+  // which moves every body row down by one: follow the caret's own text.
+  const after = caretLine.text.slice(caret.head - caretLine.from);
+  if (after && !rows[index].endsWith(after) && rows[index + 1]?.endsWith(after)) index++;
   let start = change.from;
   for (let n = 0; n < index; n++) start += rows[n].length + 1;
   const end = start + rows[index].length;
@@ -14758,15 +21136,486 @@ function turnCaret(
   return { anchor: Math.max(Math.min(content, end), end - tail) };
 }
 
-function openBlockMenu(
+/** Six base-36 characters, the shape Obsidian's own generated ids take. */
+export function newBlockId(): string {
+  let id = "";
+  while (id.length < 6) id += Math.floor(Math.random() * 36).toString(36);
+  return id;
+}
+
+/** A `$$` row on its own: the opener or closer of a display equation. */
+const RE_MATH_FENCE_ROW = /^\s*\$\$\s*$/;
+
+/**
+ * Where a block's id lives, or where one goes. A paragraph or image
+ * carries `^id` at the end of its last row; a list item carries it at the
+ * end of its own first row (Obsidian's convention — the id then addresses
+ * the item together with its children, never a child in its place). A
+ * block whose last row cannot end that way — a table row, a fence closer,
+ * a quote row, a `$$` closer or a caption — takes Obsidian's other
+ * convention, a `^id` row after a blank seam (after the caption, when
+ * there is one). `existing` is the id already there, in which case
+ * nothing is to be inserted. Null for what cannot take an id: a heading
+ * (which links by its text), a blank row, a divider (which stops being
+ * one with anything after it) and a row inside a Callout — the Callout is
+ * the block Obsidian addresses, not its rows.
+ */
+export function blockIdPlacement(
+  doc: Text,
+  block: BlockRange,
+  fences: FenceRange[],
+  id: string = newBlockId()
+): { line: number; existing: string | null; insertAt: number; insertText: string; id: string } | null {
+  if (block.quotePrefix) return null;
+  const firstLine = doc.line(block.startLine);
+  const first = firstLine.text;
+  if (RE_HEADING.test(first)) return null;
+  if (RE_HR.test(first)) return null;
+  if (block.startLine === block.endLine && RE_BLANK.test(first)) return null;
+  const last = doc.line(block.endLine);
+  const own = last.text.match(RE_BLOCK_ID_ROW);
+  if (own) {
+    return { line: block.endLine, existing: own[1], insertAt: last.to, insertText: "", id: own[1] };
+  }
+  if (RE_LIST.test(first) && !fenceAt(fences, block.startLine)) {
+    const tail = first.match(RE_BLOCK_ID_TAIL);
+    if (tail) {
+      return { line: block.startLine, existing: tail[1], insertAt: firstLine.to, insertText: "", id: tail[1] };
+    }
+    return { line: block.startLine, existing: null, insertAt: firstLine.to, insertText: ` ^${id}`, id };
+  }
+  // The seam form is decided by the block's last row: that is the row
+  // a trailing id would otherwise land on.
+  const container =
+    fenceAt(fences, block.startLine) != null ||
+    fenceAt(fences, block.endLine) != null ||
+    isTableRow(last.text) ||
+    RE_QUOTE.test(last.text) ||
+    RE_MATH_FENCE_ROW.test(last.text) ||
+    parseBlockCaption(last.text) != null;
+  if (container) {
+    return { line: block.endLine + 2, existing: null, insertAt: last.to, insertText: `\n\n^${id}`, id };
+  }
+  const tail = last.text.match(RE_BLOCK_ID_TAIL);
+  if (tail) {
+    return { line: block.endLine, existing: tail[1], insertAt: last.to, insertText: "", id: tail[1] };
+  }
+  return { line: block.endLine, existing: null, insertAt: last.to, insertText: ` ^${id}`, id };
+}
+
+/** Whether "Copy link" has anything to copy for this block. */
+function blockLinkable(doc: Text, block: BlockRange, fences: FenceRange[]): boolean {
+  if (block.quotePrefix) return false;
+  const first = doc.line(block.startLine).text;
+  if (RE_HEADING.test(first)) return true;
+  return blockIdPlacement(doc, block, fences, "x") != null;
+}
+
+/** A heading's text as an Obsidian link subpath spells it. */
+function headingLinkText(text: string): string {
+  return text
+    .replace(/^#{1,6}\s+/, "")
+    .replace(/\s+#+\s*$/, "")
+    .replace(/[#|^[\]]/g, "")
+    .trim();
+}
+
+/**
+ * Put a link to the block (or an embed of it) on the clipboard, writing a
+ * block id into the note first when the block has none. Headings need no
+ * id. The link is spelled the way the vault's link settings ask, so it
+ * matches what Obsidian's own "Copy link" would produce.
+ */
+function copyBlockLink(
+  app: App,
   view: EditorView,
   block: BlockRange,
   fences: FenceRange[],
-  evt: MouseEvent,
-  plugin: NotionFlowPlugin,
+  embed: boolean
+): void {
+  const doc = view.state.doc;
+  const path = sourcePathForEditorView(app.workspace, view);
+  const file = path ? app.vault.getAbstractFileByPath(path) : null;
+  if (!(file instanceof TFile)) return;
+  const first = doc.line(block.startLine).text;
+  let subpath: string;
+  if (RE_HEADING.test(first)) {
+    subpath = `#${headingLinkText(first)}`;
+  } else {
+    const placement = blockIdPlacement(doc, block, fences);
+    if (!placement) return;
+    if (!placement.existing) {
+      view.dispatch({
+        changes: { from: placement.insertAt, insert: placement.insertText },
+        userEvent: "input.block-id",
+      });
+    }
+    subpath = `#^${placement.id}`;
+  }
+  // An empty source path spells the link from outside the note
+  // ("[[note#^id]]"): it is copied to be pasted somewhere else, and the
+  // note's own path would shorten it to a same-note "[[#^id]]".
+  const link = app.fileManager.generateMarkdownLink(file, "", subpath);
+  void navigator.clipboard.writeText(embed ? `!${link}` : link);
+  new Notice(t("Link copied"));
+}
+
+/** Where a handle opens its block menu: leftwards from just outside the
+ *  handle, top-aligned with it, so the menu sits in the margin and covers
+ *  none of the block's text. (Obsidian adds 2 px on each axis and opens
+ *  rightwards instead when the margin is too narrow.) */
+export function blockMenuAnchor(handle: { left: number; top: number }): {
+  x: number;
+  y: number;
+  left: true;
+} {
+  return { x: handle.left - 6, y: handle.top, left: true };
+}
+
+/* ------------------------------------------------------------------ */
+/* Block colour and page actions (block menu, selection toolbar, slash) */
+/* ------------------------------------------------------------------ */
+
+/** The row closing the note's frontmatter, or 0 when it has none. */
+function frontmatterEndLine(doc: Text): number {
+  if (doc.lines < 2 || !/^---[ \t]*$/.test(doc.line(1).text)) return 0;
+  for (let n = 2; n <= doc.lines; n++) {
+    if (/^(?:---|\.\.\.)[ \t]*$/.test(doc.line(n).text)) return n;
+  }
+  return 0;
+}
+
+/**
+ * Which colours `block` can take. The line rules are block-color.ts's
+ * (blockColorSupport, given the raw first row and the row below it, so a
+ * setext heading is seen); on top of them: frontmatter, fences, tables and
+ * Callout / toggle / column headers (which carry their own colour) take
+ * none, and neither does a heading — a colour span in a heading leaks into
+ * its [[#heading]] links and the outline.
+ */
+export function blockColorTarget(
+  doc: Text,
+  block: BlockRange,
+  fences: FenceRange[]
+): { text: boolean; background: boolean } {
+  const none = { text: false, background: false };
+  if (block.startLine < 1 || block.startLine > doc.lines) return none;
+  if (block.startLine <= frontmatterEndLine(doc) || fenceAt(fences, block.startLine)) return none;
+  const first = doc.line(block.startLine).text;
+  if (isTableRow(first) || parseCalloutHeader(first)) return none;
+  const next = block.startLine < doc.lines ? doc.line(block.startLine + 1).text : null;
+  const support = blockColorSupport(first, next);
+  // Text only is what a heading gets from the module (ATX or setext).
+  return support.background ? support : none;
+}
+
+/** The block's colours as the menus check them: palette names or null. */
+export function blockColorValues(
+  doc: Text,
+  block: BlockRange
+): { text: PaletteColor | null; bg: PaletteColor | null } {
+  const current = currentBlockColors(doc, block);
+  return {
+    text: current.text ? PALETTE_BY_CSS.get(current.text) ?? null : null,
+    bg: current.background,
+  };
+}
+
+/**
+ * The edits that give `block` the colour `color` (null: back to default)
+ * of `kind`: text wraps each content row in the toolbar's colour span, a
+ * background is one marker at the end of the first row. [] when nothing
+ * changes; null when the block cannot take that kind of colour at all.
+ */
+export function blockColorChanges(
+  doc: Text,
+  block: BlockRange,
+  fences: FenceRange[],
+  kind: "text" | "bg",
+  color: PaletteColor | null
+): { from: number; to: number; insert: string }[] | null {
+  const target = blockColorTarget(doc, block, fences);
+  if (kind === "text") {
+    if (!target.text) return null;
+    const changes = blockTextColorChanges(doc, block, color ? paletteTextColor(color) : null);
+    return changes.filter((change) => change.insert !== doc.sliceString(change.from, change.to));
+  }
+  if (!target.background) return null;
+  const first = doc.line(block.startLine);
+  const next = block.startLine < doc.lines ? doc.line(block.startLine + 1).text : null;
+  const text = setBlockBgMarker(first.text, color, next);
+  if (text == null) return null;
+  return text === first.text ? [] : [{ from: first.from, to: first.to, insert: text }];
+}
+
+/**
+ * The Text color / Background color rows of a colour menu: a label, the
+ * nine palette colours and Default for each kind `target` allows, the
+ * current value checked. The labels carry the meaning on their own (a
+ * native menu drops the swatches); styles.css fills the circles and
+ * squares of a DOM menu.
+ */
+function addBlockColorItems(
+  menu: Menu,
+  current: { text: PaletteColor | null; bg: PaletteColor | null },
+  target: { text: boolean; background: boolean },
+  apply: (kind: "text" | "bg", color: PaletteColor | null) => void
+) {
+  const swatch = (item: MenuItem, color: string, bg: boolean) => {
+    const iconEl = (item as unknown as { iconEl?: HTMLElement }).iconEl;
+    if (!iconEl) return;
+    iconEl.style.color = color;
+    iconEl.classList.add("nf-menu-swatch");
+    if (bg) iconEl.classList.add("is-bg");
+  };
+  const section = (kind: "text" | "bg") => {
+    const bg = kind === "bg";
+    menu.addItem((item) => item.setTitle(t(bg ? "Background color" : "Text color")).setIsLabel(true));
+    PALETTE_COLORS.forEach((color, i) => {
+      menu.addItem((item) => {
+        const name = t(COLOR_LABEL_KEYS[color]);
+        item
+          .setTitle(bg ? t("{color} background").replace("{color}", () => name) : name)
+          .setIcon(bg ? "square" : "circle")
+          .setChecked(current[kind] === color)
+          .onClick(() => apply(kind, color));
+        swatch(item, bg ? `rgb(var(--nf-${color}-rgb))` : TEXT_COLORS[i], bg);
+      });
+    });
+    menu.addItem((item) =>
+      item
+        .setTitle(t("Default"))
+        .setIcon("ban")
+        .setChecked(current[kind] == null)
+        .onClick(() => apply(kind, null))
+    );
+  };
+  if (target.text) section("text");
+  if (target.text && target.background) menu.addSeparator();
+  if (target.background) section("bg");
+}
+
+/**
+ * What a slash colour entry does to the block holding row `lineNo`, the
+ * query already gone and the caret at `caret`: the changes, and where the
+ * caret goes (null: where the edit maps it). A background rewrites the
+ * block's first row, so its caret is placed explicitly: at the same column
+ * when text follows it, else at the end of the content — before the marker,
+ * never after it (text typed after the marker leaves it mid-row, where it
+ * no longer counts), and past the marker's space when the writer had typed
+ * one before the "/". A notice instead when the block takes no colour of
+ * that kind.
+ */
+export function slashBlockColorPlan(
+  doc: Text,
+  lineNo: number,
+  kind: "text" | "bg",
+  color: PaletteColor,
+  fences: FenceRange[] = cachedFences(doc),
+  caret: number | null = null
+): { changes: { from: number; to: number; insert: string }[]; caret: number | null } | { notice: string } {
+  const nothing = { notice: t("Nothing to color in this block") };
+  const block = innerBlockAt(doc, lineNo, fences);
+  if (!block) return nothing;
+  const changes = blockColorChanges(doc, block, fences, kind, color);
+  if (changes == null) return nothing;
+  if (kind === "text") return changes.length ? { changes, caret: null } : nothing;
+  const first = doc.line(block.startLine);
+  const text = changes[0]?.insert ?? first.text;
+  const marker = findBlockBgMarker(text);
+  if (!marker) return { changes, caret: null };
+  if (caret == null || caret < first.from || caret > first.to) {
+    // The caret is on another row of the block: the edit maps it.
+    return { changes, caret: caret == null ? first.from + marker.from : null };
+  }
+  const col = caret - first.from;
+  const after = first.text.slice(col);
+  if (after.trim() !== "" && col <= marker.from) return { changes, caret };
+  const spaced = /\s$/.test(first.text.slice(0, col)) && text[marker.from] === " ";
+  return { changes, caret: first.from + marker.from + (spaced ? 1 : 0) };
+}
+
+/** Core Note composer, whose "Extract current selection…" moves text to
+ *  another note; its command acts on the active editor's selection. */
+function noteComposerEnabled(app: App): boolean {
+  const plugins = (app as unknown as {
+    internalPlugins?: { getEnabledPluginById?(id: string): unknown };
+  }).internalPlugins;
+  return !!plugins?.getEnabledPluginById?.("note-composer");
+}
+
+/** Select rows `startLine`…`endLine` whole and hand them to Note
+ *  composer's split-file, which asks for the note to move them into. */
+function moveBlockToNote(app: App, view: EditorView, startLine: number, endLine: number) {
+  const doc = view.state.doc;
+  if (startLine < 1 || endLine > doc.lines) return;
+  view.dispatch({ selection: { anchor: doc.line(startLine).from, head: doc.line(endLine).to } });
+  view.focus();
+  (app as unknown as { commands: { executeCommandById(id: string): boolean } }).commands.executeCommandById(
+    "note-composer:split-file"
+  );
+}
+
+const RE_PAGE_TITLE_DROP = /[\\/:*?"<>|#^[\]]/g;
+
+/**
+ * "Turn into page": the new note's title and content, and the rows the
+ * link replaces. The title is the first row's text (its Markdown prefix,
+ * HTML tags, a block id and the characters a file name cannot hold taken
+ * out), at most 100 characters, "Untitled" when nothing is left. The
+ * content is the block, dedented. A list or to-do item keeps its marker
+ * (not the box) in front of the link. Null for what is no page: code,
+ * tables, containers, rows inside one, and blank blocks.
+ */
+export function turnIntoPagePlan(
+  doc: Text,
+  block: BlockRange,
+  fences: FenceRange[]
+): { title: string; content: string; from: number; to: number; keepPrefix: string } | null {
+  if (block.startLine < 1 || block.endLine > doc.lines || block.startLine > block.endLine) return null;
+  if (block.quotePrefix || fenceAt(fences, block.startLine)) return null;
+  const first = doc.line(block.startLine).text;
+  if (RE_BLANK.test(first) || isTableRow(first) || parseCalloutHeader(first)) return null;
+  const lines: string[] = [];
+  for (let n = block.startLine; n <= block.endLine; n++) lines.push(doc.line(n).text);
+  const title =
+    toggleTitleFromLine(first)
+      .replace(/\s+\^[A-Za-z0-9-]+\s*$/, "")
+      .replace(/<[^<>]*>/g, "")
+      .replace(RE_PAGE_TITLE_DROP, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 100)
+      .trim() || t("Untitled");
+  const list = RE_LIST_MARKER.exec(first);
+  return {
+    title,
+    content: dedentLines(lines).join("\n"),
+    from: doc.line(block.startLine).from,
+    to: doc.line(block.endLine).to,
+    keepPrefix: list ? `${list[1]}${list[2]} ` : "",
+  };
+}
+
+/** Write the block into a new note beside this one (Obsidian's new-note
+ *  location) and put a link to it where the block was, in one edit. The
+ *  note changing meanwhile leaves the block where it is. */
+async function turnBlockIntoPage(
+  app: App,
+  view: EditorView,
+  block: BlockRange,
+  fences: FenceRange[],
+  operations?: EditorOperationScope
+) {
+  const plan = turnIntoPagePlan(view.state.doc, block, fences);
+  const srcPath = sourcePathForEditorView(app.workspace, view);
+  const src = srcPath ? app.vault.getAbstractFileByPath(srcPath) : null;
+  if (!plan || !(src instanceof TFile)) return;
+  const doc = view.state.doc;
+  const op = operations?.capture(view, () => sourcePathForEditorView(app.workspace, view)) ?? null;
+  const current = () => (op ? op.isCurrent() : view.state.doc === doc);
+  try {
+    const parent = app.fileManager.getNewFileParent(src.path);
+    const dir = !parent || parent.path === "/" || parent.path === "" ? "" : `${parent.path}/`;
+    let path = normalizePath(`${dir}${plan.title}.md`);
+    for (let i = 1; app.vault.getAbstractFileByPath(path); i++) path = normalizePath(`${dir}${plan.title} ${i}.md`);
+    const file = await app.vault.create(path, plan.content);
+    if (!current()) {
+      new Notice(t("The note changed, so the block was left in place."));
+      return;
+    }
+    view.dispatch({
+      changes: {
+        from: plan.from,
+        to: plan.to,
+        insert: plan.keepPrefix + app.fileManager.generateMarkdownLink(file, src.path),
+      },
+      userEvent: "input.turn-into-page",
+    });
+  } catch (error) {
+    console.error("Notion Flow: turning a block into a page failed", error);
+    new Notice(t("Could not create the page."));
+  } finally {
+    op?.finish();
+  }
+}
+
+/** "Move to…" (with Note composer on) and "Turn into page" for rows
+ *  `span`: the handle menu's block, or a contiguous block selection. */
+function addPageActionItems(
+  menu: Menu,
+  app: App,
+  view: EditorView,
+  span: BlockRange,
+  fences: FenceRange[],
+  operations?: EditorOperationScope
+): boolean {
+  const doc = view.state.doc;
+  let added = false;
+  const blank = RE_BLANK.test(doc.line(span.startLine).text);
+  if (noteComposerEnabled(app) && !span.quotePrefix && !inColumnEditor(view) && !blank) {
+    menu.addItem((item) =>
+      item
+        .setTitle(t("Move to…"))
+        .setIcon("folder-input")
+        .onClick(() => moveBlockToNote(app, view, span.startLine, span.endLine))
+    );
+    added = true;
+  }
+  if (!inColumnEditor(view) && turnIntoPagePlan(doc, span, fences)) {
+    menu.addItem((item) =>
+      item
+        .setTitle(t("Turn into page"))
+        .setIcon("file-plus")
+        .onClick(() => void turnBlockIntoPage(app, view, span, fences, operations))
+    );
+    added = true;
+  }
+  return added;
+}
+
+/** Blocks that sit one after another with only blank rows between them,
+ *  at one level, as one span; null otherwise. */
+export function contiguousBlockSpan(doc: Text, blocks: readonly BlockRange[]): BlockRange | null {
+  if (blocks.length === 0) return null;
+  const sorted = [...blocks].sort((a, b) => a.startLine - b.startLine);
+  const prefix = sorted[0].quotePrefix;
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = sorted[i - 1];
+    const next = sorted[i];
+    if (next.quotePrefix !== prefix || next.startLine <= prev.endLine) return null;
+    for (let n = prev.endLine + 1; n < next.startLine; n++) {
+      if (!RE_BLANK.test(doc.line(n).text)) return null;
+    }
+  }
+  return {
+    startLine: sorted[0].startLine,
+    endLine: sorted[sorted.length - 1].endLine,
+    ...(prefix ? { quotePrefix: prefix } : {}),
+  };
+}
+
+function openBlockMenu(
+  app: App,
+  view: EditorView,
+  block: BlockRange,
+  fences: FenceRange[],
+  /** The pointer event that asked for the menu, or a screen point for
+   *  the keyboard, the context menu and the selection toolbar. `left`
+   *  opens the menu leftwards from the point (into the margin beside the
+   *  handle); Obsidian falls back rightwards when there is no room. */
+  anchor: MouseEvent | { x: number; y: number; left?: boolean },
   slashCommandsEnabled: boolean,
   columnsEnabled = false,
-  toggleEnabled = false
+  toggleEnabled = false,
+  /** Re-selects a block after Move up/down lands it, the way a drop
+   *  does; without it the caret alone follows the block. */
+  land?: (landed: number, spanLines: number, inside?: boolean) => void,
+  /** Runs once when the menu closes, after the menu's own cleanup. */
+  onHide?: () => void,
+  /** The plugin's operation scope: Turn into page leaves the block alone
+   *  when the note changes while the new page is written. */
+  operations?: EditorOperationScope
 ) {
   const doc = view.state.doc;
   const blockText = doc.sliceString(
@@ -14775,9 +21624,16 @@ function openBlockMenu(
   );
   const ownerDoc = view.dom.ownerDocument;
   const menuHost = ownerDoc.body.createDiv({ cls: "nf-block-menu-anchor" });
-  const menu = new Menu()
-    .setUseNativeMenu(false)
-    .setParentElement(menuHost);
+  const menu = trackMenu(
+    tagBlockMenu(new Menu()).setUseNativeMenu(false).setParentElement(menuHost),
+    () => {
+      menuHost.remove();
+      if (!ownerDoc.querySelector(".nf-block-menu-anchor")) {
+        ownerDoc.body.classList.remove(BLOCK_MENU_OPEN_CLASS);
+      }
+      onHide?.();
+    }
+  );
 
   // The table toolbar and the handle menu are alternative controls for the
   // same block. Broadcast before showing so every editor in the leaf hides
@@ -14785,12 +21641,6 @@ function openBlockMenu(
   ownerDoc.body.classList.add(BLOCK_MENU_OPEN_CLASS);
   const OwnerEvent = ownerDoc.defaultView?.Event ?? Event;
   ownerDoc.dispatchEvent(new OwnerEvent(BLOCK_MENU_OPEN_EVENT));
-  menu.onHide(() => {
-    menuHost.remove();
-    if (!ownerDoc.querySelector(".nf-block-menu-anchor")) {
-      ownerDoc.body.classList.remove(BLOCK_MENU_OPEN_CLASS);
-    }
-  });
 
   const addLabel = (title: string) =>
     menu.addItem((item) => item.setTitle(t(title)).setIsLabel(true));
@@ -14863,11 +21713,11 @@ function openBlockMenu(
       menu.addItem((item) => {
         item.setTitle(t(title)).setIcon(icon);
         const withSub = item as unknown as { setSubmenu?: () => Menu };
-        if (typeof withSub.setSubmenu === "function") populate(withSub.setSubmenu());
+        if (typeof withSub.setSubmenu === "function") populate(tagBlockMenu(withSub.setSubmenu()));
       });
     tableSubmenu("Table alignment", "align-horizontal-distribute-center", (submenu) => {
       const alignmentItems: { value: ColumnAlign; title: string; icon: string }[] = [
-        { value: "none", title: "Default alignment", icon: "minus" },
+        { value: "none", title: "Default alignment", icon: "align-justify" },
         { value: "left", title: "Align left", icon: "align-left" },
         { value: "center", title: "Align center", icon: "align-center" },
         { value: "right", title: "Align right", icon: "align-right" },
@@ -14917,7 +21767,7 @@ function openBlockMenu(
         .setTitle(t(meta?.caption ? "Edit caption" : "Add caption"))
         .setIcon("captions")
         .onClick(() =>
-          editBlockCaption(plugin, view, "table", tableRange.startLine)
+          editBlockCaption(view, "table", tableRange.startLine)
         )
     );
     menu.addSeparator();
@@ -14931,13 +21781,11 @@ function openBlockMenu(
         .setTitle(t(meta?.collapsed ? "Expand code block" : "Collapse code block"))
         .setIcon(meta?.collapsed ? "chevron-down" : "chevron-right")
         .onClick(() =>
-          setBlockCaptionMeta(
+          codeFoldClick(
             view,
-            "code",
             blockFence.startLine,
             meta?.caption ?? "",
-            !(meta?.collapsed ?? false),
-            true
+            !(meta?.collapsed ?? false)
           )
         )
     );
@@ -14946,19 +21794,40 @@ function openBlockMenu(
         .setTitle(t(meta?.caption ? "Edit caption" : "Add caption"))
         .setIcon("captions")
         .onClick(() =>
-          editBlockCaption(plugin, view, "code", blockFence.startLine)
+          editBlockCaption(view, "code", blockFence.startLine)
         )
     );
     menu.addSeparator();
   } else if (isImage) {
     const meta = imageCaptionMeta(doc, block.startLine);
     addLabel("Image");
+    menu.addItem((item) => {
+      item.setTitle(t("Image size")).setIcon("scaling");
+      const withSub = item as unknown as { setSubmenu?: () => Menu };
+      // Without submenus the row becomes the label and the sizes follow.
+      if (typeof withSub.setSubmenu === "function") {
+        addImageSizeItems(withSub.setSubmenu(), view, block.startLine);
+      } else {
+        item.setDisabled(true);
+        addImageSizeItems(menu, view, block.startLine);
+      }
+    });
+    menu.addItem((item) => {
+      item.setTitle(t("Image alignment")).setIcon("align-center");
+      const withSub = item as unknown as { setSubmenu?: () => Menu };
+      if (typeof withSub.setSubmenu === "function") {
+        addImageAlignItems(withSub.setSubmenu(), view, block.startLine);
+      } else {
+        item.setDisabled(true);
+        addImageAlignItems(menu, view, block.startLine);
+      }
+    });
     menu.addItem((item) =>
       item
         .setTitle(t(meta?.caption ? "Edit caption" : "Add caption"))
         .setIcon("captions")
         .onClick(() =>
-          editBlockCaption(plugin, view, "image", block.startLine)
+          editBlockCaption(view, "image", block.startLine)
         )
     );
     menu.addSeparator();
@@ -14984,17 +21853,38 @@ function openBlockMenu(
     menu.addSeparator();
   }
 
-  // Quote/Callout controls: pick (or assign) the Callout type, toggle the
-  // fold marker, and downgrade a Callout to a plain quote. Column
-  // scaffolding is structure, not a Callout — retyping it would shatter
-  // the layout, so nf-cols/nf-col blocks get the Columns section instead.
+  // Quote/Callout controls: pick (or assign) the Callout type and toggle
+  // the fold marker. Downgrading one to a plain quote is the Turn-into
+  // submenu's Quote row (the Callout icon's own menu keeps its shortcut).
+  // Column scaffolding is structure, not a Callout — retyping it would
+  // shatter the layout, so nf-cols/nf-col blocks get the Columns section
+  // instead.
   const headerType = parseCalloutHeader(doc.line(block.startLine).text)?.type;
   const isColumns = headerType === COLS_TYPE || headerType === COL_TYPE;
   const isToggle = toggleEnabled && headerType === TOGGLE_TYPE;
   if (isToggle) {
     addLabel("Toggle");
     addToggleStateItem(menu, view, block.startLine);
-    addCalloutToQuoteItem(menu, view, block.startLine);
+    // Every toggle and foldable Callout in the note at once, as the
+    // "Collapse all toggles" / "Expand all toggles" commands do.
+    const foldOptions = { toggles: toggleEnabled, skipLine: (n: number) => fenceAt(fences, n) != null };
+    for (const [mode, title, icon] of [
+      ["collapse", t("Collapse all in note"), "chevrons-down-up"],
+      ["expand", t("Expand all in note"), "chevrons-up-down"],
+    ] as const) {
+      const changes = planToggleFold(doc, mode, foldOptions);
+      menu.addItem((item) =>
+        item
+          .setTitle(title)
+          .setIcon(icon)
+          .setDisabled(changes.length === 0)
+          .onClick(() => {
+            if (changes.length && view.state.doc === doc) {
+              view.dispatch({ changes, userEvent: TOGGLE_FOLD_USER_EVENT });
+            }
+          })
+      );
+    }
     menu.addSeparator();
   } else if (!isFence && !isColumns && RE_QUOTE.test(blockContent(block.startLine))) {
     addLabel("Callout");
@@ -15005,28 +21895,81 @@ function openBlockMenu(
         addCalloutTypeItems(withSub.setSubmenu(), view, block.startLine);
       }
     });
+    if (headerType) {
+      menu.addItem((item) => {
+        item.setTitle(t("Callout color")).setIcon("palette");
+        const withSub = item as unknown as { setSubmenu?: () => Menu };
+        if (typeof withSub.setSubmenu === "function") {
+          addCalloutColorItems(withSub.setSubmenu(), view, block.startLine);
+        }
+      });
+    }
+    if (headerType && headerType !== TOGGLE_TYPE) {
+      // The card opens beside the Callout's own icon, or where the menu was.
+      const at = "clientX" in anchor ? { x: anchor.clientX, y: anchor.clientY } : anchor;
+      menu.addItem((item) =>
+        item
+          .setTitle(t("Icon…"))
+          .setIcon("smile")
+          .onClick(() =>
+            openCalloutIconPicker(
+              app,
+              view,
+              block.startLine,
+              calloutIconRect(view, block.startLine) ?? new DOMRect(at.x, at.y, 0, 0)
+            )
+          )
+      );
+    }
     addCalloutFoldItem(menu, view, block.startLine);
-    addCalloutToQuoteItem(menu, view, block.startLine);
     menu.addSeparator();
   }
 
-  // Any block can be wrapped in a container: a Callout keeps the text as
-  // its content, a toggle keeps the first line as its title, a fence takes
-  // the whole thing as code. What each one refuses is canWrapBlockInto's
-  // call, so the menu and the wrap commands agree.
-  let wrapped = false;
-  for (const entry of WRAP_INTO) {
-    if (entry.kind === "toggle" && !toggleEnabled) continue;
-    if (!canWrapBlockInto(doc, block, fences, entry.kind)) continue;
-    wrapped = true;
-    menu.addItem((item) =>
-      item
-        .setTitle(entry.title)
-        .setIcon(entry.icon)
-        .onClick(() => wrapBlockInto(view, block, entry.kind, fences))
-    );
+  // Retype the block, or wrap it in a container: a Callout keeps the text
+  // as its content, a toggle keeps the first line as its title, a fence
+  // takes the whole thing as code. Which blocks can be retyped is
+  // canTurnBlockInto's call and what each container refuses is
+  // canWrapBlockInto's, so the menu and the commands agree.
+  const turnable = canTurnBlockInto(doc, block, fences);
+  const wraps = WRAP_INTO.map((entry) => entry.kind).filter(
+    (kind) =>
+      (kind !== "toggle" || toggleEnabled) && canWrapBlockInto(doc, block, fences, kind)
+  );
+  // With toggles switched off an nf-toggle is shown as the Callout it is.
+  const currentType = turnable ? blockTypeAt(doc, block) : null;
+  const placed = addTurnIntoSection(menu, ownerDoc, app, {
+    current: currentType === "toggle" && !toggleEnabled ? "callout" : currentType,
+    turnable,
+    wraps,
+    onTurn: (entry) => turnBlockInto(view, block, entry.prefix, fences),
+    onWrap: (kind) => wrapBlockInto(view, block, kind, fences),
+  });
+  // Block color: the whole block's text colour or background, beside Turn
+  // into (not offered where the block takes neither, headings included).
+  const colorTarget = blockColorTarget(doc, block, fences);
+  const colored = colorTarget.text || colorTarget.background;
+  if (colored) {
+    const apply = (kind: "text" | "bg", color: PaletteColor | null) => {
+      const now = view.state.doc;
+      const changes = blockColorChanges(now, block, cachedFences(now), kind, color);
+      if (changes?.length) view.dispatch({ changes, userEvent: "input.block-color" });
+    };
+    const current = blockColorValues(doc, block);
+    let inline = false;
+    menu.addItem((item) => {
+      item.setTitle(t("Block color")).setIcon("palette");
+      const withSub = item as unknown as { setSubmenu?: () => Menu };
+      if (typeof withSub.setSubmenu === "function") {
+        addBlockColorItems(tagBlockMenu(withSub.setSubmenu()), current, colorTarget, apply);
+      } else {
+        // No submenus: the row becomes the label, the colours follow.
+        item.setIsLabel(true);
+        inline = true;
+      }
+    });
+    if (inline) addBlockColorItems(menu, current, colorTarget, apply);
   }
-  if (wrapped) menu.addSeparator();
+  if (placed || colored) menu.addSeparator();
 
   // Columns: wrap a top-level block into a two-column row, or grow an
   // existing row by one column. (Notion's drag-to-the-right-edge gesture
@@ -15038,8 +21981,11 @@ function openBlockMenu(
     !quotePrefix &&
     indentWidth(doc.line(block.startLine).text) === 0
   ) {
-    addLabel("Columns");
     if (headerType === COLS_TYPE) {
+      // A label heads the row's several column actions; the single
+      // "Turn into columns" row names itself (and a lone label would be a
+      // stop for the keyboard with nothing under it).
+      addLabel("Columns");
       addColumnsMenuItems(menu, view, block);
     } else {
       menu.addItem((item) =>
@@ -15078,56 +22024,81 @@ function openBlockMenu(
     menu.addSeparator();
   }
 
-  // Which blocks this section can describe is canTurnBlockInto's call, so
-  // the menu and the turn-into commands agree on what is convertible.
-  if (canTurnBlockInto(doc, block, fences)) {
-    addLabel("Turn into");
-    for (const entry of TURN_INTO) {
-      menu.addItem((item) =>
-        item
-          .setTitle(entry.title)
-          .setIcon(entry.icon)
-          .onClick(() => turnBlockInto(view, block, entry.prefix, fences))
-      );
-    }
-    menu.addSeparator();
-  }
-
+  const hinted = (title: string, id: BlockActionId) =>
+    menuTitleWithHint(ownerDoc, t(title), commandChord(app, id, blockActionChord(id)));
   menu.addItem((item) =>
     item
-      .setTitle(t("Insert block above"))
+      .setTitle(hinted("Insert block above", "insert-block-above"))
       .setIcon("plus")
       .onClick(() => insertBlockAbove(view, block, slashCommandsEnabled))
   );
   menu.addItem((item) =>
     item
-      .setTitle(t("Insert block below"))
+      .setTitle(hinted("Insert block below", "insert-block-below"))
       .setIcon("plus")
       .onClick(() => insertBlockBelow(view, block, slashCommandsEnabled))
   );
+  // Move up/down: the keyboard move, from the menu. A neighbour lookup
+  // that finds nothing (first/last block, or the end of a Callout for a
+  // row inside one) leaves the row visible but disabled, so the menu
+  // keeps its shape from one block to the next.
+  const prevStart = findPrevBlockStart(doc, fences, block);
+  const nextBlock = findNextBlock(doc, fences, block);
+  const moveTo = (target: number) => {
+    const landed = moveBlock(
+      view,
+      block,
+      target,
+      fences,
+      undefined,
+      vaultIndentUnit(app),
+      block.quotePrefix
+    );
+    if (landed == null) return;
+    if (land) {
+      land(landed, block.endLine - block.startLine + 1, Boolean(block.quotePrefix));
+    }
+    else {
+      const from = view.state.doc.line(landed).from;
+      view.dispatch({
+        selection: { anchor: from },
+        effects: EditorView.scrollIntoView(from, { y: "nearest" }),
+      });
+    }
+  };
   menu.addItem((item) =>
     item
-      .setTitle(t("Duplicate"))
+      .setTitle(hinted("Move up", "move-block-up"))
+      .setIcon("arrow-up")
+      .setDisabled(prevStart == null)
+      .onClick(() => {
+        if (prevStart != null) moveTo(prevStart);
+      })
+  );
+  menu.addItem((item) =>
+    item
+      .setTitle(hinted("Move down", "move-block-down"))
+      .setIcon("arrow-down")
+      .setDisabled(nextBlock == null)
+      .onClick(() => {
+        if (nextBlock) moveTo(nextBlock.endLine + 1);
+      })
+  );
+  menu.addItem((item) =>
+    item
+      .setTitle(hinted("Duplicate", "duplicate-block"))
       .setIcon("copy-plus")
       .onClick(() => {
-        const insertPos = doc.line(block.endLine).to;
-        const lines = blockText.split("\n");
-        const last = lines[lines.length - 1];
-        const seam = seamRowBetween(last, lines[0], quotePrefix);
-        const nextText = block.endLine < doc.lines
-          ? doc.line(block.endLine + 1).text
-          : "";
-        const trailing = seamRowBetween(last, nextText, quotePrefix);
+        const copy = duplicateBlockChange(doc, { ...block, quotePrefix });
         view.dispatch({
-          changes: {
-            from: insertPos,
-            insert:
-              (seam === null ? "\n" : `\n${seam}\n`) +
-              blockText +
-              (trailing === null ? "" : `\n${trailing}`),
-          },
+          changes: { from: copy.from, insert: copy.insert },
+          // Caret on the copy, the way the Duplicate command lands there.
+          selection: { anchor: copy.from + copy.copyOffset },
           userEvent: "input.duplicate",
         });
+        // The copy is selected and flashes where it landed, like a moved
+        // block; without a lander the caret alone marks it.
+        land?.(copy.copyLine, block.endLine - block.startLine + 1, Boolean(quotePrefix));
       })
   );
   menu.addItem((item) =>
@@ -15136,6 +22107,27 @@ function openBlockMenu(
       .setIcon("clipboard-copy")
       .onClick(() => navigator.clipboard.writeText(blockText))
   );
+  // A link to the block: headings link by their text, anything else gets
+  // (or reuses) an Obsidian block id. A row inside a Callout has no id of
+  // its own — the Callout is the block Obsidian can address — so the rows
+  // stay out of its menu.
+  if (blockLinkable(doc, block, fences)) {
+    menu.addItem((item) =>
+      item
+        .setTitle(t("Copy link to block"))
+        .setIcon("link")
+        .onClick(() => copyBlockLink(app, view, block, fences, false))
+    );
+    menu.addItem((item) =>
+      item
+        .setTitle(t("Copy embed"))
+        .setIcon("file-input")
+        .onClick(() => copyBlockLink(app, view, block, fences, true))
+    );
+  }
+  // Across notes: move the block with Note composer, or make it a page of
+  // its own and leave a link behind.
+  if (!blockIsBlank) addPageActionItems(menu, app, view, block, fences, operations);
   menu.addSeparator();
   menu.addItem((item) =>
     item
@@ -15148,12 +22140,63 @@ function openBlockMenu(
       })
   );
 
-  menu.showAtMouseEvent(evt);
+  // Duck-typed rather than instanceof: a popout window's MouseEvent is
+  // not the main window's MouseEvent.
+  if ("clientX" in anchor) menu.showAtMouseEvent(anchor);
+  else menu.showAtPosition(anchor, ownerDoc);
 }
 
 /* ------------------------------------------------------------------ */
 /* Floating format toolbar                                             */
 /* ------------------------------------------------------------------ */
+
+/** The box the floating toolbar stays inside: the note's area (or the
+ *  window when there is none), never past the window's edges. */
+export function toolbarPaneRect(
+  area: { left: number; right: number; top: number; bottom: number } | null,
+  winWidth: number,
+  winHeight: number
+): { left: number; right: number; top: number; bottom: number } {
+  return {
+    left: Math.max(0, area?.left ?? 0),
+    right: Math.min(winWidth, area?.right ?? winWidth),
+    top: Math.max(0, area?.top ?? 0),
+    bottom: Math.min(winHeight, area?.bottom ?? winHeight),
+  };
+}
+
+/** Vertical spot of the table-only toolbar: above the table when its top
+ *  is on screen with room for the bar, else below the table when that
+ *  fits, else `fallback` (the placement beside the caret). `paneTop` and
+ *  `paneBottom` are the usable bounds, insets included. */
+export function tableToolbarTop(o: {
+  tableTop: number;
+  tableBottom: number;
+  height: number;
+  paneTop: number;
+  paneBottom: number;
+  fallback: { top: number; placement: "above" | "below" };
+}): { top: number; placement: "above" | "below"; atTable: boolean } {
+  const above = o.tableTop - o.height - 8;
+  if (above >= o.paneTop) return { top: above, placement: "above", atTable: true };
+  const below = o.tableBottom + 8;
+  if (below + o.height <= o.paneBottom) return { top: below, placement: "below", atTable: true };
+  return { ...o.fallback, atTable: false };
+}
+
+/** Left edge of the table-only toolbar placed at a table: flush with the
+ *  table, kept 8 px inside the pane (`paneLeft`/`paneRight` are the
+ *  pane's own edges). */
+export function tableToolbarLeft(o: {
+  tableLeft: number;
+  width: number;
+  paneLeft: number;
+  paneRight: number;
+}): number {
+  const min = o.paneLeft + 8;
+  const max = Math.max(min, o.paneRight - 8 - o.width);
+  return Math.max(min, Math.min(o.tableLeft, max));
+}
 
 interface ToolbarAction {
   icon: string;
@@ -15168,6 +22211,23 @@ interface ToolbarAction {
   disabledInCode?: boolean;
   /** Hidden while the Comments setting is off. */
   requiresCommenting?: boolean;
+  /** The command whose hotkey the tooltip names, with the default chord
+   *  shown when Obsidian's hotkey manager has nothing for it — null for a
+   *  command that ships unbound, whose tooltip then names no chord. */
+  shortcut?: { id: string; fallback: string | null };
+}
+
+/** `Mod+Shift+H` as the ARIA `aria-keyshortcuts` attribute spells it:
+ *  the platform's real modifier names, one token per chord. Obsidian keeps
+ *  an explicit Control key as "Ctrl" (a Mac binding with ⌃), which ARIA
+ *  names "Control". */
+export function ariaKeyshortcuts(chord: string, mac = Platform.isMacOS): string {
+  return chord
+    .split("+")
+    .map((part) =>
+      part === "Mod" ? (mac ? "Meta" : "Control") : part === "Ctrl" ? "Control" : part
+    )
+    .join("+");
 }
 
 /** Whether the main selection lies inside a fenced code block's body. */
@@ -15184,6 +22244,497 @@ interface TableToolbarTarget {
   text: string;
   row: number;
   col: number;
+}
+
+/** Markdown emphasis markers a line segment sheds at an edge the selection
+ *  did not pick itself, longest first so `***` peels as `**` then `*`. */
+const SEGMENT_EDGE_MARKERS = ["**", "__", "~~", "==", "*", "_", "`"];
+
+/** A fence body line's code, past the fence's quote markers and the
+ *  line's indentation, trailing spaces excluded; null when blank. */
+function fenceLineSpan(text: string, fence: FenceRange): { from: number; to: number } | null {
+  const quote =
+    fence.quoteDepth > 0
+      ? new RegExp(`^(?:[ \\t]*>[ \\t]?){0,${fence.quoteDepth}}`).exec(text)?.[0] ?? ""
+      : "";
+  const rest = text.slice(quote.length);
+  const lead = rest.length - rest.trimStart().length;
+  const end = rest.trimEnd().length;
+  return end > lead ? { from: quote.length + lead, to: quote.length + end } : null;
+}
+
+/**
+ * Shrink one line's piece of a multi-line selection to the text a person
+ * would have picked. `startFree` / `endFree` say which ends are the line's
+ * own content bounds rather than the selection's: only those move. A free
+ * end sheds a tag or marker whose mate sits just past the other end (the
+ * run the selection starts or ends inside), and a piece that is exactly
+ * one plugin tag pair steps inside it — the tags are hidden in Live
+ * Preview, so the words are what was meant.
+ */
+function hugLineSegment(
+  doc: Text,
+  pairs: readonly TagPair[],
+  from: number,
+  to: number,
+  startFree: boolean,
+  endFree: boolean,
+  markdown: boolean
+): { from: number; to: number } | null {
+  // Where the shed openers (left) and closers (right) begin.
+  let outerFrom = from;
+  let outerTo = to;
+  for (let changed = true, rounds = 0; changed && from < to && rounds < 16; rounds++) {
+    changed = false;
+    for (const pair of pairs) {
+      if ((startFree || endFree) && pair.open.from === from && pair.close.to === to) {
+        from = outerFrom = pair.open.to;
+        to = outerTo = pair.close.from;
+      } else if (endFree && pair.open.to === outerFrom && pair.close.to === to) {
+        to = pair.close.from;
+        outerFrom = pair.open.from;
+      } else if (startFree && pair.open.from === from && pair.close.from === outerTo) {
+        from = pair.open.to;
+        outerTo = pair.close.to;
+      } else continue;
+      changed = true;
+      break;
+    }
+    if (changed || !markdown) continue;
+    for (const marker of SEGMENT_EDGE_MARKERS) {
+      const n = marker.length;
+      if (to - from <= n) continue;
+      if (
+        endFree &&
+        doc.sliceString(Math.max(0, outerFrom - n), outerFrom) === marker &&
+        doc.sliceString(to - n, to) === marker
+      ) {
+        to -= n;
+        outerFrom -= n;
+      } else if (
+        startFree &&
+        doc.sliceString(from, from + n) === marker &&
+        doc.sliceString(outerTo, Math.min(doc.length, outerTo + n)) === marker
+      ) {
+        from += n;
+        outerTo += n;
+      } else continue;
+      changed = true;
+      break;
+    }
+  }
+  return from < to ? { from, to } : null;
+}
+
+/** A piece that is nothing but markup — emphasis markers or bare tags, as
+ *  when a selection ends just after an opening `**` — has no words to
+ *  format: wrapping it only piles markers onto markers. */
+const RE_MARKUP_ONLY = /^(?:[*_~=`]|<\/?[A-Za-z][^<>]*>)+$/;
+
+/**
+ * The emphasis runs (`**`, `__`, `~~`, `==`, `*`, `_`) of the document
+ * text from `start` to `end`, paired roughly the way a Markdown parser
+ * pairs them: a marker opens when a non-space follows it and closes when
+ * a non-space precedes it (an `_` inside a word does neither), onto the
+ * nearest open marker of its kind, and `***` splits into `**` and `*`.
+ * Code spans and backslash escapes are skipped.
+ */
+function emphasisRuns(
+  doc: Text,
+  start: number,
+  end: number
+): EmphasisRun[] {
+  const text = doc.sliceString(start, end);
+  const runs: EmphasisRun[] = [];
+  const stack: { ch: string; pos: number; len: number }[] = [];
+  const space = (c: string | undefined) => c === undefined || /\s/.test(c);
+  const word = (c: string | undefined) => c !== undefined && /[\p{L}\p{N}]/u.test(c);
+  for (let i = 0; i < text.length; ) {
+    const ch = text[i];
+    if (ch === "\\") {
+      i += 2;
+      continue;
+    }
+    let k = 1;
+    while (text[i + k] === ch) k++;
+    if (ch === "`") {
+      // A code span: to the next backtick run of the same length.
+      let j = text.indexOf("`", i + k);
+      while (j >= 0) {
+        let m = 1;
+        while (text[j + m] === "`") m++;
+        if (m === k) break;
+        j = text.indexOf("`", j + m);
+      }
+      i = j >= 0 ? j + k : i + k;
+      continue;
+    }
+    if (!(ch === "*" || ch === "_" || ((ch === "~" || ch === "=") && k === 2))) {
+      i += k;
+      continue;
+    }
+    const prev = text[i - 1];
+    const next = text[i + k];
+    const canOpen = !space(next) && !(ch === "_" && word(prev));
+    const canClose = !space(prev) && !(ch === "_" && word(next));
+    let pos = i;
+    let len = k;
+    for (let s = stack.length - 1; canClose && s >= 0 && len > 0; s--) {
+      const o = stack[s];
+      if (o.ch !== ch) continue;
+      const n = o.len >= 2 && len >= 2 ? 2 : 1;
+      runs.push({
+        open: { from: start + o.pos + o.len - n, to: start + o.pos + o.len },
+        close: { from: start + pos, to: start + pos + n },
+      });
+      o.len -= n;
+      pos += n;
+      len -= n;
+      // Openers above this one stay unmatched; one with markers left
+      // pairs again.
+      stack.length = o.len > 0 ? s + 1 : s;
+      if (o.len > 0) s++;
+    }
+    if (len > 0 && canOpen) stack.push({ ch, pos, len });
+    i += k;
+  }
+  return runs;
+}
+
+/** An emphasis run: its opening and its closing markers. */
+interface EmphasisRun {
+  open: { from: number; to: number };
+  close: { from: number; to: number };
+}
+
+/**
+ * The emphasis runs (`**…**`, `*…*`, `~~…~~`, `==…==`, `__…__`, `_…_`)
+ * that hold [from, to], a range running across rows, when soft line breaks
+ * wrap them: from, to and every row between them in one paragraph, each
+ * run opening at or before from and closing at or after to. Empty when
+ * none does. `**line one\nline two**` is valid Markdown — v1.5.0's toolbar
+ * wrote it for a two-line selection, and hard-wrapped Markdown is full of
+ * it. Cut into one piece per row its halves each read as unformatted, so a
+ * toggle would wrap them again instead of removing the run: such a
+ * selection toggles as a unit (softRunSelection).
+ */
+function softWrappedRunsAround(doc: Text, from: number, to: number): EmphasisRun[] {
+  const first = doc.lineAt(from).number;
+  const last = doc.lineAt(to).number;
+  if (first === last || last - first > 200) return [];
+  const fences = cachedFences(doc);
+  const math = cachedMathBlockLines(doc);
+  // A paragraph row: its inline text span and quote depth, and whether its
+  // block prefix is only quote markers and indentation.
+  const row = (n: number) => {
+    if (n < 1 || n > doc.lines || fenceAt(fences, n)) return null;
+    if (math.some(([a, b]) => a <= n && n <= b)) return null;
+    const text = doc.line(n).text;
+    if (isTableRow(text) || RE_HR.test(text)) return null;
+    const span = inlineFormatSpan(text);
+    if (!span) return null;
+    const prefix = text.slice(0, span.from);
+    return {
+      span,
+      depth: (prefix.match(/>/g) ?? []).length,
+      plain: /^[\s>]*$/.test(prefix),
+      heading: /^[\s>]*#{1,6}\s/.test(text),
+    };
+  };
+  const head = row(first);
+  if (!head || head.heading) return [];
+  // Row n carries on the paragraph of the row above it.
+  const continues = (n: number) => {
+    const r = row(n);
+    return r != null && r.plain && (r.depth === head.depth || r.depth === 0);
+  };
+  for (let n = first + 1; n <= last; n++) if (!continues(n)) return [];
+  // The whole paragraph, so a run opened above from's row or closed below
+  // to's row pairs as the parser pairs it.
+  let top = first;
+  while (first - top < 50 && continues(top)) {
+    const above = row(top - 1);
+    if (!above || above.heading) break;
+    top--;
+  }
+  let bottom = last;
+  while (bottom - last < 50 && continues(bottom + 1)) bottom++;
+  const topSpan = top === first ? head.span : row(top)?.span;
+  if (!topSpan) return [];
+  return emphasisRuns(doc, doc.line(top).from + topSpan.from, doc.line(bottom).to).filter(
+    (r) =>
+      (from === r.open.from || (r.open.to <= from && from <= r.close.from)) &&
+      (to === r.close.to || (r.open.to <= to && to <= r.close.from))
+  );
+}
+
+/**
+ * How a toggle takes a selection whose ranges across rows each lie inside
+ * a soft-wrapped emphasis run (softWrappedRunsAround): as one range per
+ * selection range, on the single-range path, which reads and removes a
+ * run as a whole. Null when some range across rows is not inside one: it
+ * is cut into one piece per row. `moved` says a range was changed: a drag
+ * over such a run in Live Preview stops short of the closer's markers
+ * (opener to just before the closer), or starts past the opener's — the
+ * whole run all the same, so the range becomes the run's words.
+ */
+function softRunSelection(state: EditorState): { ranges: { from: number; to: number }[]; moved: boolean } | null {
+  if (softRunCache.has(state)) return softRunCache.get(state) ?? null;
+  const doc = state.doc;
+  const ranges: { from: number; to: number }[] = [];
+  let across = false;
+  let moved = false;
+  let result: { ranges: { from: number; to: number }[]; moved: boolean } | null = null;
+  for (const r of state.selection.ranges) {
+    if (r.empty) continue;
+    if (doc.lineAt(r.from).number === doc.lineAt(r.to).number) {
+      ranges.push({ from: r.from, to: r.to });
+      continue;
+    }
+    const runs = softWrappedRunsAround(doc, r.from, r.to);
+    if (!runs.length) {
+      across = false;
+      break;
+    }
+    across = true;
+    const lopsided = runs.find(
+      (run) =>
+        (r.from === run.open.from && r.to === run.close.from) ||
+        (r.from === run.open.to && r.to === run.close.to)
+    );
+    if (lopsided) moved = true;
+    ranges.push(lopsided ? { from: lopsided.open.to, to: lopsided.close.from } : { from: r.from, to: r.to });
+  }
+  if (across) result = { ranges, moved };
+  softRunCache.set(state, result);
+  return result;
+}
+const softRunCache = new WeakMap<EditorState, { ranges: { from: number; to: number }[]; moved: boolean } | null>();
+
+/** First and last line of each display-math block (`$$` on a line of its
+ *  own up to the line that closes it, or `$$…$$` alone on one line),
+ *  outside code fences; memoised per document like cachedFences. */
+const mathBlockCache = new WeakMap<Text, [number, number][]>();
+function cachedMathBlockLines(doc: Text): [number, number][] {
+  let blocks = mathBlockCache.get(doc);
+  if (blocks) return blocks;
+  blocks = [];
+  const fences = cachedFences(doc);
+  let open = 0;
+  for (let n = 1; n <= doc.lines; n++) {
+    if (fenceAt(fences, n)) continue;
+    const text = doc.line(n).text.replace(/^[\s>]*/, "");
+    if (open) {
+      if (text.includes("$$")) {
+        blocks.push([open, n]);
+        open = 0;
+      }
+    } else if (text.startsWith("$$")) {
+      if (text.slice(2).includes("$$")) blocks.push([n, n]);
+      else open = n;
+    }
+  }
+  mathBlockCache.set(doc, blocks);
+  return blocks;
+}
+
+/**
+ * The per-line pieces a selection across lines is formatted as, the way
+ * Obsidian's own ⌘B and Notion do it: one piece per line, after the line's
+ * block prefix (heading, list, quote, task), so no pair ever spans a
+ * block boundary. Blank lines, rules, table rows, Callout headers, fence
+ * delimiters and display-math blocks are skipped; in a code fence a piece
+ * is the code without its indentation. Null when every non-empty range
+ * lies on one line: that selection keeps the single-range path.
+ */
+export function lineFormatSegments(state: EditorState): { from: number; to: number }[] | null {
+  // The toolbar asks once per button on every selection change; states are
+  // immutable, so one answer per state serves them all.
+  if (segmentCache.has(state)) return segmentCache.get(state) ?? null;
+  const segments = computeLineFormatSegments(state);
+  segmentCache.set(state, segments);
+  return segments;
+}
+const segmentCache = new WeakMap<EditorState, { from: number; to: number }[] | null>();
+
+function computeLineFormatSegments(state: EditorState): { from: number; to: number }[] | null {
+  const doc = state.doc;
+  const ranges = state.selection.ranges.filter((r) => !r.empty);
+  if (ranges.every((r) => doc.lineAt(r.from).number === doc.lineAt(r.to).number)) return null;
+  const fences = cachedFences(doc);
+  const mathBlocks = cachedMathBlockLines(doc);
+  // The one-line tag pairs inside the selection, by line: a piece only
+  // ever sheds a pair on its own line, so each looks at a handful.
+  const pairsByLine = new Map<number, TagPair[]>();
+  const selFrom = ranges[0].from;
+  const selTo = ranges[ranges.length - 1].to;
+  for (const pair of cachedColorTagPairs(doc)) {
+    if (pair.close.to < selFrom || pair.open.from > selTo) continue;
+    const n = doc.lineAt(pair.open.from).number;
+    if (doc.lineAt(pair.close.to).number !== n) continue;
+    const list = pairsByLine.get(n);
+    if (list) list.push(pair);
+    else pairsByLine.set(n, [pair]);
+  }
+  const out: { from: number; to: number }[] = [];
+  for (const r of ranges) {
+    const last = doc.lineAt(r.to).number;
+    for (let n = doc.lineAt(r.from).number; n <= last; n++) {
+      const line = doc.line(n);
+      const fence = fenceAt(fences, n);
+      let span: { from: number; to: number } | null;
+      if (fence) {
+        if (n === fence.startLine || (fence.closed && n === fence.endLine)) continue;
+        span = fenceLineSpan(line.text, fence);
+      } else {
+        if (isTableRow(line.text) || RE_HR.test(line.text)) continue;
+        if (mathBlocks.some(([a, b]) => a <= n && n <= b)) continue;
+        span = inlineFormatSpan(line.text);
+      }
+      if (!span) continue;
+      const lo = line.from + span.from;
+      const hi = line.from + span.to;
+      const from = Math.max(lo, r.from);
+      const to = Math.min(hi, r.to);
+      if (from >= to) continue;
+      const seg = hugLineSegment(doc, pairsByLine.get(n) ?? [], from, to, r.from <= lo, r.to >= hi, !fence);
+      if (seg && (fence || !RE_MARKUP_ONLY.test(doc.sliceString(seg.from, seg.to)))) out.push(seg);
+    }
+  }
+  return out;
+}
+
+/** `state` with the selection set to one segment. */
+function stateWithSelection(state: EditorState, seg: { from: number; to: number }): EditorState {
+  return state.update({ selection: EditorSelection.single(seg.from, seg.to) }).state;
+}
+
+/** Whether a format is on across the selection: on every line piece of a
+ *  selection across lines (see lineFormatSegments), else — and inside a
+ *  run soft line breaks wrap (softRunSelection) — as `isActive` says for
+ *  the selection itself. */
+export function segmentsActive(state: EditorState, isActive: (s: EditorState) => boolean): boolean {
+  const soft = softRunSelection(state);
+  if (soft?.moved) return soft.ranges.every((r) => isActive(stateWithSelection(state, r)));
+  const segments = lineFormatSegments(state);
+  if (!segments || soft) return isActive(state);
+  return segments.length > 0 && segments.every((seg) => isActive(stateWithSelection(state, seg)));
+}
+
+/**
+ * Apply an inline format line by line when the selection crosses lines:
+ * `act` runs once per piece (lineFormatSegments), bottom-up, against a
+ * staged view whose selection is that piece, and everything lands as one
+ * transaction — one undo. With `isActive`, a toggle whose format is on in
+ * every piece turns off everywhere; otherwise only the pieces without it
+ * gain it, so a mixed selection never flips line by line. The selection
+ * afterwards runs from the first piece's start to the last piece's end
+ * of each range. False when the selection lies on one line, or when a
+ * toggle's selection lies inside an emphasis run that soft line breaks
+ * wrap (softRunSelection): the caller formats it as before, as one range
+ * (a lopsided range over such a run runs here, as the run's words). A
+ * colour is not a toggle and keeps its pieces there — a span per row nests
+ * inside the run, one across the break would not render.
+ */
+export function formatAcrossLines(
+  view: EditorView,
+  isActive: ((s: EditorState) => boolean) | null,
+  act: (v: EditorView) => void
+): boolean {
+  const start = view.state;
+  const soft = isActive ? softRunSelection(start) : null;
+  if (soft && !soft.moved) return false;
+  const segments = soft ? soft.ranges : lineFormatSegments(start);
+  if (!segments) return false;
+  // The start state with each piece selected, made once: every state
+  // update runs the editor's whole configuration, so the format check and
+  // the piece's own run share it.
+  const selected = new Map<{ from: number; to: number }, EditorState>();
+  const selectedState = (seg: { from: number; to: number }) => {
+    let state = selected.get(seg);
+    if (!state) selected.set(seg, (state = stateWithSelection(start, seg)));
+    return state;
+  };
+  const on = (seg: { from: number; to: number }) => isActive != null && isActive(selectedState(seg));
+  const allActive = isActive != null && segments.length > 0 && segments.every(on);
+  const pieces = [...segments].reverse();
+  // A piece only ever rewrites its own row. So with one piece per row, and
+  // no plugin tag pairing across rows in the selection (a piece could
+  // then change what a row above it reads), every piece can run against
+  // the START state: its positions and its changes are start-document
+  // positions, and the pieces' changes are gathered into one change set at
+  // the end. That keeps a select-all in a long note linear: staging each
+  // piece on the previous one's document re-scanned the note (fences, tag
+  // pairs) and mapped through a change set that grew with every piece,
+  // which was quadratic (seconds at a few thousand rows). Anything else
+  // takes that staged, composed path.
+  const selFrom = segments.length ? segments[0].from : 0;
+  const selTo = segments.length ? segments[segments.length - 1].to : 0;
+  const independent =
+    pieces.every(
+      (seg, i) => i === 0 || start.doc.lineAt(seg.to).number < start.doc.lineAt(pieces[i - 1].from).number
+    ) &&
+    !cachedColorTagPairs(start.doc).some(
+      (pair) =>
+        pair.close.to >= selFrom &&
+        pair.open.from <= selTo &&
+        start.doc.lineAt(pair.open.from).number !== start.doc.lineAt(pair.close.to).number
+    );
+  let state = start;
+  // Everything dispatched so far (composed path), and this piece's own
+  // changes: a primitive may dispatch more than once, so a piece's changes
+  // are composed among themselves before they are read back.
+  let composed = ChangeSet.empty(start.doc.length);
+  let piece = composed;
+  const specs: { from: number; to: number; insert: string }[] = [];
+  // The primitives only read `state` and call `dispatch`, so a stand-in
+  // that records each dispatch's changes runs them unchanged.
+  const staged = {
+    get state() {
+      return state;
+    },
+    dispatch(spec: TransactionSpec) {
+      const tr = state.update(spec);
+      piece = piece.compose(tr.changes);
+      if (tr.docChanged) carryFences(state.doc, tr.state.doc, tr.changes);
+      state = tr.state;
+    },
+  } as unknown as EditorView;
+  for (const seg of pieces) {
+    if (isActive && !allActive && on(seg)) continue;
+    const from = independent ? seg.from : composed.mapPos(seg.from, 1);
+    const to = independent ? seg.to : composed.mapPos(seg.to, -1);
+    if (from >= to) continue;
+    if (independent) state = selectedState(seg);
+    piece = ChangeSet.empty(state.doc.length);
+    if (!independent) staged.dispatch({ selection: EditorSelection.single(from, to) });
+    act(staged);
+    if (independent) {
+      piece.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
+        specs.push({ from: fromA, to: toA, insert: inserted.toString() });
+      });
+    } else {
+      composed = composed.compose(piece);
+    }
+  }
+  // Ascending, so ChangeSet.of takes them in one pass.
+  const changes = independent
+    ? start.changes(specs.sort((a, b) => a.from - b.from || a.to - b.to))
+    : composed;
+  if (changes.empty) return true;
+  const ranges = start.selection.ranges.map((r) => {
+    const own = segments.filter((seg) => r.from <= seg.from && seg.to <= r.to);
+    if (!own.length) return r.map(changes);
+    const from = changes.mapPos(own[0].from, 1);
+    const to = Math.max(from, changes.mapPos(own[own.length - 1].to, -1));
+    return r.head < r.anchor ? EditorSelection.range(to, from) : EditorSelection.range(from, to);
+  });
+  view.dispatch({
+    changes,
+    selection: EditorSelection.create(ranges, start.selection.mainIndex),
+    userEvent: "input.format",
+  });
+  return true;
 }
 
 /** How the current selection relates to a marker pair. */
@@ -15203,7 +22754,18 @@ export function getWrapState(
     selected.endsWith(end) &&
     selected.length >= marker.length + end.length
   ) {
-    return "inside";
+    // For single-char emphasis ("*"), the selected text's own marker runs
+    // decide: `**x**` (a run of two on each side) is BOLD only, so italic
+    // is not applied yet — fall through to the surrounding checks (which
+    // also catch `**x**` selected inside `***x***`). Only odd runs (1, or
+    // 3+ = bold italic) hold an italic marker to strip.
+    if (marker.length !== 1 || end !== marker) return "inside";
+    const ch = marker[0];
+    let l = 0;
+    while (l < selected.length && selected[l] === ch) l++;
+    let r = 0;
+    while (r < selected.length && selected[selected.length - 1 - r] === ch) r++;
+    if (l % 2 === 1 && r % 2 === 1) return "inside";
   }
 
   const before = doc.sliceString(Math.max(0, sel.from - marker.length), sel.from);
@@ -15224,6 +22786,12 @@ export function getWrapState(
 }
 
 export function toggleWrap(view: EditorView, marker: string, endMarker?: string) {
+  const across = formatAcrossLines(
+    view,
+    (s) => getWrapState(s, marker, endMarker) !== "none",
+    (v) => toggleWrap(v, marker, endMarker)
+  );
+  if (across) return;
   const end = endMarker ?? marker;
   const sel = view.state.selection.main;
   if (sel.empty) return;
@@ -15281,15 +22849,20 @@ export function rangeTouchesHtmlPairIn(
   from: number,
   to: number
 ): boolean {
-  return findColorTagPairs(source).some(
-    (pair) => pair.open.from < to && pair.close.to > from
-  );
+  return rangeTouchesPairs(findColorTagPairs(source), from, to);
 }
 
+function rangeTouchesPairs(pairs: TagPair[], from: number, to: number): boolean {
+  return pairs.some((pair) => pair.open.from < to && pair.close.to > from);
+}
+
+/** rangeTouchesHtmlPairIn over the document's memoised pair scan: toolbar
+ * state and hotkeys ask on every keystroke, and serialising the whole
+ * text each time is what made long notes stutter. */
 function selectionTouchesHtmlPair(state: EditorState): boolean {
   const sel = state.selection.main;
   if (sel.empty) return false;
-  return rangeTouchesHtmlPairIn(state.doc.toString(), sel.from, sel.to);
+  return rangeTouchesPairs(cachedColorTagPairs(state.doc), sel.from, sel.to);
 }
 
 /** The smallest pair written with exactly these tags whose inner text
@@ -15302,12 +22875,49 @@ export function enclosingTagPairIn(
   open: string,
   close: string
 ): TagPair | null {
+  return pickEnclosingPair(
+    findColorTagPairs(source),
+    (a, b) => source.slice(a, b),
+    from,
+    to,
+    open,
+    close
+  );
+}
+
+/** enclosingTagPairIn over a document, reading the memoised pair scan
+ * (cachedColorTagPairs) instead of serialising the text on every call. */
+function enclosingTagPairInDoc(
+  doc: Text,
+  from: number,
+  to: number,
+  open: string,
+  close: string
+): TagPair | null {
+  return pickEnclosingPair(
+    cachedColorTagPairs(doc),
+    (a, b) => doc.sliceString(a, b),
+    from,
+    to,
+    open,
+    close
+  );
+}
+
+function pickEnclosingPair(
+  pairs: TagPair[],
+  slice: (from: number, to: number) => string,
+  from: number,
+  to: number,
+  open: string,
+  close: string
+): TagPair | null {
   return (
-    findColorTagPairs(source)
+    pairs
       .filter(
         (pair) =>
-          source.slice(pair.open.from, pair.open.to) === open &&
-          source.slice(pair.close.from, pair.close.to) === close &&
+          slice(pair.open.from, pair.open.to) === open &&
+          slice(pair.close.from, pair.close.to) === close &&
           pair.open.to <= from &&
           to <= pair.close.from
       )
@@ -15325,7 +22935,7 @@ function enclosingTagPair(
 ): TagPair | null {
   const sel = state.selection.main;
   if (sel.empty) return null;
-  return enclosingTagPairIn(state.doc.toString(), sel.from, sel.to, open, close);
+  return enclosingTagPairInDoc(state.doc, sel.from, sel.to, open, close);
 }
 
 /** Delete a pair's two tags, keeping the selection on the same text. */
@@ -15411,8 +23021,13 @@ export function convertAdjacentMarkersToTags(view: EditorView) {
 /** Toggle an HTML tag pair without nesting a duplicate inside an already
  * wrapped region and without leaving Markdown markers around HTML. */
 export function toggleHtmlWrap(view: EditorView, open: string, close: string) {
-  const sel = view.state.selection.main;
-  if (sel.empty) return;
+  const across = formatAcrossLines(
+    view,
+    (s) => getWrapState(s, open, close) !== "none" || enclosingTagPair(s, open, close) !== null,
+    (v) => toggleHtmlWrap(v, open, close)
+  );
+  if (across) return;
+  if (view.state.selection.main.empty || !selectionOutOfTags(view)) return;
 
   // A Source-mode selection may include both tags, or sit right between
   // them. The generic helper unwraps both shapes.
@@ -15429,6 +23044,24 @@ export function toggleHtmlWrap(view: EditorView, open: string, close: string) {
 
   convertAdjacentMarkersToTags(view);
   toggleWrap(view, open, close);
+}
+
+/** Pull the main selection's ends out of any plugin tag they sit inside
+ * (see clampRangeOutOfTags), dispatching the smaller selection when it
+ * changed. False when no text is left to format. */
+function selectionOutOfTags(view: EditorView): boolean {
+  const sel = view.state.selection.main;
+  const range = clampRangeOutOfTags(cachedColorTagPairs(view.state.doc), sel.from, sel.to);
+  if (!range) return false;
+  if (range.from !== sel.from || range.to !== sel.to) {
+    const forward = sel.head >= sel.anchor;
+    view.dispatch({
+      selection: forward
+        ? { anchor: range.from, head: range.to }
+        : { anchor: range.to, head: range.from },
+    });
+  }
+  return true;
 }
 
 /** Whether the selection itself or any smallest enclosing HTML pair is
@@ -15465,6 +23098,28 @@ PALETTE_COLORS.forEach((name, i) => {
   PALETTE_BY_CSS.set(TEXT_COLORS[i], name);
   PALETTE_BY_CSS.set(BG_COLORS[i], name);
 });
+
+/** A stored last-used colour that still names a palette entry (or, for
+ *  highlights, the theme's own); anything else — an old palette name,
+ *  say — is null. */
+export function paletteChoice(
+  value: string | null | undefined,
+  kind: "color" | "bg"
+): PaletteColor | "default" | null {
+  if (value === "default") return kind === "bg" ? "default" : null;
+  return value && (PALETTE_COLORS as readonly string[]).includes(value)
+    ? (value as PaletteColor)
+    : null;
+}
+
+/** The CSS a current colour (see currentInlineColor) paints with. */
+export function currentColorCss(current: string | null, kind: "color" | "bg"): string | null {
+  if (current == null) return null;
+  if (current === "default") return "var(--text-highlight-bg)";
+  const index = (PALETTE_COLORS as readonly string[]).indexOf(current);
+  if (index < 0) return current;
+  return kind === "color" ? TEXT_COLORS[index] : BG_COLORS[index];
+}
 
 const spanOpen = (c: string) => `<span style="color:${c}">`;
 const markOpen = (c: string) => `<mark style="background:${c};color:inherit">`;
@@ -15567,11 +23222,24 @@ export function findMathRanges(text: string): MathRange[] {
   return out;
 }
 
+/** findMathRanges over the whole document, memoised per document version
+ * (keyed by the immutable Text like cachedColorTagPairs), so the toolbar
+ * and colour hotkeys stop re-serialising and re-scanning the note on
+ * every selection change. */
+const mathRangeCache = new WeakMap<Text, MathRange[]>();
+function cachedMathRanges(doc: Text): MathRange[] {
+  let ranges = mathRangeCache.get(doc);
+  if (!ranges) {
+    ranges = findMathRanges(doc.toString());
+    mathRangeCache.set(doc, ranges);
+  }
+  return ranges;
+}
+
 /** Formulas overlapping [from, to). Touching one at all counts: a formula
  * is colored as a whole, never in halves. */
 function mathRangesIn(state: EditorState, from: number, to: number): MathRange[] {
-  const text = state.doc.toString();
-  return findMathRanges(text).filter((m) => m.from < to && m.to > from);
+  return cachedMathRanges(state.doc).filter((m) => m.from < to && m.to > from);
 }
 
 /** A `\class{…}{…}` wrapping the WHOLE formula body, or null. */
@@ -15695,6 +23363,54 @@ function enclosingColorTags(
   return m && after === close ? { openFrom: from - m[0].length } : null;
 }
 
+/**
+ * The innermost of the plugin's own single-line color pairs of `kind`
+ * whose content contains [from, to] (tags excluded), or null. The pair
+ * cache is per document version, so toolbar state and the hotkeys share
+ * one scan.
+ */
+function enclosingColorPair(
+  doc: Text,
+  from: number,
+  to: number,
+  kind: "color" | "bg"
+): TagPair | null {
+  const prefix = kind === "color" ? "color:" : "background:";
+  let best: TagPair | null = null;
+  for (const pair of cachedColorTagPairs(doc)) {
+    if (pair.comment != null || !pair.style || !pair.style.startsWith(prefix)) continue;
+    if (pair.open.to > from || to > pair.close.from) continue;
+    if (doc.lineAt(pair.open.from).number !== doc.lineAt(pair.close.to).number) continue;
+    if (!best || pair.close.from - pair.open.to < best.close.from - best.open.to) best = pair;
+  }
+  return best;
+}
+
+/**
+ * The text or highlight color already applied at the main selection: a
+ * palette name, "default" for the theme's own highlight (`==` or the
+ * `var(--text-highlight-bg)` mark the toolbar writes over HTML), the raw
+ * CSS value for a color outside the palette, or null when the selection
+ * is not inside a color run of `kind` or spans lines. Powers the lit
+ * toolbar button, the pressed swatch and the current-color bar.
+ */
+export function currentInlineColor(
+  state: EditorState,
+  kind: "color" | "bg"
+): string | null {
+  const sel = state.selection.main;
+  const doc = state.doc;
+  if (doc.lineAt(sel.from).number !== doc.lineAt(sel.to).number) return null;
+  const pair = enclosingColorPair(doc, sel.from, sel.to, kind);
+  if (pair && pair.style) {
+    const css = pair.style.slice(kind === "color" ? "color:".length : "background:".length);
+    if (css === "var(--text-highlight-bg)") return "default";
+    return PALETTE_BY_CSS.get(css) ?? css;
+  }
+  if (kind === "bg" && getWrapState(state, "==") !== "none") return "default";
+  return null;
+}
+
 function applyTagColor(
   view: EditorView,
   color: string | null,
@@ -15703,8 +23419,8 @@ function applyTagColor(
   close: string,
   kind: "color" | "bg"
 ) {
+  if (view.state.selection.main.empty || !selectionOutOfTags(view)) return;
   const sel = view.state.selection.main;
-  if (sel.empty) return;
   const maths = mathRangesIn(view.state, sel.from, sel.to);
   if (maths.length) {
     applyColorAcrossMath(view, maths, color, kind, reBefore, open, close);
@@ -15739,6 +23455,46 @@ function applyTagColor(
     }
     return;
   }
+
+  // Part of a run: `<c>aaa [bbb] ccc</c>`. Close the run before the
+  // selection and reopen it after, so only the selected words change
+  // (or lose) their color; a half that would enclose nothing is dropped,
+  // which keeps a selection touching the run's edge from leaving an empty
+  // `<c></c>` behind.
+  const pair = enclosingColorPair(doc, sel.from, sel.to, kind);
+  if (pair) {
+    const origOpen = doc.sliceString(pair.open.from, pair.open.to);
+    const leftEmpty = sel.from === pair.open.to;
+    const rightEmpty = sel.to === pair.close.from;
+    const changes: { from: number; to?: number; insert?: string }[] = [];
+    let delta = 0;
+    if (color === null) {
+      if (leftEmpty) {
+        changes.push({ from: pair.open.from, to: pair.open.to });
+        delta = -(pair.open.to - pair.open.from);
+      } else {
+        changes.push({ from: sel.from, insert: close });
+        delta = close.length;
+      }
+      if (rightEmpty) changes.push({ from: pair.close.from, to: pair.close.to });
+      else changes.push({ from: sel.to, insert: origOpen });
+    } else {
+      const newOpen = open(color);
+      if (leftEmpty) {
+        changes.push({ from: pair.open.from, to: pair.open.to, insert: newOpen });
+        delta = newOpen.length - (pair.open.to - pair.open.from);
+      } else {
+        changes.push({ from: sel.from, insert: close + newOpen });
+        delta = close.length + newOpen.length;
+      }
+      if (!rightEmpty) changes.push({ from: sel.to, insert: close + origOpen });
+    }
+    view.dispatch({
+      changes,
+      selection: { anchor: sel.from + delta, head: sel.to + delta },
+    });
+    return;
+  }
   if (color === null) return;
 
   // Markdown markers hugging the selection would end up wrapped around an
@@ -15758,12 +23514,41 @@ function applyTagColor(
   });
 }
 
+/* Across lines, a colour (or its removal) applies to every line's piece:
+ * a span or mark never spans a block boundary (see formatAcrossLines). */
 export function applyTextColor(view: EditorView, color: string | null) {
+  if (formatAcrossLines(view, null, (v) => applyTextColor(v, color))) return;
   applyTagColor(view, color, RE_SPAN_BEFORE, spanOpen, "</span>", "color");
 }
 
 export function applyHighlightColor(view: EditorView, color: string | null) {
+  if (formatAcrossLines(view, null, (v) => applyHighlightColor(v, color))) return;
   applyTagColor(view, color, RE_MARK_BEFORE, markOpen, "</mark>", "bg");
+}
+
+/** Remove any highlight from the selection: a coloured mark and the
+ *  theme's own `==`, line by line across lines, as one change. */
+export function removeHighlight(view: EditorView) {
+  if (formatAcrossLines(view, null, removeHighlight)) return;
+  applyHighlightColor(view, null);
+  if (getWrapState(view.state, "==") !== "none") toggleWrap(view, "==");
+}
+
+/** The theme's own highlight: `==` markers, unless the selection touches
+ *  an HTML element (`==` cannot restyle one in Live Preview), where a mark
+ *  with the theme's highlight colour keeps it in the HTML family. */
+export function applyDefaultHighlight(view: EditorView) {
+  const across = formatAcrossLines(
+    view,
+    (s) => getWrapState(s, "==") !== "none",
+    applyDefaultHighlight
+  );
+  if (across) return;
+  if (selectionTouchesHtmlPair(view.state)) {
+    applyHighlightColor(view, "var(--text-highlight-bg)");
+  } else {
+    toggleWrap(view, "==");
+  }
 }
 
 /** Strip every inline format from the selection: markdown tokens,
@@ -15806,7 +23591,7 @@ export function clearInlineFormatting(view: EditorView) {
   const seen = new Set<string>();
   const ranges: { from: number; to: number }[] = [];
   const mathEdits: { from: number; to: number; insert: string }[] = [];
-  const maths = findMathRanges(doc.toString());
+  const maths = cachedMathRanges(doc);
   const push = (from: number, to: number) => {
     if (to <= from) return;
     const key = `${from}:${to}`;
@@ -15895,6 +23680,354 @@ export function insertLink(view: EditorView) {
   view.focus();
 }
 
+/** The inline Markdown link the main selection sits in (or exactly
+ * touches), or null — also null when the selection spans lines, since a
+ * link never does. */
+export function enclosingLinkOnLine(state: EditorState): MarkdownLink | null {
+  const sel = state.selection.main;
+  const line = state.doc.lineAt(sel.from);
+  if (sel.to > line.to) return null;
+  return enclosingMarkdownLink(line.text, sel.from - line.from, sel.to - line.from);
+}
+
+/** The `[[wikilink]]` (never an embed) the main selection sits in, or
+ * exactly covers, or null — also null when the selection spans lines. */
+export function enclosingWikiLinkOnLine(state: EditorState): WikiLink | null {
+  const sel = state.selection.main;
+  const line = state.doc.lineAt(sel.from);
+  if (sel.to > line.to) return null;
+  return enclosingWikiLink(line.text, sel.from - line.from, sel.to - line.from);
+}
+
+/** The document change that rewrites `link` on the line starting at
+ * `lineFrom` to `[text](dest)` (a CommonMark title the link carried stays),
+ * touching only the link's own span. `caret` is the position right after
+ * the rewritten link. */
+export function linkRewriteChange(
+  lineFrom: number,
+  lineText: string,
+  link: MarkdownLink,
+  next: { text: string; dest: string }
+): { from: number; to: number; insert: string; caret: number } {
+  const rewritten = rewriteMarkdownLink(lineText, link, next);
+  const insert = rewritten.slice(link.start, rewritten.length - (lineText.length - link.end));
+  const from = lineFrom + link.start;
+  return { from, to: lineFrom + link.end, insert, caret: from + insert.length };
+}
+
+/** The document change that reduces `link` to its plain text; `caret`
+ * marks the end of that text so the selection can cover it. */
+export function linkUnlinkChange(
+  lineFrom: number,
+  lineText: string,
+  link: MarkdownLink
+): { from: number; to: number; insert: string; caret: number } {
+  const plain = unlinkMarkdownLink(lineText, link);
+  const insert = plain.slice(link.start, plain.length - (lineText.length - link.end));
+  const from = lineFrom + link.start;
+  return { from, to: lineFrom + link.end, insert, caret: from + insert.length };
+}
+
+/** The change replacing columns `start..end` of the line at `lineFrom`
+ * with what `rewritten` (the whole line after an edit that kept everything
+ * outside that span) holds there. */
+function lineSpanChange(
+  lineFrom: number,
+  lineText: string,
+  span: { start: number; end: number },
+  rewritten: string
+): { from: number; to: number; insert: string; caret: number } {
+  const insert = rewritten.slice(span.start, rewritten.length - (lineText.length - span.end));
+  const from = lineFrom + span.start;
+  return { from, to: lineFrom + span.end, insert, caret: from + insert.length };
+}
+
+/** What Save on the link card writes, or null when the destination is
+ * unusable. `text` and `dest` arrive as the card hands them over (trimmed
+ * text, normalized destination). A Markdown link is rewritten in place; a
+ * wikilink keeps its `[[target|text]]` form only when that syntax can carry
+ * the new fields, the vault writes wikilinks and the target resolves to a
+ * note (`resolves`) — otherwise the whole wikilink becomes one Markdown
+ * link, so a URL is never nested inside `[[…]]`. Plain text (`sel`, which
+ * a selection over links has already grown to take them whole — see
+ * linkCardTarget) becomes `[text](dest)`. On a table row (`inTable`, the
+ * raw row of Source mode) every `|` the link writes is escaped, or it
+ * would split the cell. */
+export function linkSavePlan(input: {
+  lineText: string;
+  lineFrom: number;
+  sel: { from: number; to: number };
+  md: MarkdownLink | null;
+  wiki: WikiLink | null;
+  text: string;
+  dest: string;
+  resolves: boolean;
+  useMarkdownLinks: boolean;
+  inTable?: boolean;
+}): { from: number; to: number; insert: string; caret: number } | null {
+  const { lineText, lineFrom, sel, md, wiki } = input;
+  const opts = { inTable: !!input.inTable };
+  const target = normalizeLinkDest(input.dest);
+  if (!isValidLinkDest(target)) return null;
+  const label = input.text.trim() || (wiki ? unwrapLinkDest(target) : target);
+  if (md) {
+    return linkRewriteChange(lineFrom, lineText, md, { text: escapeLinkLabelPipes(label, opts), dest: target });
+  }
+  if (wiki) {
+    // Saved as it was opened (Enter is the natural way to close the card):
+    // nothing to write, whatever form the vault or an unresolved target
+    // would give a new link.
+    const fields = wikiLinkFields(wiki);
+    const unchangedTarget = unwrapLinkDest(target) === fields.dest;
+    if (unchangedTarget && label === fields.text.trim()) return null;
+    // `resolves` vets a newly typed destination; relabelling a link to a
+    // note not written yet keeps it a wikilink.
+    const keep =
+      canWriteWikiLink(label, target) && !input.useMarkdownLinks && (input.resolves || unchangedTarget);
+    const rewritten = keep
+      ? rewriteWikiLink(lineText, wiki, { text: label, dest: target }, opts)
+      : wikiLinkToMarkdown(lineText, wiki, { text: label, dest: target }, opts);
+    return lineSpanChange(lineFrom, lineText, wiki, rewritten);
+  }
+  const insert = `[${escapeLinkLabelPipes(label, opts)}](${target})`;
+  return { from: sel.from, to: sel.to, insert, caret: sel.from + insert.length };
+}
+
+/** The change that reduces a wikilink to the text Obsidian displays for
+ * it; `caret` marks the end of that text so the selection can cover it. */
+export function wikiLinkUnlinkChange(
+  lineFrom: number,
+  lineText: string,
+  link: WikiLink
+): { from: number; to: number; insert: string; caret: number } {
+  return lineSpanChange(lineFrom, lineText, link, unlinkWikiLink(lineText, link));
+}
+
+/** Whether a wikilink target resolves to a vault file from `sourcePath`.
+ * `getLinkpath` strips the heading/block subpath; it is reached through
+ * the namespace (the test stub may lack it). */
+function wikiTargetResolves(app: App, target: string, sourcePath: string): boolean {
+  const getLinkpath =
+    (Reflect.get(obsidianApi, "getLinkpath") as ((linktext: string) => string) | undefined) ??
+    ((linktext: string) => linktext.replace(/[#^|].*$/, ""));
+  try {
+    return app.metadataCache.getFirstLinkpathDest(getLinkpath(target), sourcePath) != null;
+  } catch {
+    return false;
+  }
+}
+
+/** The vault's "Use [[Wikilinks]]" switch, inverted: true when Obsidian
+ * writes new links as Markdown. Read through the untyped config getter. */
+function vaultUsesMarkdownLinks(app: App): boolean {
+  const vault = app.vault as unknown as { getConfig?: (key: string) => unknown };
+  try {
+    return vault.getConfig?.("useMarkdownLinks") === true;
+  } catch {
+    return false;
+  }
+}
+
+/** The words the link card is about to link, tinted while the card holds
+ * focus (the editor's own selection is not drawn then): a range, or null
+ * to clear it. */
+export const linkPendingEffect = StateEffect.define<{ from: number; to: number } | null>();
+let linkPendingState: StateField<DecorationSet> | null = null;
+/** The tint's field, built on first use from onload (and from a column's
+ * editor): `provide` reads EditorView.decorations when the field is
+ * defined, which the test bundle's view stub lacks at module load. */
+function linkPendingField(): StateField<DecorationSet> {
+  return (linkPendingState ??= StateField.define<DecorationSet>({
+    create: () => Decoration.none,
+    update(marks, tr) {
+      for (const effect of tr.effects) {
+        if (!effect.is(linkPendingEffect)) continue;
+        const range = effect.value;
+        return range && range.to > range.from
+          ? Decoration.set([Decoration.mark({ class: "nf-link-pending" }).range(range.from, range.to)])
+          : Decoration.none;
+      }
+      return tr.docChanged ? marks.map(tr.changes) : marks;
+    },
+    provide: (field) => EditorView.decorations.from(field),
+  }));
+}
+
+/** The link card whose words are tinted in each editor (see openLinkPopover). */
+const LINK_TINT_OWNER = new WeakMap<EditorView, object>();
+
+/** Editors whose link card just closed on Escape: that Escape's keyup
+ * brings the formatting toolbar back over the selection (see ToolbarView's
+ * onKeyUp) instead of hiding it. */
+const RESHOW_TOOLBAR_AFTER_ESC = new WeakSet<EditorView>();
+
+/** What the rest of the plugin may ask of an editor's formatting toolbar. */
+interface ToolbarHandle {
+  /** Show it for the current selection, if there is one to format. */
+  show(): void;
+  /** Show it with a colour row open and its first swatch focused. */
+  openPalette(mode: "color" | "bg"): boolean;
+}
+/** Every editor's toolbar (the note's, and each column editor's own). */
+const TOOLBAR_HANDLES = new WeakMap<EditorView, ToolbarHandle>();
+
+/** Notion-style link editing: a floating card anchored to the selection
+ * (or to the link the caret sits in) that creates, rewrites, opens or
+ * unlinks a link — an inline Markdown link or a `[[wikilink]]`. A
+ * selection over text and links grows to take those links whole and
+ * writes one link (see linkCardTarget). A selection spanning lines cannot
+ * be one link, so it falls back to the bare `[text]()` scaffold. The card
+ * is tied to the editor's operation scope: an edit elsewhere, a file
+ * switch or teardown closes it before it can write a stale change. While
+ * it is open the words it links are tinted; Escape hands the selection
+ * back with the toolbar over it. */
+export function openLinkPopover(view: EditorView, plugin: NotionFlowPlugin) {
+  const state = view.state;
+  const sel = state.selection.main;
+  const line = state.doc.lineAt(sel.from);
+  if (sel.to > line.to) {
+    insertLink(view);
+    return;
+  }
+  // Inside (or exactly over) a `[[wikilink]]` the card edits that link;
+  // linking its text as if plain would nest it: `[[[a|b]]](url)`.
+  const target = linkCardTarget(line.text, sel.from - line.from, sel.to - line.from);
+  const link = target.kind === "markdown" ? target.link : null;
+  const wiki = target.kind === "wiki" ? target.link : null;
+  const wikiFields = wiki ? wikiLinkFields(wiki) : null;
+  const lineFrom = line.from;
+  const lineText = line.text;
+  const inTable = isTableRow(lineText);
+  // The span Save replaces when there is no link to edit: the selection,
+  // grown over the links it touched.
+  const span =
+    target.kind === "text"
+      ? { from: lineFrom + target.from, to: lineFrom + target.to }
+      : { from: sel.from, to: sel.to };
+  const tinted = link ?? wiki;
+  const pending = tinted
+    ? { from: lineFrom + tinted.start, to: lineFrom + tinted.end }
+    : span;
+  const anchorPos = target.kind === "text" ? span.from : sel.from;
+  const sourcePath = sourcePathForEditorView(plugin.app.workspace, view);
+  const win = view.dom.ownerDocument.defaultView ?? window;
+  const anchor = () => {
+    try {
+      const c = view.coordsAtPos(Math.min(anchorPos, view.state.doc.length));
+      return c ? { left: c.left, top: c.top, bottom: c.bottom } : null;
+    } catch {
+      return null;
+    }
+  };
+  let popover: LinkPopover | null = null;
+  const operation = plugin.operations.capture(
+    view,
+    () => sourcePathForEditorView(plugin.app.workspace, view),
+    { onCancel: () => popover?.close() }
+  );
+  const settle = (change: { from: number; to: number; insert: string; caret: number }, selectText: boolean) => {
+    view.dispatch({
+      changes: { from: change.from, to: change.to, insert: change.insert },
+      selection: selectText
+        ? { anchor: change.from, head: change.caret }
+        : { anchor: change.caret },
+      userEvent: "input",
+    });
+    view.focus();
+  };
+  // This card's claim on the tint. A card opened over this one closes it
+  // first, then tints its own words at once, before this card's deferred
+  // clear runs: that clear must leave the new card's tint alone.
+  const tintOwner = {};
+  const tint = (range: { from: number; to: number } | null) => {
+    if (range) LINK_TINT_OWNER.set(view, tintOwner);
+    else if (LINK_TINT_OWNER.get(view) === tintOwner) LINK_TINT_OWNER.delete(view);
+    else return;
+    // An editor without the field (none after onload) ignores the effect.
+    try {
+      view.dispatch({ effects: linkPendingEffect.of(range) });
+    } catch (error) {
+      console.error("Notion Flow: tinting the linked words failed", error);
+    }
+  };
+  const later = (run: () => void, ms: number) =>
+    typeof win.setTimeout === "function" ? win.setTimeout(run, ms) : setTimeout(run, ms);
+  popover = new LinkPopover({
+    doc: view.dom.ownerDocument,
+    anchor,
+    text: link?.text ?? wikiFields?.text ?? (target.kind === "text" ? target.text : ""),
+    dest: link?.dest ?? wikiFields?.dest ?? "",
+    hasLink: link != null || wiki != null,
+    kind: wiki ? "wiki" : "markdown",
+    app: plugin.app,
+    sourcePath,
+    bounds: () => (view.dom.closest(".view-content") as HTMLElement | null)?.getBoundingClientRect() ?? null,
+    onSave: (text, dest) => {
+      if (!operation.isCurrent()) return;
+      const change = linkSavePlan({
+        lineText,
+        lineFrom,
+        sel: span,
+        md: link,
+        wiki,
+        text,
+        dest,
+        resolves: wiki != null && wikiTargetResolves(plugin.app, unwrapLinkDest(dest), sourcePath),
+        useMarkdownLinks: wiki != null && vaultUsesMarkdownLinks(plugin.app),
+        inTable,
+      });
+      if (change) settle(change, false);
+    },
+    onOpen: (dest) => {
+      const target = dest.replace(/^<(.*)>$/, "$1");
+      if (RE_HTTP_URL.test(target)) {
+        win.open(target, "_blank");
+        return;
+      }
+      void plugin.app.workspace.openLinkText(
+        target,
+        sourcePathForEditorView(plugin.app.workspace, view)
+      );
+    },
+    onUnlink: link
+      ? () => {
+          if (!operation.isCurrent()) return;
+          settle(linkUnlinkChange(lineFrom, lineText, link), true);
+        }
+      : wiki
+        ? () => {
+            if (!operation.isCurrent()) return;
+            settle(wikiLinkUnlinkChange(lineFrom, lineText, wiki), true);
+          }
+        : undefined,
+    onClose: (reason) => {
+      operation.finish();
+      // The card may close inside an editor update (a stale card is
+      // cancelled by the dispatch that made it stale): clear the tint once
+      // that update is over.
+      later(() => {
+        if (view.dom.isConnected) tint(null);
+      }, 0);
+      // The card held focus; hand it back to the editor unless the close
+      // came from a click that is about to focus something else.
+      const active = view.dom.ownerDocument.activeElement;
+      if ((!active || active === view.dom.ownerDocument.body) && view.dom.isConnected) {
+        view.focus();
+      }
+      if (reason === "escape") {
+        // Escape gives the selection back: its keyup re-shows the
+        // toolbar, and should that keyup land elsewhere, this does.
+        RESHOW_TOOLBAR_AFTER_ESC.add(view);
+        later(() => {
+          if (RESHOW_TOOLBAR_AFTER_ESC.delete(view)) TOOLBAR_HANDLES.get(view)?.show();
+        }, 300);
+      }
+    },
+  });
+  popover.open();
+  if (popover.isOpen && pending.to > pending.from) tint(pending);
+}
+
 /** Markdown markers in plain text; the equivalent HTML tag pair inside a
  * fenced code block (where Markdown markers stay literal code) and around
  * any HTML-tagged text (where mixing families breaks Live Preview — see
@@ -15918,6 +24051,12 @@ export function toggleDualFormat(
   codeOpen: string,
   codeClose: string
 ) {
+  const across = formatAcrossLines(
+    v,
+    (s) => isDualFormatActive(s, marker, codeOpen, codeClose),
+    (staged) => toggleDualFormat(staged, marker, codeOpen, codeClose)
+  );
+  if (across) return;
   if (inFenceBody(v.state)) {
     toggleWrap(v, codeOpen, codeClose);
     return;
@@ -15955,8 +24094,8 @@ const dualFormatAction = (
 });
 
 const PRIMARY_TOOLBAR_ACTIONS: ToolbarAction[] = [
-  dualFormatAction("bold", t("Bold"), "**", "<b>", "</b>"),
-  dualFormatAction("italic", t("Italic"), "*", "<i>", "</i>"),
+  { ...dualFormatAction("bold", t("Bold"), "**", "<b>", "</b>"), shortcut: { id: "editor:toggle-bold", fallback: "Mod+B" } },
+  { ...dualFormatAction("italic", t("Italic"), "*", "<i>", "</i>"), shortcut: { id: "editor:toggle-italics", fallback: "Mod+I" } },
   {
     icon: "underline",
     tooltip: t("Underline"),
@@ -15964,8 +24103,14 @@ const PRIMARY_TOOLBAR_ACTIONS: ToolbarAction[] = [
     endMarker: "</u>",
     isActive: isUnderlineActive,
     run: toggleUnderline,
+    shortcut: { id: "notion-flow:toggle-underline", fallback: "Mod+U" },
   },
-  dualFormatAction("strikethrough", t("Strikethrough"), "~~", "<s>", "</s>"),
+  // Obsidian ships its strikethrough command unbound: the tooltip names a
+  // chord only once one is assigned.
+  {
+    ...dualFormatAction("strikethrough", t("Strikethrough"), "~~", "<s>", "</s>"),
+    shortcut: { id: "editor:toggle-strikethrough", fallback: null },
+  },
 ];
 
 const SECONDARY_TOOLBAR_ACTIONS: ToolbarAction[] = [
@@ -15975,11 +24120,12 @@ const SECONDARY_TOOLBAR_ACTIONS: ToolbarAction[] = [
     marker: "`",
     run: (v) => toggleWrap(v, "`"),
     disabledInCode: true,
+    // Unbound in Obsidian by default (⌘E switches to Reading view).
+    shortcut: { id: "editor:toggle-code", fallback: null },
   },
-  { icon: "link", tooltip: t("Link"), run: insertLink, disabledInCode: true },
 ];
 
-function makeToolbarPlugin(plugin: NotionFlowPlugin) {
+export function makeToolbarPlugin(plugin: NotionFlowPlugin) {
   return ViewPlugin.fromClass(
     class ToolbarView {
       view: EditorView;
@@ -15991,22 +24137,51 @@ function makeToolbarPlugin(plugin: NotionFlowPlugin) {
       // Document-level: callout/table widgets swallow mouseup before it
       // reaches the editor DOM, but it still bubbles to the document.
       onMouseUp = (e: MouseEvent) => {
+        // A right-click opens a context menu over the selection; the
+        // toolbar would only sit under it (see onContextMenu).
+        if (e.button !== 0) return;
         const target = e.target as HTMLElement | null;
         if ((target && this.toolbar.contains(target)) || isBlockMenuTarget(target)) return;
+        // "Did this click land in my editor?" has to be answered NOW. The
+        // wait below lets the selection settle, but a click that opens a
+        // rendered block for editing — a Callout, a table — replaces the
+        // very DOM it came from, and by the time the timer runs the event's
+        // target is inside nothing at all. Asked late, the answer was no,
+        // and selecting a word in a Callout title that was not already open
+        // brought up no toolbar: the first click opened the box, the second
+        // selected the word, and the check then threw the result away.
+        const inside = !!target && this.view.dom.contains(target);
         this.win.setTimeout(() => {
           if (this.doc.body.classList.contains(BLOCK_MENU_OPEN_CLASS)) {
             this.hide();
             return;
           }
-          if (this.view.hasFocus || (target && this.view.dom.contains(target))) {
+          if (this.view.hasFocus || inside) {
             this.maybeShow();
           }
         }, 0);
       };
       onKeyUp = (e: KeyboardEvent) => {
-        if (e.key === "Escape") return this.hide();
-        // Follow the real selection: covers Shift+arrows, Cmd+A, etc.
-        if (!this.view.state.selection.main.empty) return this.maybeShow();
+        if (e.key === "Escape") {
+          // The link card closed on this Escape's keydown and handed the
+          // selection back: the toolbar returns over it.
+          if (RESHOW_TOOLBAR_AFTER_ESC.delete(this.view)) {
+            this.scheduleShow(0);
+            return;
+          }
+          return this.hide();
+        }
+        // Follow the real selection: covers Shift+arrows, Cmd+A, etc. A
+        // selection still growing under held Shift+arrows waits until the
+        // keys settle, so the toolbar does not chase every step; one that
+        // has not moved since the last show (a toggled format, say)
+        // refreshes at once.
+        if (!this.view.state.selection.main.empty) {
+          const sel = this.view.state.selection.main;
+          const moved =
+            !this.lastShown || this.lastShown.from !== sel.from || this.lastShown.to !== sel.to;
+          return moved ? this.scheduleShow(150) : this.maybeShow();
+        }
         const navigation = new Set([
           "Tab",
           "Enter",
@@ -16025,20 +24200,58 @@ function makeToolbarPlugin(plugin: NotionFlowPlugin) {
       onMouseDown = (e: MouseEvent) => {
         const target = e.target as HTMLElement | null;
         if (target && this.toolbar.contains(target)) return;
+        // The overflow menu belongs to the toolbar: a click in it is not
+        // a click elsewhere.
+        if (isBlockMenuTarget(target)) return;
         this.hide();
       };
       onBlockMenuOpen = () => this.hide();
+      // Capture phase: the editor's own contextmenu handlers stop
+      // propagation before the document sees the bubbling event.
+      onContextMenu = (e: MouseEvent) => {
+        const target = e.target as Node | null;
+        if (target && this.toolbar.contains(target)) return;
+        this.hide();
+      };
       hideIfFocusOutside = () => {
         const active = this.doc.activeElement;
-        if (active && (this.toolbar.contains(active) || this.view.dom.contains(active))) return;
+        if (
+          active &&
+          (this.toolbar.contains(active) ||
+            (this.view.dom.contains(active) && !this.focusInNestedEditor()))
+        ) {
+          return;
+        }
         this.hide();
       };
       onBlur = () => this.win.setTimeout(this.hideIfFocusOutside, 0);
       onToolbarFocusOut = () => this.win.setTimeout(this.hideIfFocusOutside, 0);
+      // A scroll used to hide the toolbar outright. But the editor scrolls
+      // for reasons that have nothing to do with the selection — a block
+      // opening for editing under the pointer shifts the text by a few
+      // pixels, and CodeMirror scrolls the caret into view — so selecting a
+      // word in a Callout that was not already open showed the toolbar and
+      // took it away again five milliseconds later. The toolbar is anchored
+      // to the selection: follow it, and let the handlers that watch the
+      // selection decide when there is nothing left to show. Scrolled far
+      // enough that the selection leaves the pane, it goes.
       onScroll = (e: Event) => {
         const t = e.target as Node | null;
         if (t && this.toolbar.contains(t)) return;
-        this.hide();
+        if (this.toolbar.style.display === "none") return;
+        const rect = this.selRect();
+        const pane = this.view.dom
+          .closest(".workspace-leaf-content")
+          ?.getBoundingClientRect();
+        if (
+          rect &&
+          pane &&
+          (rect.bottom < pane.top || rect.top > pane.bottom)
+        ) {
+          this.hide();
+          return;
+        }
+        this.schedulePosition();
       };
       positionFrame: number | null = null;
       schedulePosition = () => {
@@ -16049,6 +24262,36 @@ function makeToolbarPlugin(plugin: NotionFlowPlugin) {
         });
       };
       onResize = () => this.schedulePosition();
+      /** The one pending re-show after a toolbar action; scheduling again
+       *  replaces it, and hide()/destroy() drop it. */
+      showTimer: number | null = null;
+      scheduleShow = (delay = 0) => {
+        if (this.showTimer != null) this.win.clearTimeout(this.showTimer);
+        this.showTimer = this.win.setTimeout(() => {
+          this.showTimer = null;
+          this.maybeShow();
+        }, delay);
+      };
+      /** The selection the toolbar was last shown for. */
+      lastShown: { from: number; to: number } | null = null;
+      /** Buttons whose tooltip names a hotkey; the plugin's own are
+       *  re-read on every show so a rebind is reflected without a reload. */
+      hinted: { el: HTMLElement; label: string; shortcut: { id: string; fallback: string | null } }[] = [];
+      /** Tooltips name the chord Obsidian really has for each command, and
+       *  aria-keyshortcuts announces that same chord — or neither does. */
+      refreshHints(pluginOnly = false) {
+        for (const { el, label, shortcut } of this.hinted) {
+          if (pluginOnly && !shortcut.id.startsWith("notion-flow:")) continue;
+          const bound = commandHotkey(plugin.app, shortcut.id, shortcut.fallback);
+          const hint = commandShortcut(plugin.app, shortcut.id, shortcut.fallback);
+          el.setAttribute("aria-label", hint ? `${label} · ${hint}` : label);
+          if (bound?.key) {
+            el.setAttribute("aria-keyshortcuts", ariaKeyshortcuts([...bound.modifiers, bound.key].join("+")));
+          } else {
+            el.removeAttribute("aria-keyshortcuts");
+          }
+        }
+      }
       onToolbarKeyDown = (e: KeyboardEvent) => {
         if (e.key === "Escape") {
           e.preventDefault();
@@ -16091,6 +24334,7 @@ function makeToolbarPlugin(plugin: NotionFlowPlugin) {
       insertColBtn!: HTMLButtonElement;
       deleteRowBtn!: HTMLButtonElement;
       deleteColBtn!: HTMLButtonElement;
+      moreBtn!: HTMLButtonElement;
       alignBtns: Partial<Record<ColumnAlign, HTMLButtonElement>> = {};
 
       constructor(view: EditorView) {
@@ -16111,7 +24355,12 @@ function makeToolbarPlugin(plugin: NotionFlowPlugin) {
         this.palRow.setAttribute("role", "group");
         this.palRow.style.display = "none";
 
-        const mkBtn = (parent: HTMLElement, icon: string, label: string) => {
+        const mkBtn = (
+          parent: HTMLElement,
+          icon: string,
+          label: string,
+          shortcut?: { id: string; fallback: string | null }
+        ) => {
           const btn = parent.createEl("button", {
             cls: "nf-toolbar-btn",
             attr: {
@@ -16121,6 +24370,7 @@ function makeToolbarPlugin(plugin: NotionFlowPlugin) {
             },
           });
           setIcon(btn, icon);
+          if (shortcut) this.hinted.push({ el: btn, label, shortcut });
           return btn;
         };
         const onPress = (btn: HTMLButtonElement, run: () => void) => {
@@ -16135,10 +24385,10 @@ function makeToolbarPlugin(plugin: NotionFlowPlugin) {
         const mkSep = (parent = this.mainRow) => parent.createDiv({ cls: "nf-toolbar-sep" });
 
         for (const action of PRIMARY_TOOLBAR_ACTIONS) {
-          const btn = mkBtn(this.mainRow, action.icon, action.tooltip);
+          const btn = mkBtn(this.mainRow, action.icon, action.tooltip, action.shortcut);
           onPress(btn, () => {
             action.run(this.view);
-            this.win.setTimeout(() => this.maybeShow(), 0);
+            this.scheduleShow();
           });
           this.buttons.push({ el: btn, action });
         }
@@ -16147,36 +24397,66 @@ function makeToolbarPlugin(plugin: NotionFlowPlugin) {
         // Text color + highlight color open palettes.
         this.colorBtn = mkBtn(this.mainRow, "baseline", t("Text color"));
         onPress(this.colorBtn, () => this.togglePalette("color"));
-        this.bgBtn = mkBtn(this.mainRow, "highlighter", t("Highlight color"));
+        this.bgBtn = mkBtn(this.mainRow, "highlighter", t("Highlight color"), {
+          id: "notion-flow:apply-last-highlight-color",
+          fallback: "Mod+Shift+H",
+        });
         onPress(this.bgBtn, () => this.togglePalette("bg"));
+        // styles.css paints the run's colour as a bar under these two
+        // icons (--nf-current-color), which sets them apart from a lit Bold.
+        this.colorBtn.addClass("nf-color-btn");
+        this.bgBtn.addClass("nf-color-btn");
         mkSep(this.mainRow);
 
         for (const action of SECONDARY_TOOLBAR_ACTIONS) {
-          const btn = mkBtn(this.mainRow, action.icon, action.tooltip);
+          const btn = mkBtn(this.mainRow, action.icon, action.tooltip, action.shortcut);
           onPress(btn, () => {
             action.run(this.view);
-            this.win.setTimeout(() => this.maybeShow(), 0);
+            this.scheduleShow();
           });
           this.buttons.push({ el: btn, action });
         }
+
+        // Link — plugin-bound (the popover needs the operation scope and
+        // the workspace to open note links), so it lives here rather than
+        // in the module-level action tables. Lit while the selection sits
+        // in an inline link or a wikilink, whose card then edits it.
+        const linkAction: ToolbarAction = {
+          icon: "link",
+          tooltip: t("Link"),
+          isActive: (state) => enclosingLinkOnLine(state) != null || enclosingWikiLinkOnLine(state) != null,
+          run: (v) => openLinkPopover(v, plugin),
+          disabledInCode: true,
+          shortcut: { id: "editor:insert-link", fallback: "Mod+K" },
+        };
+        const linkBtn = mkBtn(this.mainRow, linkAction.icon, linkAction.tooltip, linkAction.shortcut);
+        onPress(linkBtn, () => {
+          linkAction.run(this.view);
+          this.scheduleShow();
+        });
+        this.buttons.push({ el: linkBtn, action: linkAction });
 
         // Comment on the selection — plugin-bound (the modal needs App),
         // so it lives outside the module-level action tables.
         const commentAction: ToolbarAction = {
           icon: "message-square-plus",
           tooltip: t("Add comment"),
-          run: (v) => startAddComment(plugin, v),
+          run: (v) => plugin.comments.add(v),
           disabledInCode: true,
           requiresCommenting: true,
+          shortcut: { id: "notion-flow:add-comment", fallback: "Mod+Shift+M" },
         };
-        const commentBtn = mkBtn(this.mainRow, commentAction.icon, commentAction.tooltip);
+        const commentBtn = mkBtn(this.mainRow, commentAction.icon, commentAction.tooltip, commentAction.shortcut);
         onPress(commentBtn, () => commentAction.run(this.view));
         this.buttons.push({ el: commentBtn, action: commentAction });
 
-        const clearBtn = mkBtn(this.mainRow, "remove-formatting", t("Clear formatting"));
+        const clearBtn = mkBtn(this.mainRow, "remove-formatting", t("Clear formatting"), {
+          id: "notion-flow:clear-formatting",
+          fallback: "Mod+\\",
+        });
         onPress(clearBtn, () => {
           clearInlineFormatting(this.view);
-          this.win.setTimeout(() => this.maybeShow(), 0);
+          this.scheduleShow();
         });
 
         // A dedicated table row stays compact and discoverable. It appears
@@ -16239,7 +24519,9 @@ function makeToolbarPlugin(plugin: NotionFlowPlugin) {
         );
         mkSep(this.tableRow);
 
-        this.deleteRowBtn = tableBtn("trash-2", "Delete row", () =>
+        // Two glyphs, not one trash can twice: which delete a button is
+        // should show before its tooltip does.
+        this.deleteRowBtn = tableBtn(TABLE_DELETE_ICONS.row, "Delete row", () =>
           this.applyTableEdit(
             (text, row) => tableDeleteRow(text, row),
             (row, col, _oldText, newText) => ({
@@ -16249,7 +24531,7 @@ function makeToolbarPlugin(plugin: NotionFlowPlugin) {
           )
         );
         this.deleteRowBtn.classList.add("is-danger");
-        this.deleteColBtn = tableBtn("columns-2", "Delete column", () =>
+        this.deleteColBtn = tableBtn(TABLE_DELETE_ICONS.column, "Delete column", () =>
           this.applyTableEdit(
             (text, _row, col) => tableDeleteColumn(text, col),
             (row, col, _oldText, newText) => ({
@@ -16262,14 +24544,23 @@ function makeToolbarPlugin(plugin: NotionFlowPlugin) {
           )
         );
         this.deleteColBtn.classList.add("is-danger");
+        mkSep(this.tableRow);
+        this.moreBtn = tableBtn("more-horizontal", "More table actions", () =>
+          this.openTableOverflow()
+        );
+        this.moreBtn.setAttribute("aria-haspopup", "true");
+        this.moreBtn.setAttribute("aria-expanded", "false");
 
         for (const btn of [this.colorBtn, this.bgBtn, this.cellBtn, this.tblBtn]) {
           btn.setAttribute("aria-expanded", "false");
           btn.setAttribute("aria-haspopup", "true");
         }
 
+        this.refreshHints();
+        TOOLBAR_HANDLES.set(view, this.handle);
         this.doc.addEventListener("mouseup", this.onMouseUp);
         this.doc.addEventListener("mousedown", this.onMouseDown);
+        this.doc.addEventListener("contextmenu", this.onContextMenu, true);
         this.doc.addEventListener(BLOCK_MENU_OPEN_EVENT, this.onBlockMenuOpen);
         this.doc.addEventListener("scroll", this.onScroll, true);
         this.win.addEventListener("resize", this.onResize);
@@ -16278,6 +24569,23 @@ function makeToolbarPlugin(plugin: NotionFlowPlugin) {
         view.dom.addEventListener("keydown", this.onEditorKeyDown);
         view.dom.addEventListener("keyup", this.onKeyUp);
         view.contentDOM.addEventListener("blur", this.onBlur);
+        // A Live Preview table cell's editor is built by the click that
+        // opens it, after that click's mouseup has fired, so onMouseUp never
+        // ran for it and the table row showed only on a second click. Show
+        // it once the cell has settled with focus. The cell test runs in
+        // the frame: at construction the editor may not be in the cell yet.
+        this.win.requestAnimationFrame(() =>
+          guard("toolbar cell show", () => {}, () => {
+            if (this.view.dom.closest("td, th") && this.view.hasFocus) this.scheduleShow(0);
+          })
+        );
+      }
+
+      /** Focus sits in an editor nested inside this one (a table cell, a
+       *  column): that editor's own toolbar serves it, not this one. */
+      focusInNestedEditor(): boolean {
+        const content = this.doc.activeElement?.closest(".cm-content");
+        return !!content && content !== this.view.contentDOM && this.view.dom.contains(content);
       }
 
       /** Current table and cell, for both raw Markdown and Live Preview's
@@ -16329,6 +24637,13 @@ function makeToolbarPlugin(plugin: NotionFlowPlugin) {
         if (!range) return null;
         const from = doc.line(range.startLine).from;
         const to = doc.line(range.endLine).to;
+        // Live Preview renders the table as a widget whose cells have their
+        // own editors; the outer caret on its source (right after /table,
+        // before focus moves into the cell) is not a cell to act on. Raw
+        // tables — Source mode, an open Callout — keep their target.
+        if (isLivePreviewEditor(this.view) && tableRenderedAsWidget(this.view, from, to)) {
+          return null;
+        }
         return {
           kind: "source",
           view: this.view,
@@ -16356,38 +24671,154 @@ function makeToolbarPlugin(plugin: NotionFlowPlugin) {
           newText: string
         ) => { row: number; col: number }
       ) {
-        const ctx = this.tableTarget();
+        this.applyTableEditTo(this.tableTarget(), edit, target);
+      }
+
+      /** The same edit against a table captured earlier: the overflow
+       *  menu snapshots its target when it opens, since by the time a row
+       *  is clicked the toolbar may be hidden and the cell no longer the
+       *  active one. */
+      applyTableEditTo(
+        ctx: TableToolbarTarget | null,
+        edit: (text: string, row: number, col: number) => string,
+        target?: (
+          row: number,
+          col: number,
+          oldText: string,
+          newText: string
+        ) => { row: number; col: number }
+      ) {
         if (!ctx) return;
         const out = edit(ctx.text, ctx.row, ctx.col);
         if (out === ctx.text) return;
-        let selection: { anchor: number } | undefined;
-        if (ctx.kind === "source") {
-          const requested = target?.(ctx.row, ctx.col, ctx.text, out) ?? {
-            row: ctx.row,
-            col: ctx.col,
-          };
-          const lines = out.split("\n");
-          const row = nearestTableDataRow(
-            out,
-            Math.max(0, Math.min(requested.row, lines.length - 1))
-          );
-          const cols = Math.max(1, parseRow(lines[row]).length);
-          const col = Math.max(0, Math.min(requested.col, cols - 1));
-          const before = lines.slice(0, row).reduce((sum, line) => sum + line.length + 1, 0);
-          selection = { anchor: ctx.from + before + cellStart(lines[row], col) };
-        }
+        const requested = target?.(ctx.row, ctx.col, ctx.text, out) ?? {
+          row: ctx.row,
+          col: ctx.col,
+        };
+        const anchor = tableCellAnchor(ctx.from, out, requested.row, requested.col);
         // Mouse activation keeps focus in the editor via preventDefault;
         // keyboard activation focuses a toolbar button. Restore that latter
         // path after the edit so typing/navigation never gets stranded on a
         // button that has just been hidden or rebuilt.
         const restoreEditorFocus = this.toolbar.contains(this.doc.activeElement);
         this.hide();
+        if (ctx.kind === "source") {
+          ctx.view.dispatch({
+            changes: { from: ctx.from, to: ctx.to, insert: out },
+            selection: { anchor },
+            userEvent: "input.table",
+          });
+          if (restoreEditorFocus) this.win.requestAnimationFrame(() => ctx.view.focus());
+          return;
+        }
+        // Live Preview: the edit rebuilds the table widget, and with it the
+        // cell editor this toolbar belongs to, so focus fell to <body> and
+        // typing went nowhere. Once the new widget is in, put the outer
+        // caret in the target cell: Obsidian opens that cell's editor, and
+        // its own toolbar shows itself (see the constructor). `this` is
+        // destroyed by then; only the outer view is touched.
         ctx.view.dispatch({
           changes: { from: ctx.from, to: ctx.to, insert: out },
-          selection,
           userEvent: "input.table",
         });
-        if (restoreEditorFocus) this.win.requestAnimationFrame(() => ctx.view.focus());
+        const outer = ctx.view;
+        this.win.requestAnimationFrame(() =>
+          guard("table edit focus", () => {}, () => {
+            if (!outer.dom.isConnected) return;
+            if (outer.state.doc.sliceString(ctx.from, ctx.from + out.length) !== out) return;
+            outer.dispatch({ selection: { anchor } });
+            outer.focus();
+          })
+        );
+      }
+
+      /** The rest of the table actions, behind the "…" button: the ones
+       *  the row has no room for. Built from a snapshot of the target so
+       *  the rows keep working after the toolbar hides. */
+      openTableOverflow() {
+        const ctx = this.tableTarget();
+        if (!ctx) return;
+        const menuHost = this.doc.body.createDiv({ cls: "nf-block-menu-anchor" });
+        const menu = trackMenu(
+          tagBlockMenu(new Menu()).setUseNativeMenu(false).setParentElement(menuHost),
+          () => {
+            menuHost.remove();
+            this.moreBtn.setAttribute("aria-expanded", "false");
+          }
+        );
+        this.moreBtn.setAttribute("aria-expanded", "true");
+        const startLine = ctx.view.state.doc.lineAt(ctx.from).number;
+        const endLine = ctx.view.state.doc.lineAt(ctx.to).number;
+        const lines = ctx.text.split("\n");
+        const d = lines.findIndex(isDelimRow);
+        const onBodyRow = !isDelimRow(lines[ctx.row] ?? "") && ctx.row > (d < 0 ? 0 : d);
+        const nCols = Math.max(1, ...lines.map((line) => parseRow(line).length));
+        const add = (
+          title: string,
+          icon: string,
+          run: () => void,
+          opts: { disabled?: boolean; warning?: boolean } = {}
+        ) =>
+          menu.addItem((item) => {
+            item.setTitle(t(title)).setIcon(icon);
+            if (opts.disabled) item.setDisabled(true);
+            if (opts.warning) item.setWarning(true);
+            if (!opts.disabled) item.onClick(run);
+          });
+        const addEdit = (
+          title: string,
+          icon: string,
+          recipe: TableEditRecipe,
+          opts: { disabled?: boolean; warning?: boolean } = {}
+        ) => add(title, icon, () => this.applyTableEditTo(ctx, recipe.edit, recipe.target), opts);
+
+        addEdit("Insert row above", "arrow-up-to-line", {
+          edit: (text, row) => tableInsertRow(text, row, "above"),
+          target: (row, col, oldText) => ({ row: tableInsertRowIndex(oldText, row, "above"), col }),
+        });
+        addEdit("Insert column left", "arrow-left-to-line", {
+          edit: (text, _row, col) => tableInsertColumn(text, col, "left"),
+          target: (row, col) => ({ row, col }),
+        });
+        const caption = tableCaptionMeta(ctx.view.state.doc, endLine);
+        add(caption?.caption ? "Edit caption" : "Add caption", "captions", () => {
+          this.hide();
+          editBlockCaption(ctx.view, "table", startLine);
+        });
+        menu.addSeparator();
+        for (const { kind, title, icon } of TABLE_STRUCTURE_ROWS) {
+          if (kind === "sort-asc") menu.addSeparator();
+          addEdit(title, icon, tableEditRecipe(kind), {
+            disabled: !tableStructureEditEnabled(ctx.text, ctx.row, ctx.col, kind),
+          });
+        }
+        menu.addSeparator();
+        addEdit(
+          "Delete row",
+          TABLE_DELETE_ICONS.row,
+          {
+            edit: (text, row) => tableDeleteRow(text, row),
+            target: (row, col, _oldText, newText) => ({ row: nearestTableDataRow(newText, row), col }),
+          },
+          { disabled: !onBodyRow, warning: onBodyRow }
+        );
+        addEdit(
+          "Delete column",
+          TABLE_DELETE_ICONS.column,
+          {
+            edit: (text, _row, col) => tableDeleteColumn(text, col),
+            target: (row, col, _oldText, newText) => ({
+              row,
+              col: Math.min(
+                col,
+                Math.max(0, ...newText.split("\n").map((line) => parseRow(line).length - 1))
+              ),
+            }),
+          },
+          { disabled: nCols <= 1, warning: nCols > 1 }
+        );
+        const rect = this.moreBtn.getBoundingClientRect();
+        menu.showAtPosition({ x: rect.left, y: rect.bottom + 4 }, this.doc);
       }
 
       applyTableColor(scope: "cell" | "table", color: string | null) {
@@ -16458,22 +24889,63 @@ function makeToolbarPlugin(plugin: NotionFlowPlugin) {
             sw.style.backgroundColor = paletteTint(name, 0.35);
             press(sw, () => this.applyTableColor(scope, name));
           }
+          // Remove is an action, never a state: no ring when nothing is set.
           const off = this.palRow.createEl("button", {
             cls: "nf-swatch nf-swatch-off",
             attr: {
               "aria-label": t("Remove color"),
-              "aria-pressed": String(current == null),
               "data-tooltip-position": "top",
               type: "button",
             },
           });
-          off.classList.toggle("is-active", current == null);
           setIcon(off, "ban");
           press(off, () => this.applyTableColor(scope, null));
           return;
         }
 
         const isText = this.palMode === "color";
+        const kind = isText ? "color" : "bg";
+        const current = currentInlineColor(this.view.state, kind);
+        const pressed = (sw: HTMLButtonElement, active: boolean) => {
+          sw.classList.toggle("is-active", active);
+          sw.setAttribute("aria-pressed", String(active));
+        };
+        // A swatch's face: a lettered ink for text colors, and for
+        // highlights the same letter on the tint the mark will paint, so
+        // the swatch shows what the words will look like.
+        const paintSwatch = (sw: HTMLButtonElement, name: PaletteColor) => {
+          sw.setText("A");
+          if (isText) {
+            sw.style.color = TEXT_COLORS[PALETTE_COLORS.indexOf(name)];
+          } else {
+            sw.style.color = "var(--text-normal)";
+            sw.style.backgroundColor = paletteTint(name, 0.35);
+          }
+        };
+        const last = paletteChoice(
+          isText ? plugin.settings.lastTextColor : plugin.settings.lastHighlightColor,
+          kind
+        );
+        if (last) {
+          const lastLabel = last === "default" ? t("Default highlight (==)") : t(COLOR_LABELS[last]);
+          const sw = this.palRow.createEl("button", {
+            cls: "nf-swatch nf-swatch-last",
+            attr: {
+              "aria-label": t("Last used: {color}").replace("{color}", lastLabel),
+              "data-tooltip-position": "top",
+              type: "button",
+            },
+          });
+          if (last === "default") sw.classList.add("nf-swatch-default");
+          else paintSwatch(sw, last);
+          // A shortcut, not a state: only the palette's own entry is marked
+          // as current, and a separator sets the chip apart from the row.
+          press(sw, () => {
+            plugin.applyLastColor(this.view, kind);
+            this.scheduleShow();
+          });
+          this.palRow.createDiv({ cls: "nf-toolbar-sep" });
+        }
         if (!isText) {
           // Default markdown highlight (==) first.
           const def = this.palRow.createEl("button", {
@@ -16484,15 +24956,11 @@ function makeToolbarPlugin(plugin: NotionFlowPlugin) {
               type: "button",
             },
           });
+          pressed(def, current === "default");
           press(def, () => {
-            // == around an HTML element cannot restyle it in Live Preview;
-            // stay in the HTML family with the theme's highlight color.
-            if (selectionTouchesHtmlPair(this.view.state)) {
-              applyHighlightColor(this.view, "var(--text-highlight-bg)");
-            } else {
-              toggleWrap(this.view, "==");
-            }
-            this.win.setTimeout(() => this.maybeShow(), 0);
+            applyDefaultHighlight(this.view);
+            plugin.rememberColor("bg", "default");
+            this.scheduleShow();
           });
         }
         const colors = isText ? TEXT_COLORS : BG_COLORS;
@@ -16506,16 +24974,13 @@ function makeToolbarPlugin(plugin: NotionFlowPlugin) {
               type: "button",
             },
           });
-          if (isText) {
-            sw.setText("A");
-            sw.style.color = c;
-          } else {
-            sw.style.backgroundColor = c;
-          }
+          paintSwatch(sw, colorName);
+          pressed(sw, current === colorName);
           press(sw, () => {
             if (isText) applyTextColor(this.view, c);
             else applyHighlightColor(this.view, c);
-            this.win.setTimeout(() => this.maybeShow(), 0);
+            plugin.rememberColor(kind, colorName);
+            this.scheduleShow();
           });
         }
         const off = this.palRow.createEl("button", {
@@ -16526,14 +24991,13 @@ function makeToolbarPlugin(plugin: NotionFlowPlugin) {
             type: "button",
           },
         });
+        // No ring means no colour; Remove itself is never pressed.
+        pressed(off, false);
         setIcon(off, "ban");
         press(off, () => {
           if (isText) applyTextColor(this.view, null);
-          else {
-            applyHighlightColor(this.view, null);
-            if (getWrapState(this.view.state, "==") !== "none") toggleWrap(this.view, "==");
-          }
-          this.win.setTimeout(() => this.maybeShow(), 0);
+          else removeHighlight(this.view);
+          this.scheduleShow();
         });
       }
 
@@ -16560,29 +25024,78 @@ function makeToolbarPlugin(plugin: NotionFlowPlugin) {
       position() {
         const r = this.selRect();
         if (!r) return;
-        const pane = this.view.dom.closest(".workspace-leaf-content")?.getBoundingClientRect();
-        const paneLeft = Math.max(8, pane?.left ?? 8);
-        const paneRight = Math.min(
-          this.win.innerWidth - 8,
-          pane?.right ?? this.win.innerWidth - 8
+        // The note's own area: .view-content leaves out the view header
+        // (back/forward, title), which a toolbar near the top covered when
+        // it clamped to the whole leaf. Nested cell and column editors find
+        // the same area; their own scrollers are far too small.
+        const area =
+          this.view.dom.closest(".view-content") ??
+          this.view.dom.closest(".workspace-leaf-content");
+        const pane = toolbarPaneRect(
+          area?.getBoundingClientRect() ?? null,
+          this.win.innerWidth,
+          this.win.innerHeight
         );
-        const paneTop = Math.max(8, pane?.top ?? 8);
-        const paneBottom = Math.min(
-          this.win.innerHeight - 8,
-          pane?.bottom ?? this.win.innerHeight - 8
-        );
+        const paneLeft = pane.left + 8;
+        const paneRight = pane.right - 8;
+        const paneTop = pane.top + 8;
+        const paneBottom = pane.bottom - 8;
         this.toolbar.style.maxWidth = `${Math.max(1, paneRight - paneLeft)}px`;
         this.toolbar.style.maxHeight = `${Math.max(1, paneBottom - paneTop)}px`;
-        const rect = this.toolbar.getBoundingClientRect();
+        // A narrow pane has no room for the "Table" label beside the
+        // buttons; styles.css hides it under this class.
+        this.toolbar.classList.toggle("is-narrow", paneRight - paneLeft < 480);
+        // Layout boxes, not client rects: the entrance animation scales
+        // the toolbar for its first frames and would shrink a client rect.
+        const width = this.toolbar.offsetWidth;
+        const height = this.toolbar.offsetHeight;
         const centerX = (r.left + r.right) / 2;
-        let left = centerX - rect.width / 2;
-        const maxLeft = Math.max(paneLeft, paneRight - rect.width);
+        let left = centerX - width / 2;
+        const maxLeft = Math.max(paneLeft, paneRight - width);
         left = Math.max(paneLeft, Math.min(left, maxLeft));
-        const above = r.top - rect.height - 8;
+        const above = r.top - height - 8;
         const below = r.bottom + 8;
-        let top = above >= paneTop ? above : below;
-        const maxTop = Math.max(paneTop, paneBottom - rect.height);
+        const opensAbove = above >= paneTop;
+        let top = opensAbove ? above : below;
+        const maxTop = Math.max(paneTop, paneBottom - height);
         top = Math.max(paneTop, Math.min(top, maxTop));
+        let placement: "above" | "below" = opensAbove ? "above" : "below";
+        // A caret in a rendered table cell shows the table-only bar: it
+        // floats above the whole table (or below it), aligned with the
+        // table's left edge, never over the rows a next click aims at.
+        // A table whose top is scrolled away and whose bottom is too keeps
+        // the placement beside the caret.
+        if (this.view.state.selection.main.empty && this.tableTarget()?.kind === "widget") {
+          const tableEl = this.view.dom.closest("table");
+          const table = tableEl?.getBoundingClientRect();
+          if (tableEl && table && table.height > 0) {
+            // Vertically the table's widget, which also holds Obsidian's
+            // column grips above the table and its add-row bar below: the
+            // bar must not cover those either.
+            const box = tableEl.closest(".cm-table-widget")?.getBoundingClientRect();
+            const spot = tableToolbarTop({
+              tableTop: Math.min(table.top, box?.height ? box.top : table.top),
+              tableBottom: Math.max(table.bottom, box?.height ? box.bottom : table.bottom),
+              height,
+              paneTop,
+              paneBottom,
+              fallback: { top, placement },
+            });
+            top = spot.top;
+            placement = spot.placement;
+            if (spot.atTable) {
+              left = tableToolbarLeft({
+                tableLeft: table.left,
+                width,
+                paneLeft: pane.left,
+                paneRight: pane.right,
+              });
+            }
+          }
+        }
+        // styles.css picks the entrance keyframe from this before the
+        // first visible frame; only the exact value "below" flips it.
+        this.toolbar.setAttribute("data-placement", placement);
         this.toolbar.style.left = `${left}px`;
         this.toolbar.style.top = `${top}px`;
       }
@@ -16601,8 +25114,10 @@ function makeToolbarPlugin(plugin: NotionFlowPlugin) {
       }
 
       maybeShow() {
+        if (!this.toolbar.isConnected) return;
         if (!plugin.settings.floatingToolbar) return this.hide();
         if (this.doc.body.classList.contains(BLOCK_MENU_OPEN_CLASS)) return this.hide();
+        if (this.focusInNestedEditor()) return this.hide();
         const sel = this.view.state.selection.main;
         const target = this.tableTarget();
         if (sel.empty && !target) return this.hide();
@@ -16619,14 +25134,29 @@ function makeToolbarPlugin(plugin: NotionFlowPlugin) {
           }
           (el as HTMLButtonElement).disabled = Boolean(action.disabledInCode) && inCode;
           if (!action.marker && !action.isActive) continue;
+          // Across lines an inline format (the marker actions, which
+          // format line by line) is lit when every line's piece has it, as
+          // after formatting two paragraphs. The link card is not.
+          const isActive =
+            action.isActive ??
+            ((s: EditorState) => getWrapState(s, action.marker!, action.endMarker) !== "none");
           const active =
             !(el as HTMLButtonElement).disabled &&
-            (action.isActive
-              ? action.isActive(this.view.state)
-              : getWrapState(this.view.state, action.marker!, action.endMarker) !== "none");
+            (action.marker ? segmentsActive(this.view.state, isActive) : isActive(this.view.state));
           el.classList.toggle("is-active", active);
           el.setAttribute("aria-pressed", String(active));
         }
+        // The colour buttons light up inside a colour run and carry the
+        // run's colour for the bar styles.css paints under the icon.
+        for (const kind of ["color", "bg"] as const) {
+          const btn = kind === "color" ? this.colorBtn : this.bgBtn;
+          const current = sel.empty ? null : currentInlineColor(this.view.state, kind);
+          btn.classList.toggle("is-active", current != null);
+          const css = currentColorCss(current, kind);
+          if (css) btn.style.setProperty("--nf-current-color", css);
+          else btn.style.removeProperty("--nf-current-color");
+        }
+        this.refreshHints(true);
         if (target) {
           const lines = target.text.split("\n");
           const delimiter = lines.findIndex(isDelimRow);
@@ -16651,10 +25181,16 @@ function makeToolbarPlugin(plugin: NotionFlowPlugin) {
           this.buildPalette();
         }
         this.toolbar.style.display = "flex";
+        this.lastShown = { from: sel.from, to: sel.to };
         this.position();
       }
 
       hide() {
+        this.lastShown = null;
+        if (this.showTimer != null) {
+          this.win.clearTimeout(this.showTimer);
+          this.showTimer = null;
+        }
         this.toolbar.style.display = "none";
         this.palMode = "none";
         this.palRow.style.display = "none";
@@ -16675,17 +25211,59 @@ function makeToolbarPlugin(plugin: NotionFlowPlugin) {
         else if (update.geometryChanged && this.toolbar.style.display !== "none") {
           this.schedulePosition();
         }
+        // A text selection collapsed by anything other than a click or a
+        // key (a command, a document replaced with setValue + setCursor)
+        // leaves nothing to format: the bar would linger over the next line
+        // and swallow a click. A table row stays; its own handlers decide.
+        if (
+          update.selectionSet &&
+          this.view.state.selection.main.empty &&
+          this.toolbar.style.display !== "none" &&
+          this.tableRow.style.display === "none"
+        ) {
+          this.hide();
+        }
+        // A table cell's editor gaining focus (a click, a table action
+        // moving the caret into its cell) brings the table row up.
+        if (update.focusChanged && this.view.hasFocus && this.view.dom.closest("td, th")) {
+          this.scheduleShow(0);
+        }
+      }
+
+      /** What openLinkPopover and the colour commands reach this by. */
+      handle: ToolbarHandle = {
+        show: () => this.maybeShow(),
+        openPalette: (mode) => this.openPalette(mode),
+      };
+
+      /** The toolbar over the selection with a colour row open and its
+       *  first swatch focused, for the "Text color…" and "Highlight
+       *  color…" commands. False when there is nothing to colour. */
+      openPalette(mode: "color" | "bg"): boolean {
+        if (this.view.state.selection.main.empty) return false;
+        this.maybeShow();
+        if (this.toolbar.style.display === "none" || this.mainRow.style.display === "none") return false;
+        if (this.palMode !== mode) this.togglePalette(mode);
+        const swatch = this.palRow.querySelector<HTMLButtonElement>("button:not(:disabled)");
+        swatch?.focus();
+        return swatch != null;
       }
 
       destroy() {
+        if (TOOLBAR_HANDLES.get(this.view) === this.handle) TOOLBAR_HANDLES.delete(this.view);
         this.doc.removeEventListener("mouseup", this.onMouseUp);
         this.doc.removeEventListener("mousedown", this.onMouseDown);
+        this.doc.removeEventListener("contextmenu", this.onContextMenu, true);
         this.doc.removeEventListener(BLOCK_MENU_OPEN_EVENT, this.onBlockMenuOpen);
         this.doc.removeEventListener("scroll", this.onScroll, true);
         this.win.removeEventListener("resize", this.onResize);
         this.toolbar.removeEventListener("keydown", this.onToolbarKeyDown);
         this.toolbar.removeEventListener("focusout", this.onToolbarFocusOut);
         if (this.positionFrame != null) this.win.cancelAnimationFrame(this.positionFrame);
+        if (this.showTimer != null) {
+          this.win.clearTimeout(this.showTimer);
+          this.showTimer = null;
+        }
         this.view.dom.removeEventListener("keydown", this.onEditorKeyDown);
         this.view.dom.removeEventListener("keyup", this.onKeyUp);
         this.view.contentDOM.removeEventListener("blur", this.onBlur);
@@ -16708,10 +25286,16 @@ interface SlashCommand {
   desc?: string;
   /** Syntax hint shown faintly on the right of the menu row. */
   hint?: string;
+  /** Pinyin (full and initials) of the Chinese name, so it can be typed
+   *  without switching input methods: "bg" finds 表格. */
+  pinyin?: string;
   /** Prefix applied to the current line (mutually exclusive with insert). */
   linePrefix?: string;
   /** Block text inserted at the cursor; "‸" marks the final cursor spot. */
   insert?: string;
+  /** Text computed at the moment of insertion (today's date), taking the
+   *  place of `insert`. */
+  resolve?: (formats: SlashDateFormats) => string;
   /** Block-level insert: moves to its own fresh line when triggered mid-line. */
   block?: boolean;
   /** Won't render directly under a text line (tables, dividers): keep a
@@ -16725,33 +25309,640 @@ interface SlashCommand {
   /** Quote-style block that would absorb the following line as lazy
    *  continuation: keep a blank line below. */
   sealBelow?: boolean;
+  /** The section the unfiltered menu lists it under (built-ins all say). */
+  group?: SlashGroup;
+  /** Listed only for a query that matches it (and among recents). */
+  queryOnly?: boolean;
+  /** Never offered in a visual column editor's completion: it acts on the
+   *  note itself (a TOC reads the note's headings, a template writes into
+   *  the active editor). */
+  mainOnly?: boolean;
+  /** Entries selectSuggestion runs itself instead of inserting text. */
+  kind?: "toc" | "template" | "text-color" | "bg-color";
+  /** The palette colour a text-color / bg-color entry gives the block. */
+  color?: PaletteColor;
+  /** A template row's file (null: the core picker), from slash-templates. */
+  templateFile?: TFile | null;
+  /** A query must match at this tier or above to list the entry. */
+  minTier?: number;
+}
+
+/** The sections of the unfiltered slash menu, in the order it lists them. */
+type SlashGroup = "basic" | "list" | "container" | "media" | "advanced" | "date";
+export const SLASH_GROUP_ORDER: readonly SlashGroup[] = ["basic", "list", "container", "media", "advanced", "date"];
+const SLASH_GROUP_LABELS: Record<SlashGroup, string> = {
+  basic: t("Basic blocks"),
+  list: t("Lists"),
+  container: t("Callouts & toggles"),
+  media: t("Media & tables"),
+  advanced: t("Advanced"),
+  date: t("Dates"),
+};
+/** How many recents the unfiltered menu leads with (SLASH_RECENT_CAP are kept). */
+const SLASH_RECENT_SHOWN = 3;
+
+/** The date and time formats the slash date entries write with. */
+type SlashDateFormats = Pick<NotionFlowSettings, "dateFormat" | "timeFormat">;
+
+/** Obsidian's bundled moment, read off the module namespace as a plain
+ *  record so the node test bundle (whose stub has no moment) still builds
+ *  without the bundler resolving the missing export. */
+type MomentLike = () => { add(n: number, unit: "day"): { format(f: string): string } };
+const obsidianExports: Record<string, unknown> = obsidianApi as unknown as Record<string, unknown>;
+const obsidianMoment = obsidianExports["moment"] as MomentLike | undefined;
+
+/**
+ * Now, `dayOffset` days away, in a moment.js `format`. Without moment
+ * (the test bundle) the common tokens are filled from Date so the entry
+ * still produces a plausible value.
+ */
+export function formatSlashDate(format: string, dayOffset = 0): string {
+  if (typeof obsidianMoment === "function") {
+    return obsidianMoment().add(dayOffset, "day").format(format);
+  }
+  const d = new Date(Date.now() + dayOffset * 86_400_000);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const tokens: Record<string, string> = {
+    YYYY: String(d.getFullYear()),
+    MM: pad(d.getMonth() + 1),
+    DD: pad(d.getDate()),
+    HH: pad(d.getHours()),
+    mm: pad(d.getMinutes()),
+    ss: pad(d.getSeconds()),
+  };
+  return format.replace(/YYYY|MM|DD|HH|mm|ss/g, (token) => tokens[token] ?? token);
+}
+
+/** A slash entry writing today's date/time: the text is computed when
+ *  chosen, and the caret lands after it. */
+function dateEntry(
+  formats: SlashDateFormats,
+  which: "date" | "time" | "datetime",
+  dayOffset = 0
+): string {
+  const dateFormat = formats.dateFormat || DEFAULT_SETTINGS.dateFormat;
+  const timeFormat = formats.timeFormat || DEFAULT_SETTINGS.timeFormat;
+  const format =
+    which === "date" ? dateFormat : which === "time" ? timeFormat : `${dateFormat} ${timeFormat}`;
+  return formatSlashDate(format, dayOffset) + "‸";
 }
 
 // Keywords mix English and Chinese so either language filters the menu,
 // whatever UI language is active.
 export const SLASH_COMMANDS: SlashCommand[] = [
-  { id: "h1", name: t("Heading 1"), desc: t("Big section heading"), icon: "heading-1", keywords: "h1 title 标题 一级标题", hint: "#", linePrefix: "# " },
-  { id: "h2", name: t("Heading 2"), desc: t("Medium section heading"), icon: "heading-2", keywords: "h2 subtitle 标题 二级标题", hint: "##", linePrefix: "## " },
-  { id: "h3", name: t("Heading 3"), desc: t("Small section heading"), icon: "heading-3", keywords: "h3 标题 三级标题", hint: "###", linePrefix: "### " },
-  { id: "bullet", name: t("Bulleted list"), desc: t("Plain list with bullets"), icon: "list", keywords: "ul unordered 列表 无序列表", hint: "-", linePrefix: "- " },
-  { id: "number", name: t("Numbered list"), desc: t("List with numbering"), icon: "list-ordered", keywords: "ol ordered 列表 有序列表 编号", hint: "1.", linePrefix: "1. " },
-  { id: "todo", name: t("To-do list"), desc: t("Tasks with checkboxes"), icon: "check-square", keywords: "task checkbox 待办 任务 复选框", hint: "- [ ]", linePrefix: "- [ ] " },
-  { id: "quote", name: t("Quote"), desc: t("Quoted text with a bar"), icon: "quote", keywords: "blockquote 引用", hint: ">", linePrefix: "> " },
-  { id: "callout", name: t("Callout"), desc: t("Colored info box"), icon: "megaphone", keywords: "note info admonition 标注 提示", hint: "> [!note]", insert: "> [!note] ‸\n> ", block: true, blankAbove: true, sealBelow: true },
-  { id: "toggle", name: t("Toggle"), desc: t("Foldable block behind a triangle"), icon: "chevron-right", keywords: "fold collapse toggle 折叠 折叠块 收起 展开", hint: "▸", insert: buildToggleTemplate(), block: true, blankAbove: true, sealBelow: true },
-  { id: "toggle-callout", name: t("Foldable callout"), desc: t("Colored box that folds"), icon: "chevrons-down-up", keywords: "fold collapse callout 折叠 标注", hint: "> [!note]-", insert: "> [!note]- ‸\n> ", block: true, blankAbove: true, sealBelow: true },
-  { id: "cols2", name: t("Two columns"), desc: t("Blocks side by side"), icon: "columns-2", keywords: "columns cols layout 分栏 两栏 栏 布局 并排", hint: "[!nf-cols]", insert: buildColumnsTemplate(2), block: true, sealBelow: true },
-  { id: "cols3", name: t("Three columns"), desc: t("Blocks side by side"), icon: "columns-3", keywords: "columns cols layout 分栏 三栏 栏 布局 并排", hint: "[!nf-cols]", insert: buildColumnsTemplate(3), block: true, sealBelow: true },
-  { id: "code", name: t("Code block"), desc: t("Fenced code with highlighting"), icon: "code-2", keywords: "fence snippet 代码 代码块", hint: "```", insert: "```‸\n\n```", block: true },
-  { id: "table", name: t("Table"), desc: t("Rows and columns"), icon: "table", keywords: "grid 表格", hint: "3×3", insert: buildTableTemplate(3, 3), block: true, needsBlank: true },
-  { id: "divider", name: t("Divider"), desc: t("Horizontal rule"), icon: "minus", keywords: "hr rule separator 分割线 分隔线", hint: "---", insert: "---\n‸", block: true, needsBlank: true },
-  { id: "image", name: t("Image / embed"), desc: t("Embed an image or file"), icon: "image", keywords: "picture attach embed 图片 附件 嵌入", hint: "![[ ]]", insert: "![[‸]]" },
-  { id: "wikilink", name: t("Internal link"), desc: t("Link to another note"), icon: "link-2", keywords: "link internal note wiki 链接 内链 双链", hint: "[[ ]]", insert: "[[‸]]" },
+  { id: "text", group: "basic", name: t("Text"), desc: t("Plain paragraph"), icon: "pilcrow", keywords: "paragraph plain 正文 文本", pinyin: "zhengwen zw wenben wb", linePrefix: "" },
+  { id: "h1", group: "basic", name: t("Heading 1"), desc: t("Big section heading"), icon: "heading-1", keywords: "h1 title 标题 一级标题", pinyin: "yijibiaoti yjbt biaoti bt1", hint: "#", linePrefix: "# " },
+  { id: "h2", group: "basic", name: t("Heading 2"), desc: t("Medium section heading"), icon: "heading-2", keywords: "h2 subtitle 标题 二级标题", pinyin: "erjibiaoti ejbt biaoti bt2", hint: "##", linePrefix: "## " },
+  { id: "h3", group: "basic", name: t("Heading 3"), desc: t("Small section heading"), icon: "heading-3", keywords: "h3 标题 三级标题", pinyin: "sanjibiaoti sjbt biaoti bt3", hint: "###", linePrefix: "### " },
+  { id: "bullet", group: "list", name: t("Bulleted list"), desc: t("Plain list with bullets"), icon: "list", keywords: "ul unordered 列表 无序列表", pinyin: "wuxuliebiao wxlb", hint: "-", linePrefix: "- " },
+  { id: "number", group: "list", name: t("Numbered list"), desc: t("List with numbering"), icon: "list-ordered", keywords: "ol ordered 列表 有序列表 编号", pinyin: "youxuliebiao yxlb", hint: "1.", linePrefix: "1. " },
+  { id: "todo", group: "list", name: t("To-do list"), desc: t("Tasks with checkboxes"), icon: "check-square", keywords: "task checkbox 待办 任务 复选框", pinyin: "daibanliebiao dblb daiban db", hint: "- [ ]", linePrefix: "- [ ] " },
+  { id: "quote", group: "basic", name: t("Quote"), desc: t("Quoted text with a bar"), icon: "quote", keywords: "blockquote 引用", pinyin: "yinyong yy", hint: ">", linePrefix: "> " },
+  { id: "callout", group: "container", name: t("Callout"), desc: t("Colored info box"), icon: "megaphone", keywords: "note info admonition 标注", pinyin: "biaozhu bz", hint: "> [!note]", insert: "> [!note] ‸\n> ", block: true, blankAbove: true, sealBelow: true },
+  { id: "toggle", group: "container", name: t("Toggle"), desc: t("Foldable block behind a triangle"), icon: "chevron-right", keywords: "fold collapse toggle 折叠 折叠块 收起 展开", pinyin: "zhediekuai zdk zhedie zd", hint: "▸", insert: buildToggleTemplate(), block: true, blankAbove: true, sealBelow: true },
+  { id: "toggle-callout", group: "container", name: t("Foldable callout"), desc: t("Colored box that folds"), icon: "chevrons-down-up", keywords: "fold collapse callout 折叠 标注", pinyin: "kezhediebiaozhu kzdbz zhedie zd", hint: "> [!note]-", insert: "> [!note]- ‸\n> ", block: true, blankAbove: true, sealBelow: true },
+  { id: "cols2", group: "advanced", name: t("Two columns"), desc: t("Blocks side by side"), icon: "columns-2", keywords: "columns cols layout 分栏 两栏 栏 布局 并排", pinyin: "lianglan ll fenlan fl", hint: "[!nf-cols]", insert: buildColumnsTemplate(2), block: true, sealBelow: true },
+  { id: "cols3", group: "advanced", name: t("Three columns"), desc: t("Blocks side by side"), icon: "columns-3", keywords: "columns cols layout 分栏 三栏 栏 布局 并排", pinyin: "sanlan sl fenlan fl", hint: "[!nf-cols]", insert: buildColumnsTemplate(3), block: true, sealBelow: true },
+  { id: "code", group: "basic", name: t("Code block"), desc: t("Fenced code with highlighting"), icon: "code-2", keywords: "fence snippet 代码 代码块", pinyin: "daimakuai dmk daima dm", hint: "```", insert: "```‸\n\n```", block: true },
+  { id: "table", group: "media", name: t("Table"), desc: t("Pick rows and columns"), icon: "table", keywords: "grid 表格", pinyin: "biaoge bg", hint: "⊞", insert: buildTableTemplate(3, 3), block: true, needsBlank: true },
+  { id: "math", group: "advanced", name: t("Equation block"), desc: t("LaTeX on its own lines"), icon: "sigma", keywords: "equation latex tex math 公式 数学 方程", pinyin: "gongshikuai gsk gongshi gs", hint: "$$", insert: "$$\n‸\n$$", block: true, needsBlank: true },
+  { id: "inline-math", group: "advanced", name: t("Inline equation"), desc: t("LaTeX inside the text"), icon: "sigma", keywords: "inline equation latex math 行内公式 公式", pinyin: "hangneigongshi hngs", hint: "$ $", insert: "$‸$" },
+  { id: "mermaid", group: "advanced", name: t("Diagram"), desc: t("Mermaid"), icon: "git-branch", keywords: "mermaid diagram flowchart chart 流程图 图表", pinyin: "liuchengtu lct tubiao tb", hint: "```mermaid", insert: "```mermaid\nflowchart TD\n  ‸\n```", block: true },
+  { id: "divider", group: "basic", name: t("Divider"), desc: t("Horizontal rule"), icon: "minus", keywords: "hr rule separator 分割线 分隔线", pinyin: "fengexian fgx", hint: "---", insert: "---\n‸", block: true, needsBlank: true },
+  { id: "image", group: "media", name: t("Image / embed"), desc: t("Embed an image or file"), icon: "image", keywords: "picture attach embed 图片 附件 嵌入", pinyin: "tupian tp qianru qr", hint: "![[ ]]", insert: "![[‸]]" },
+  { id: "video", group: "media", name: t("Video"), desc: t("YouTube link"), icon: "video", keywords: "youtube video movie 视频", pinyin: "shipin sp", hint: "![]( )", insert: "![](‸)" },
+  { id: "wikilink", group: "basic", name: t("Internal link"), desc: t("Link to another note"), icon: "link-2", keywords: "link internal note wiki 链接 内链 双链", pinyin: "neibulianjie nblj lianjie lj", hint: "[[ ]]", insert: "[[‸]]" },
+  { id: "date", group: "date", name: t("Date"), desc: t("Today's date"), icon: "calendar", keywords: "today date 日期 今天", pinyin: "riqi rq jintian jt", hint: t("today"), resolve: (formats) => dateEntry(formats, "date") },
+  { id: "time", group: "date", name: t("Time"), desc: t("The current time"), icon: "clock", keywords: "time now clock 时间 现在", pinyin: "shijian sj", hint: t("now"), resolve: (formats) => dateEntry(formats, "time") },
+  { id: "datetime", group: "date", name: t("Date and time"), desc: t("Today's date with the time"), icon: "calendar-clock", keywords: "datetime timestamp now 日期 时间 日期时间", pinyin: "riqiheshijian rqhsj riqishijian rqsj", resolve: (formats) => dateEntry(formats, "datetime") },
+  { id: "tomorrow", group: "date", name: t("Tomorrow"), desc: t("Tomorrow's date"), icon: "calendar-plus", keywords: "tomorrow date 明天 日期", pinyin: "mingtian mt", resolve: (formats) => dateEntry(formats, "date", 1) },
+  { id: "yesterday", group: "date", name: t("Yesterday"), desc: t("Yesterday's date"), icon: "calendar-minus", keywords: "yesterday date 昨天 日期", pinyin: "zuotian zt", resolve: (formats) => dateEntry(formats, "date", -1) },
+  // A table of contents from the note's own headings (src/features/toc.ts).
+  { ...TOC_SLASH_ENTRY, kind: "toc", mainOnly: true },
 ];
+
+/** More words each Callout type answers to, in both languages. */
+const CALLOUT_SLASH_ALIASES: Record<string, string> = {
+  note: "笔记 biji bj", abstract: "summary tldr 摘要 zhaiyao zy", info: "信息 xinxi xx", todo: "待办 daiban db",
+  tip: "hint important 提示 tishi ts", success: "check done 成功 chenggong cg", question: "help faq 问题 wenti wt",
+  warning: "caution attention 警告 注意 jinggao jg", failure: "fail missing 失败 shibai sb",
+  danger: "error 危险 weixian wx", bug: "漏洞 loudong ld", example: "示例 例子 shili sl", quote: "cite 引用 yinyong yy",
+};
+
+/**
+ * One entry per Callout type ("/warning", "/提示"), written as that type.
+ * Query-only, so the unfiltered menu keeps the one generic Callout; listed
+ * after SLASH_COMMANDS, so "/callout" and "/标注" still lead with it (the
+ * ids tie at the id-prefix tier and the list order breaks the tie).
+ */
+export const CALLOUT_SLASH_COMMANDS: SlashCommand[] = CALLOUT_TYPES.map((entry) => ({
+  id: `callout-${entry.type}`,
+  name: t("Callout · {type}").replace("{type}", () => t(entry.label)),
+  desc: t("Colored info box"),
+  icon: entry.icon,
+  group: "container",
+  queryOnly: true,
+  keywords: `${entry.type} callout 标注 ${CALLOUT_SLASH_ALIASES[entry.type] ?? ""}`.trim(),
+  pinyin: "biaozhu bz",
+  hint: `> [!${entry.type}]`,
+  insert: `> [!${entry.type}] ‸\n> `,
+  block: true,
+  blankAbove: true,
+  sealBelow: true,
+}));
+
+/** Chinese names and pinyin of the palette colours, for the colour
+ *  entries' search. */
+const ZH_COLOR: Record<PaletteColor, string> = {
+  gray: "灰色", red: "红色", orange: "橙色", yellow: "黄色", green: "绿色",
+  cyan: "青色", blue: "蓝色", purple: "紫色", pink: "粉色",
+};
+const PY_COLOR: Record<PaletteColor, string> = {
+  gray: "huise hs", red: "hongse hs", orange: "chengse cs", yellow: "huangse hs", green: "lvse ls",
+  cyan: "qingse qs", blue: "lanse ls", purple: "zise zs", pink: "fense fs",
+};
+
+/**
+ * "/red", "/红色", "/hongse" colour the caret's block's text; "/red
+ * background", "/红色背景", "/bg red" its background. Query-only and for
+ * the note's own editor. The text entry is named colour first ("Red ·
+ * Text color"), so a bare colour name ranks it with — and, listed first,
+ * ahead of — "Red background".
+ */
+export const COLOR_SLASH_COMMANDS: SlashCommand[] = PALETTE_COLORS.flatMap((c): SlashCommand[] => [
+  {
+    id: `color-${c}`,
+    name: `${t(COLOR_LABEL_KEYS[c])} · ${t("Text color")}`,
+    icon: "baseline",
+    group: "basic",
+    queryOnly: true,
+    mainOnly: true,
+    kind: "text-color",
+    color: c,
+    keywords: `${c} color text ${ZH_COLOR[c]} ${ZH_COLOR[c][0]} 颜色 文字颜色`,
+    pinyin: PY_COLOR[c],
+  },
+  {
+    // Not "bg-…": an id prefix outranks everything, and "/bg" is the
+    // pinyin initials of 表格 (Table), which must keep leading it.
+    id: `background-${c}`,
+    name: t("{color} background").replace("{color}", () => t(COLOR_LABEL_KEYS[c])),
+    icon: "paint-bucket",
+    group: "basic",
+    queryOnly: true,
+    mainOnly: true,
+    kind: "bg-color",
+    color: c,
+    keywords: `${c} background bg ${c} ${ZH_COLOR[c]}背景 ${ZH_COLOR[c][0]}背景 背景`,
+    pinyin: `${PY_COLOR[c].split(" ")[0]}beijing`,
+  },
+]);
+
+/** The one pattern both slash menus open on: "/" at a line start, after
+ *  whitespace or ">", or after CJK text (whose prose has no spaces), the
+ *  fullwidth "／" too. The query may hold ONE inner space ("/red
+ *  background", "/bg red"); it never starts with one, and a second space
+ *  ends it. Ranges: CJK punctuation and kana, ideographs, fullwidth forms. */
+export const RE_SLASH_TRIGGER =
+  /(?:^|[\s>]|[　-ヿ一-鿿＀-￯])[/／]((?:[\w　-ヿ一-鿿＀-￯×*-]+(?: [\w　-ヿ一-鿿＀-￯×*-]*)?)?)$/;
+
+/** Every entry the main slash menu can list: the built-ins, the Callout
+ *  types, the colour entries and, given the app, the core Templates rows
+ *  (which offer nothing for an editor that is not the active one). */
+export function slashEntries(host: { app?: App }, editor?: Editor): SlashCommand[] {
+  const entries = [...SLASH_COMMANDS, ...CALLOUT_SLASH_COMMANDS, ...COLOR_SLASH_COMMANDS];
+  if (!host.app) return entries;
+  const templates = templateSlashEntries(host.app, editor).map(
+    (entry): SlashCommand => ({ ...entry, group: "advanced", kind: "template", mainOnly: true })
+  );
+  return [...entries, ...templates];
+}
+
+/**
+ * How the slash menu lays out `ranked` (searchSlashCommands' answer). An
+ * empty query leads with at most SLASH_RECENT_SHOWN recents under
+ * "Recent", then lists every other entry by section in SLASH_GROUP_ORDER,
+ * each section's first row carrying its label; query-only entries appear
+ * only among those recents. Inside a section the entries keep their order
+ * in `order` (the menu's own list), so a recent past the shown few goes
+ * back to its usual place. A typed query keeps the ranking as it is,
+ * without labels.
+ */
+export function slashMenuLayout(
+  ranked: readonly SlashCommand[],
+  recent: readonly string[],
+  query: string,
+  order: readonly SlashCommand[] = ranked
+): { commands: SlashCommand[]; labels: Map<SlashCommand, string> } {
+  const labels = new Map<SlashCommand, string>();
+  if (query) return { commands: [...ranked], labels };
+  const shown: SlashCommand[] = [];
+  for (const id of recent) {
+    if (shown.length >= SLASH_RECENT_SHOWN) break;
+    const command = ranked.find((candidate) => candidate.id === id);
+    // A colour entry acts on the block at hand; it is typed, never
+    // offered back as a recent.
+    if (command?.kind === "text-color" || command?.kind === "bg-color") continue;
+    if (command && !shown.includes(command)) shown.push(command);
+  }
+  const rank = (command: SlashCommand) => {
+    const index = SLASH_GROUP_ORDER.indexOf(command.group ?? "advanced");
+    return index < 0 ? SLASH_GROUP_ORDER.indexOf("advanced") : index;
+  };
+  const position = (command: SlashCommand) => {
+    const index = order.indexOf(command);
+    return index < 0 ? order.length : index;
+  };
+  const rest = ranked
+    .filter((command) => !shown.includes(command) && !command.queryOnly)
+    .sort((a, b) => rank(a) - rank(b) || position(a) - position(b));
+  if (shown.length) labels.set(shown[0], t("Recent"));
+  let group: SlashGroup | null = null;
+  for (const command of rest) {
+    const g = SLASH_GROUP_ORDER[rank(command)];
+    if (g === group) continue;
+    group = g;
+    labels.set(command, SLASH_GROUP_LABELS[g]);
+  }
+  return { commands: [...shown, ...rest], labels };
+}
+
+/** The TOC module's options for one note: the vault's indent unit and the
+ *  host's exact fence test. One object per call, handed to every TOC
+ *  function of that call so they agree on what is code. */
+export function tocOptionsFor(app: App | undefined, view: EditorView): TocOptions {
+  const unit = app?.vault ? vaultIndentUnit(app) : { width: 4, useTab: true };
+  const fences = cachedFences(view.state.doc);
+  return { indent: unit.useTab ? "\t" : " ".repeat(unit.width), skipLine: (n) => fenceAt(fences, n) != null };
+}
+
+/** findTocBlocks per document: documents are immutable, and the chip asks
+ *  on every caret move. */
+const tocBlockCache = new WeakMap<Text, TocBlock[]>();
+
+/** Whether quoted line `lineNo` belongs to a quote that opens with a Callout
+ *  header: one Live Preview draws as a widget while the caret is outside. */
+function insideTopLevelCallout(doc: Text, lineNo: number): boolean {
+  let n = lineNo;
+  while (n > 1 && quoteDepth(doc.line(n - 1).text) > 0) n--;
+  return quoteDepth(doc.line(n).text) > 0 && calloutHeaderAt(doc, n) != null;
+}
+
+/**
+ * The marker text of every TOC in `lines` (1-based, inclusive) whose line
+ * holds no selection range: what Live Preview draws as a chip. The range
+ * starts after the block's prefix ("> ", a list item's indentation), so the
+ * quote or list around it keeps its own rendering.
+ */
+export function tocChipRanges(
+  state: EditorState,
+  opts: TocOptions,
+  lines: { from: number; to: number } = { from: 1, to: state.doc.lines }
+): { from: number; to: number; markerLine: number }[] {
+  const doc = state.doc;
+  let blocks = tocBlockCache.get(doc);
+  if (!blocks) {
+    blocks = findTocBlocks(doc, opts);
+    tocBlockCache.set(doc, blocks);
+  }
+  const out: { from: number; to: number; markerLine: number }[] = [];
+  for (const block of blocks) {
+    if (block.markerLine < lines.from || block.markerLine > lines.to) continue;
+    // Inside a Callout, Obsidian's own widget draws the whole block (and
+    // hides the comment); a replacement inside it would split that widget.
+    if (block.prefix.includes(">") && insideTopLevelCallout(doc, block.markerLine)) continue;
+    const line = doc.line(block.markerLine);
+    const touched = state.selection.ranges.some((range) => range.from <= line.to && range.to >= line.from);
+    if (touched) continue;
+    out.push({ from: line.from + block.prefix.length, to: line.to, markerLine: block.markerLine });
+  }
+  return out;
+}
+
+/** The TOC marker at rest: "Table of contents" with a refresh button. A
+ *  click on the label puts the caret at the marker's end, which shows the
+ *  source; the button rewrites the list as the command does. */
+class TocChipWidget extends WidgetType {
+  constructor(private readonly plugin: NotionFlowPlugin) {
+    super();
+  }
+
+  eq(other: TocChipWidget) {
+    return other instanceof TocChipWidget;
+  }
+
+  toDOM(view: EditorView) {
+    const doc = view.dom.ownerDocument;
+    const chip = doc.createElement("span");
+    chip.className = "nf-toc-chip";
+    const icon = chip.appendChild(doc.createElement("span"));
+    icon.className = "nf-toc-chip-icon";
+    setIcon(icon, "list");
+    const label = chip.appendChild(doc.createElement("span"));
+    label.className = "nf-toc-chip-label";
+    label.textContent = t("Table of contents");
+    const refresh = chip.appendChild(doc.createElement("button"));
+    refresh.className = "nf-toc-chip-refresh";
+    refresh.type = "button";
+    refresh.setAttribute("aria-label", t("Refresh table of contents"));
+    setIcon(refresh, "refresh-cw");
+    // The chip handles its own pointer: CodeMirror would otherwise place
+    // the caret (and so reveal the source) on every press.
+    chip.addEventListener("mousedown", (evt) => {
+      evt.preventDefault();
+      evt.stopPropagation();
+    });
+    chip.addEventListener("click", (evt) => {
+      evt.preventDefault();
+      evt.stopPropagation();
+      guard("toc chip", () => undefined, () => {
+        if (refresh.contains(evt.target as Node)) {
+          const opts = tocOptionsFor(this.plugin.app, view);
+          applyTocRefresh(view, scanHeadings(view.state.doc, opts), opts);
+          return;
+        }
+        const pos = view.posAtDOM(chip);
+        view.dispatch({ selection: { anchor: view.state.doc.lineAt(pos).to }, scrollIntoView: true });
+        view.focus();
+      });
+    });
+    return chip;
+  }
+
+  ignoreEvent() {
+    return true;
+  }
+}
+
+/** Live Preview draws each resting `<!-- nf-toc -->` marker as a chip
+ *  (Reading view already hides the comment; Source mode keeps the text). */
+function makeTocChipPlugin(plugin: NotionFlowPlugin) {
+  return ViewPlugin.fromClass(
+    class TocChipView {
+      decorations: DecorationSet = Decoration.none;
+
+      constructor(view: EditorView) {
+        this.decorations = this.build(view);
+      }
+
+      update(update: ViewUpdate) {
+        // A switch between Live Preview and Source mode reconfigures the
+        // editor without touching the document or the selection.
+        const modeChanged =
+          update.transactions.some((tr) => tr.reconfigured) ||
+          update.startState.field(editorLivePreviewField, false) !== update.state.field(editorLivePreviewField, false);
+        if (update.docChanged || update.viewportChanged || update.selectionSet || modeChanged) {
+          this.decorations = this.build(update.view);
+        }
+      }
+
+      build(view: EditorView): DecorationSet {
+        return guard("toc chip decorations", () => Decoration.none, () => {
+          if (!isLivePreviewEditor(view) || view.visibleRanges.length === 0) return Decoration.none;
+          const doc = view.state.doc;
+          const first = doc.lineAt(view.visibleRanges[0].from).number;
+          const last = doc.lineAt(view.visibleRanges[view.visibleRanges.length - 1].to).number;
+          // Most notes have no TOC: look for the marker's word on screen
+          // before scanning the note for blocks.
+          let seen = false;
+          for (let n = first; n <= last && !seen; n++) seen = doc.line(n).text.includes("nf-toc");
+          if (!seen) return Decoration.none;
+          const chip = Decoration.replace({ widget: new TocChipWidget(plugin) });
+          const ranges = tocChipRanges(view.state, tocOptionsFor(plugin.app, view), { from: first, to: last });
+          return Decoration.set(ranges.filter((r) => r.to > r.from).map((r) => chip.range(r.from, r.to)));
+        });
+      }
+    },
+    { decorations: (value) => value.decorations }
+  );
+}
+
+/** A slash row's second line: what a date entry would write right now
+ *  (in the user's formats), else the entry's description. */
+export function slashRowDescription(cmd: SlashCommand, formats: SlashDateFormats): string {
+  if (cmd.resolve) return cmd.resolve(formats).replace("‸", "");
+  return cmd.desc ?? "";
+}
+
+/** Rendered rows and columns of a table, as the picker and the size
+ *  argument count them (1..10). */
+type SlashTableSize = { rows: number; cols: number };
+
+/** Where the table picker opens: beside `rect` when a menu row was
+ *  clicked, else at the point (x, y) in `doc`. */
+type TablePickerAnchor = { doc: Document; rect: DOMRect | null; x: number; y: number };
+
+/**
+ * Split a trailing "4x6" (columns × rows; also "×" and "*") off a slash
+ * query: "table4x6" → { query: "table", size: { cols: 4, rows: 6 } }. With
+ * nothing but the size typed, the query becomes "table" so the menu leads
+ * with the entry the size is for. Sizes clamp to 1..10, like the picker.
+ */
+export function parseSlashTableSize(query: string): { query: string; size: SlashTableSize | null } {
+  const m = query.match(/(\d{1,2})[x×*](\d{1,2})$/i);
+  if (!m) return { query, size: null };
+  const clamp = (n: number) => Math.max(1, Math.min(10, n));
+  const rest = query.slice(0, -m[0].length);
+  return {
+    query: rest || "table",
+    size: { cols: clamp(Number(m[1])), rows: clamp(Number(m[2])) },
+  };
+}
+
+/** How many recently used commands the empty slash menu leads with. */
+const SLASH_RECENT_CAP = 6;
+
+/**
+ * Front `id` in the persisted recents and save them. Written to data.json
+ * (persistSettings) rather than through saveSettings: recency is menu
+ * state, and re-evaluating every editor's extensions after each slash pick
+ * would be both wasted work and a visible hiccup in the editor just
+ * written to.
+ */
+function rememberSlashCommand(plugin: SlashHost, id: string): void {
+  const recent = plugin.settings.slashRecent ?? [];
+  plugin.settings.slashRecent = [id, ...recent.filter((r) => r !== id)].slice(0, SLASH_RECENT_CAP);
+  if (plugin.persistSettings) void plugin.persistSettings();
+  else void plugin.saveData?.(plugin.settings);
+}
+
+/** `pos` pulled back to its own line's end. Editor positions convert to
+ *  offsets as line start + ch, so a stale `ch` past the end would reach
+ *  into the next line; a slash pick must never write across a break. */
+function clampToLine(editor: Editor, pos: EditorPosition): EditorPosition {
+  let length = pos.ch;
+  try {
+    length = (editor.getLine(pos.line) ?? "").length;
+  } catch {
+    /* keep the position as given */
+  }
+  return { line: pos.line, ch: Math.min(pos.ch, length) };
+}
+
+/** What the slash surfaces need of the plugin: its settings, and a way
+ *  to persist them (absent in the lightest test hosts). */
+type SlashHost = {
+  settings: NotionFlowSettings;
+  saveData?: (data: unknown) => Promise<void>;
+  persistSettings?: () => Promise<void>;
+};
+
+/** A CodeMirror completion carrying the slash command it stands for, so
+ *  the column editor's rows can render the same icon and hint as the
+ *  main menu. */
+type SlashCompletion = Completion & { nf: SlashCommand };
+
+/**
+ * The slash menu of a visual column editor, as a CodeMirror completion
+ * source: the same trigger, ranking, recents and feature gates as the
+ * main editor's EditorSuggest. The list is ranked here (`filter: false`),
+ * so CodeMirror shows it as given instead of re-sorting by its own fuzzy
+ * score.
+ */
+export function columnSlashCompletion(
+  plugin: SlashHost,
+  context: Pick<CompletionContext, "state" | "pos">,
+  editorAdapter: (view: EditorView) => Editor
+): CompletionResult | null {
+  if (!plugin.settings.slashCommands) return null;
+  const line = context.state.doc.lineAt(context.pos);
+  const before = line.text.slice(0, context.pos - line.from);
+  const match = before.match(RE_SLASH_TRIGGER);
+  if (!match || fenceAt(cachedFences(context.state.doc), line.number)) {
+    return null;
+  }
+  const { query, size } = parseSlashTableSize(match[1].toLowerCase());
+  const recent = plugin.settings.slashRecent ?? [];
+  const entries = [...SLASH_COMMANDS, ...CALLOUT_SLASH_COMMANDS].filter((command) => !command.mainOnly);
+  const ranked = searchSlashCommands(entries, query, plugin.settings, recent);
+  const { commands, labels } = slashMenuLayout(ranked, recent, query, entries);
+  const from = context.pos - match[1].length - 1;
+  // The unfiltered menu's sections, in order: Recent ranks 0, the groups
+  // 1…6. CodeMirror sorts sections by name unless ranked, and keeps the
+  // given order inside one (filter: false). A typed query has none, or
+  // the sections would regroup its ranking.
+  let section: CompletionSection | undefined;
+  const options: SlashCompletion[] = commands.map((command) => {
+    const label = labels.get(command);
+    if (label) {
+      const recentRow = recent.includes(command.id) && commands.indexOf(command) === 0;
+      section = {
+        name: label,
+        rank: recentRow ? 0 : SLASH_GROUP_ORDER.indexOf(command.group ?? "advanced") + 1,
+      };
+    }
+    return {
+      label: command.name,
+      detail: slashRowDescription(command, plugin.settings),
+      type: "keyword",
+      nf: command,
+      ...(section ? { section } : {}),
+      apply: (view: EditorView, _completion: Completion, start: number, end: number) => {
+        if (!plugin.settings.slashCommands || !slashCommandEnabled(command, plugin.settings)) return;
+        rememberSlashCommand(plugin, command.id);
+        const current = view.state.doc.lineAt(start);
+        const startPos = {
+          line: current.number - 1,
+          ch: start - current.from,
+        };
+        const endLine = view.state.doc.lineAt(end);
+        const endPos = {
+          line: endLine.number - 1,
+          ch: end - endLine.from,
+        };
+        if (command.linePrefix !== undefined) {
+          const withoutTrigger =
+            current.text.slice(0, startPos.ch) +
+            current.text.slice(end - current.from);
+          const quote = command.linePrefix.startsWith(">")
+            ? null
+            : quoteMarkerPrefix(withoutTrigger);
+          const replacement = quote
+            ? quote + applyLinePrefix(withoutTrigger.slice(quote.length), command.linePrefix)
+            : applyLinePrefix(withoutTrigger, command.linePrefix);
+          view.dispatch({
+            changes: { from: current.from, to: current.to, insert: replacement },
+            selection: { anchor: current.from + replacement.length },
+            scrollIntoView: true,
+            userEvent: "input.complete",
+          });
+          return;
+        }
+        // "/table4x6" sizes the table itself; the column editor has no
+        // picker, so a bare "/table" takes the default size.
+        const template =
+          command.id === "table" && size ? buildTableTemplate(size.rows, size.cols) : undefined;
+        SlashSuggest.insertSnippetInto(
+          editorAdapter(view), startPos, endPos, command, template, plugin.settings
+        );
+      },
+    };
+  });
+  return { from, filter: false, options };
+}
+
+/** The column menu's own row parts, beside CodeMirror's label and detail:
+ *  the command icon on the left, its syntax hint on the right. */
+function slashCompletionRowParts(): {
+  render: (completion: Completion, state: EditorState, view: EditorView) => Node | null;
+  position: number;
+}[] {
+  return [
+    {
+      position: 10,
+      render: (completion, _state, view) => {
+        const command = (completion as Partial<SlashCompletion>).nf;
+        if (!command) return null;
+        const icon = view.dom.ownerDocument.createElement("div");
+        icon.className = "nf-slash-icon";
+        // The completion row has only this element to tint by section.
+        icon.dataset.nfGroup = command.group ?? "advanced";
+        setIcon(icon, command.icon);
+        return icon;
+      },
+    },
+    {
+      position: 90,
+      render: (completion, _state, view) => {
+        const command = (completion as Partial<SlashCompletion>).nf;
+        if (!command?.hint) return null;
+        const hint = view.dom.ownerDocument.createElement("div");
+        hint.className = "nf-slash-hint";
+        hint.textContent = command.hint;
+        return hint;
+      },
+    },
+  ];
+}
+
+/** `pos`, or — when the editor draws its row over with a chip that a caret
+ *  steps past (see `stepOverHiddenRows`) — where a caret placed there goes
+ *  instead. Editors that do not expose their view keep `pos`; the selection
+ *  filter still takes such a placement into the block. */
+function caretOffDrawnOverRow(editor: Editor, pos: EditorPosition): EditorPosition {
+  const state = (editor as unknown as { cm?: EditorView }).cm?.state;
+  const skips = state ? hiddenPrefixZones.get(state)?.skips : undefined;
+  if (!state || !skips || skips.length === 0) return pos;
+  if (pos.line < 0 || pos.line >= state.doc.lines) return pos;
+  const row = state.doc.line(pos.line + 1);
+  const placed = EditorSelection.single(Math.min(row.to, row.from + pos.ch));
+  const head = stepOverHiddenRows(state.selection, placed, skips, true)?.main.head;
+  if (head == null) return pos;
+  const line = state.doc.lineAt(head);
+  return { line: line.number - 1, ch: head - line.from };
+}
 
 export class SlashSuggest extends EditorSuggest<SlashCommand> {
   plugin: NotionFlowPlugin;
   tablePickerClose: (() => void) | null = null;
+  /** The "4x6" typed after "/table", if any: choosing Table then inserts
+   *  that size straight away instead of opening the picker. */
+  tableSize: SlashTableSize | null = null;
+  /** The list Obsidian is showing (the last getSuggestions answer): its
+   *  top item is the one Enter takes without anyone having chosen it. */
+  lastList: SlashCommand[] | null = null;
+  /** The unfiltered menu's "Recent" and section labels, by first row. */
+  private labels = new Map<SlashCommand, string>();
 
   constructor(plugin: NotionFlowPlugin) {
     super(plugin.app);
@@ -16775,13 +25966,12 @@ export class SlashSuggest extends EditorSuggest<SlashCommand> {
     // fullwidth "／" (what a CJK keyboard layout produces) triggers too.
     // The query also accepts CJK so Chinese keywords ("/表格") are typable.
     // Ranges: CJK punctuation+kana, unified ideographs, fullwidth forms.
-    const m = before.match(
-      /(?:^|[\s>]|[　-ヿ一-鿿＀-￯])[/／]([\w　-ヿ一-鿿＀-￯-]*)$/
-    );
+    const m = before.match(RE_SLASH_TRIGGER);
     if (!m) return null;
     // Inside a code fence "/" is code, not a command.
     const view = (editor as unknown as { cm?: EditorView }).cm;
-    if (view && fenceAt(cachedFences(view.state.doc), cursor.line + 1)) return null;
+    const doc = view?.state?.doc;
+    if (doc && fenceAt(cachedFences(doc), cursor.line + 1)) return null;
     const start = before.length - m[1].length - 1; // include the "/"
     return {
       start: { line: cursor.line, ch: start },
@@ -16790,42 +25980,38 @@ export class SlashSuggest extends EditorSuggest<SlashCommand> {
     };
   }
 
-  /** Session-scoped recently-used ids, most recent first. */
-  recent: string[] = [];
-
   getSuggestions(ctx: EditorSuggestContext): SlashCommand[] {
-    const all = this.plugin.settings.columnLayout
-      ? SLASH_COMMANDS
-      : SLASH_COMMANDS.filter((c) => !c.id.startsWith("cols"));
-    const q = ctx.query.toLowerCase();
-    if (!q) {
-      // Notion-style: what you used last sits on top of the full menu.
-      if (this.recent.length === 0) return all;
-      const boosted = this.recent
-        .map((id) => all.find((c) => c.id === id))
-        .filter((c): c is SlashCommand => c != null);
-      return [...boosted, ...all.filter((c) => !this.recent.includes(c.id))];
-    }
-    // Prefix matches (id, name, or any keyword) rank above substring hits.
-    const prefix = (c: SlashCommand) =>
-      c.id.startsWith(q) ||
-      c.name.toLowerCase().startsWith(q) ||
-      c.keywords.split(" ").some((k) => k.startsWith(q));
-    return all.filter(
-      (c) =>
-        c.name.toLowerCase().includes(q) ||
-        c.keywords.includes(q) ||
-        c.id.startsWith(q)
-    ).sort((a, b) => Number(prefix(b)) - Number(prefix(a)));
+    const { query, size } = parseSlashTableSize(ctx.query);
+    this.tableSize = size;
+    const recent = this.plugin.settings.slashRecent ?? [];
+    const entries = slashEntries(this.plugin, ctx.editor);
+    const ranked = searchSlashCommands(entries, query, this.plugin.settings, recent);
+    const { commands, labels } = slashMenuLayout(ranked, recent, query, entries);
+    this.labels = labels;
+    this.lastList = commands;
+    return commands;
   }
 
   renderSuggestion(cmd: SlashCommand, el: HTMLElement) {
     el.addClass("nf-slash-item");
+    // EditorSuggest has no sections: a group's label rides inside its
+    // first row, and styles.css lifts it out of the row's highlight.
+    const label = this.labels.get(cmd);
+    if (label) {
+      el.addClass("nf-slash-has-group");
+      el.createDiv({ cls: "nf-slash-group", text: label });
+    }
+    const group = cmd.group ?? "advanced";
+    el.dataset.nfGroup = group;
     const iconEl = el.createDiv({ cls: "nf-slash-icon" });
+    iconEl.dataset.nfGroup = group;
     setIcon(iconEl, cmd.icon);
     const main = el.createDiv({ cls: "nf-slash-main" });
     main.createDiv({ cls: "nf-slash-name", text: cmd.name });
-    if (cmd.desc) main.createDiv({ cls: "nf-slash-desc", text: cmd.desc });
+    const desc = slashRowDescription(cmd, this.plugin.settings);
+    if (desc) {
+      main.createDiv({ cls: cmd.resolve ? "nf-slash-desc nf-slash-preview" : "nf-slash-desc", text: desc });
+    }
     if (cmd.hint) el.createDiv({ cls: "nf-slash-hint", text: cmd.hint });
   }
 
@@ -16834,9 +26020,9 @@ export class SlashSuggest extends EditorSuggest<SlashCommand> {
     start: EditorPosition,
     end: EditorPosition,
     cmd: SlashCommand,
-    template = cmd.insert
+    template?: string
   ) {
-    SlashSuggest.insertSnippetInto(editor, start, end, cmd, template);
+    SlashSuggest.insertSnippetInto(editor, start, end, cmd, template, this.plugin.settings);
   }
 
   /** Shared by Obsidian's EditorSuggest and the visual column CodeMirror.
@@ -16847,9 +26033,16 @@ export class SlashSuggest extends EditorSuggest<SlashCommand> {
     start: EditorPosition,
     end: EditorPosition,
     cmd: SlashCommand,
-    template = cmd.insert
+    /** Overrides the command's own text (a picked table size). */
+    explicitTemplate?: string,
+    formats: SlashDateFormats = DEFAULT_SETTINGS
   ) {
+    const template = explicitTemplate ?? cmd.resolve?.(formats) ?? cmd.insert;
     if (!template) return;
+    if (cmd.block) {
+      const bare = SlashSuggest.clearBareListMarker(editor, start, end, cmd);
+      if (bare) start = end = bare;
+    }
     let insert = template;
     let replaceStart = start;
     const lineAt = (n: number) => {
@@ -16869,9 +26062,14 @@ export class SlashSuggest extends EditorSuggest<SlashCommand> {
       const lineIndent = indentWidth(leading);
       const prefixLines = (value: string, indent: number) => {
         const prefix = " ".repeat(indent);
-        return value
-          .split("\n")
-          .map((line) => (line.length > 0 ? prefix + line : ""))
+        const rows = value.split("\n");
+        // An empty row between the first and the last (the code template's
+        // body) keeps the indent too: a truly blank row there would end the
+        // list item, and the unclosed fence would swallow the rest of the note.
+        return rows
+          .map((line, i) =>
+            line.length > 0 ? prefix + line : i > 0 && i < rows.length - 1 ? prefix : ""
+          )
           .join("\n");
       };
       const qp = quoteMarkerPrefix(lineText);
@@ -16888,7 +26086,10 @@ export class SlashSuggest extends EditorSuggest<SlashCommand> {
         // of becoming its sibling. Seam rows stay at the container's own
         // column — they belong to the box, not to the item.
         const quotedListIndent = listContentIndent(beyond);
-        const rowPrefix = qp + " ".repeat(quotedListIndent ?? 0);
+        // An indented empty row (a bare list marker just cleared) keeps its
+        // column on every template row, not only on the first.
+        const rowPrefix =
+          qp + (quotedListIndent != null ? " ".repeat(quotedListIndent) : /\S/.test(beyond) ? "" : beyond);
         const body = template.split("\n").join("\n" + rowPrefix);
         if (/\S/.test(beyond)) {
           insert = (blankAbove ? "\n" + sep : "") + "\n" + rowPrefix + body;
@@ -16938,6 +26139,13 @@ export class SlashSuggest extends EditorSuggest<SlashCommand> {
       } else {
         replaceStart = { line: start.line, ch: 0 };
         insert = prefixLines(template, lineIndent);
+        // A quote-shaped block (the columns row) written straight under a
+        // quote row would BE that quote's next row: under a Callout, the
+        // Callout would show "[!nf-cols]" as text and swallow the columns.
+        // Only there does it need the blank seam /callout always takes.
+        if (!blankAbove && start.line > 0 && template.startsWith(">") && RE_QUOTE.test(lineAt(start.line - 1))) {
+          insert = "\n" + insert;
+        }
       }
     }
     // Callout-style blocks absorb the following line as lazy quote
@@ -16948,7 +26156,59 @@ export class SlashSuggest extends EditorSuggest<SlashCommand> {
     SlashSuggest.commitSnippet(editor, insert, replaceStart, end);
   }
 
-  /** Write the final snippet text and land the caret on its "‸" marker. */
+  /**
+   * "/" typed on a bare list marker ("- /", "> 1. /") and a block picked
+   * that is not a list: the marker goes and the row becomes an empty row of
+   * the same container, kept apart from its neighbours by blank seam rows
+   * (marker rows inside a quote). Otherwise the new block would nest under
+   * an empty bullet, or Reading view would merge the text into the item
+   * above. Returns the position the block goes to, or null (nothing done)
+   * when the row is not a bare marker or the pick is a list or inline item.
+   */
+  static clearBareListMarker(
+    editor: Editor,
+    start: EditorPosition,
+    end: EditorPosition,
+    cmd: SlashCommand
+  ): EditorPosition | null {
+    if (cmd.id === "bullet" || cmd.id === "number" || cmd.id === "todo") return null;
+    if (cmd.linePrefix === undefined && !cmd.block) return null;
+    if (end.line !== start.line) return null;
+    const rowAt = (n: number): string | null => {
+      if (n < 0) return null;
+      try {
+        return editor.getLine(n) ?? null;
+      } catch {
+        return null;
+      }
+    };
+    const lineText = rowAt(start.line);
+    if (lineText == null) return null;
+    const bare = bareListMarkerRow(lineText.slice(0, start.ch) + lineText.slice(end.ch));
+    if (!bare) return null;
+    const count = typeof editor.lineCount === "function" ? editor.lineCount() : Infinity;
+    const filled = (n: number) => {
+      const text = n < count ? rowAt(n) : null;
+      return text != null && text.replace(RE_QUOTE_PREFIX, "").trim() !== "";
+    };
+    const above = filled(start.line - 1);
+    const below = filled(start.line + 1);
+    const base = bare.containerPrefix + bare.indent;
+    const seam = bare.containerPrefix.trimEnd();
+    editor.replaceRange(
+      (above ? seam + "\n" : "") + base + (below ? "\n" + seam : ""),
+      { line: start.line, ch: 0 },
+      { line: start.line, ch: lineText.length }
+    );
+    const at = { line: start.line + (above ? 1 : 0), ch: base.length };
+    editor.setCursor(at);
+    return at;
+  }
+
+  /** Write the final snippet text and land the caret on its "‸" marker —
+   *  or, where the editor draws that row as a chip (the code block's opener
+   *  in Live Preview, whose language is set from the chip), on the block's
+   *  first code row, so what is typed next is the code. */
   private static commitSnippet(
     editor: Editor,
     insert: string,
@@ -16966,8 +26226,36 @@ export class SlashSuggest extends EditorSuggest<SlashCommand> {
         lines.length === 1
           ? replaceStart.ch + lines[0].length
           : lines[lines.length - 1].length;
-      editor.setCursor({ line, ch });
+      editor.setCursor(caretOffDrawnOverRow(editor, { line, ch }));
     }
+  }
+
+  /** Where the table picker opens: beside the clicked menu row (`rect`),
+   *  or at a point — the caret's for a keyboard pick. */
+  static pickerAnchor(
+    editor: Editor,
+    evt: MouseEvent | KeyboardEvent | undefined
+  ): TablePickerAnchor | null {
+    const pointer = evt as Partial<MouseEvent> | undefined;
+    if (pointer && typeof pointer.clientX === "number" && typeof pointer.clientY === "number") {
+      const target = pointer.target as Node | null;
+      const el = target as Element | null;
+      const rect =
+        typeof el?.closest === "function"
+          ? el.closest(".suggestion-item")?.getBoundingClientRect() ?? null
+          : null;
+      return { doc: target?.ownerDocument ?? document, rect, x: pointer.clientX, y: pointer.clientY };
+    }
+    const view = (editor as unknown as { cm?: EditorView }).cm;
+    if (!view) return null;
+    const c = view.coordsAtPos(view.state.selection.main.head);
+    const editorRect = view.dom.getBoundingClientRect();
+    return {
+      doc: view.dom.ownerDocument,
+      rect: null,
+      x: c?.left ?? editorRect.left,
+      y: (c?.bottom ?? editorRect.top) + 4,
+    };
   }
 
   openTablePicker(
@@ -16975,17 +26263,19 @@ export class SlashSuggest extends EditorSuggest<SlashCommand> {
     start: EditorPosition,
     end: EditorPosition,
     cmd: SlashCommand,
-    evt: MouseEvent
+    anchor: TablePickerAnchor
   ) {
     this.tablePickerClose?.();
-    const eventTarget = evt.target as Node | null;
-    const ownerDoc = eventTarget?.ownerDocument ?? document;
+    const view = (editor as unknown as { cm?: EditorView }).cm;
+    if (!view) return;
+    const operation = this.plugin.operations.capture(view,
+      () => sourcePathForEditorView(this.plugin.app.workspace, view), {
+        valid: () => this.plugin.settings.slashCommands && (editor as unknown as { cm?: EditorView }).cm === view,
+        onCancel: () => close(),
+      });
+    const ownerDoc = anchor.doc;
     const win = (ownerDoc.defaultView ?? window) as Window & typeof globalThis;
-    const anchorEl = eventTarget as Element | null;
-    const anchorRect =
-      typeof anchorEl?.closest === "function"
-        ? anchorEl.closest(".suggestion-item")?.getBoundingClientRect()
-        : null;
+    const anchorRect = anchor.rect;
     const picker = ownerDoc.body.createDiv({
       cls: "nf-table-picker",
       attr: {
@@ -17003,7 +26293,7 @@ export class SlashSuggest extends EditorSuggest<SlashCommand> {
     });
     picker.createDiv({
       cls: "nf-table-picker-hint",
-      text: t("Drag or use arrow keys, then press Enter"),
+      text: t("Arrows or digits pick a size · Enter inserts"),
     });
     const maxRows = 10;
     const maxCols = 10;
@@ -17054,6 +26344,7 @@ export class SlashSuggest extends EditorSuggest<SlashCommand> {
     const close = (restoreFocus = false) => {
       if (done) return;
       done = true;
+      operation.finish();
       ownerDoc.removeEventListener("pointerdown", onOutside, true);
       ownerDoc.removeEventListener("scroll", onViewportChange, true);
       win.removeEventListener("resize", onViewportChange);
@@ -17063,9 +26354,11 @@ export class SlashSuggest extends EditorSuggest<SlashCommand> {
     };
     const confirm = () => {
       if (done) return;
+      if (!operation.isCurrent()) { close(); return; }
       // Mark complete before inserting so editor updates cannot cause an
       // outside-click cleanup to steal focus from the new first cell.
       done = true;
+      operation.finish();
       ownerDoc.removeEventListener("pointerdown", onOutside, true);
       ownerDoc.removeEventListener("scroll", onViewportChange, true);
       win.removeEventListener("resize", onViewportChange);
@@ -17110,6 +26403,18 @@ export class SlashSuggest extends EditorSuggest<SlashCommand> {
         confirm();
         return;
       }
+      // A digit sets the columns (0 = 10), Shift+digit the rows: "4",
+      // Shift+"6", Enter is a 4 × 6 table without leaving the keyboard.
+      // Shift changes e.key ("!" for 1), so the digit is read from the
+      // physical key first.
+      const digit = /^Digit(\d)$/.exec(e.code)?.[1] ?? (/^\d$/.test(e.key) ? e.key : null);
+      if (digit != null && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        e.preventDefault();
+        const n = digit === "0" ? 10 : Number(digit);
+        if (e.shiftKey) update(n, cols);
+        else update(rows, n);
+        return;
+      }
       const next = {
         ArrowLeft: [rows, cols - 1],
         ArrowRight: [rows, cols + 1],
@@ -17124,15 +26429,16 @@ export class SlashSuggest extends EditorSuggest<SlashCommand> {
     update(rows, cols);
     const rect = picker.getBoundingClientRect();
     const gap = 8;
-    let left = anchorRect ? anchorRect.right + gap : evt.clientX + gap;
+    let left = anchorRect ? anchorRect.right + gap : anchor.x + gap;
     if (left + rect.width > win.innerWidth - gap) {
-      left = anchorRect ? anchorRect.left - rect.width - gap : evt.clientX - rect.width - gap;
+      left = anchorRect ? anchorRect.left - rect.width - gap : anchor.x - rect.width - gap;
     }
-    let top = anchorRect?.top ?? evt.clientY;
+    let top = anchorRect?.top ?? anchor.y;
     left = Math.max(gap, Math.min(left, win.innerWidth - rect.width - gap));
     top = Math.max(gap, Math.min(top, win.innerHeight - rect.height - gap));
     picker.style.left = `${left}px`;
     picker.style.top = `${top}px`;
+    if (!operation.isCurrent()) { close(); return; }
     this.tablePickerClose = close;
     ownerDoc.addEventListener("pointerdown", onOutside, true);
     ownerDoc.addEventListener("scroll", onViewportChange, true);
@@ -17144,20 +26450,115 @@ export class SlashSuggest extends EditorSuggest<SlashCommand> {
 
   selectSuggestion(cmd: SlashCommand, _evt: MouseEvent | KeyboardEvent) {
     const ctx = this.context;
-    if (!ctx) return;
-    const { editor, start, end } = ctx;
-    this.recent = [cmd.id, ...this.recent.filter((id) => id !== cmd.id)].slice(0, 3);
+    if (!ctx || !this.plugin.settings.slashCommands || !slashCommandEnabled(cmd, this.plugin.settings)) return;
+    const { editor } = ctx;
+    // Obsidian re-runs onTrigger through a 50 ms debounce, so an Enter
+    // right after an edit (an IME commit, fast Backspaces) arrives with the
+    // PREVIOUS context: its `end` can reach past the line break and its
+    // top item belongs to the old query. Re-read the trigger as the
+    // document stands now and act on that — or on nothing.
+    const cursor = typeof editor.getCursor === "function" ? editor.getCursor() : ctx.end;
+    const fresh = this.onTrigger(cursor, editor, ctx.file ?? null);
+    if (!fresh || fresh.start.line !== ctx.start.line) {
+      if (typeof this.close === "function") this.close();
+      return;
+    }
+    if (fresh.query !== ctx.query) {
+      // Enter on the stale list's top item took the default highlight,
+      // which nobody chose: the fresh query's own top answers it. A click,
+      // or an item arrowed to, is a real choice and stands while the
+      // fresh query still lists it. (Read before getSuggestions below
+      // replaces the list.)
+      const shownTop = this.lastList?.[0]?.id;
+      const byKey = typeof (_evt as KeyboardEvent | null)?.key === "string";
+      const list = this.getSuggestions({ ...ctx, ...fresh } as EditorSuggestContext);
+      const current =
+        byKey && cmd.id === shownTop
+          ? list[0]
+          : list.find((command) => command.id === cmd.id) ?? list[0];
+      if (!current) {
+        if (typeof this.close === "function") this.close();
+        return;
+      }
+      cmd = current;
+    }
+    const start = fresh.start;
+    const end = clampToLine(editor, fresh.end);
+    rememberSlashCommand(this.plugin, cmd.id);
 
-    const pointer = _evt as MouseEvent;
-    if (cmd.id === "table" && typeof pointer.clientX === "number") {
-      this.openTablePicker(editor, start, end, cmd, pointer);
+    if (cmd.kind === "toc") {
+      // Headings from the editor's own text, not metadataCache: the cache
+      // lags an edit by Obsidian's save debounce.
+      const view = (editor as unknown as { cm?: EditorView }).cm;
+      if (!view?.state) return;
+      const opts = tocOptionsFor(this.plugin.app, view);
+      const snippet = tocSnippet(scanHeadings(view.state.doc, opts), opts);
+      if (!snippet) {
+        editor.replaceRange("", start, end);
+        new Notice(t("No headings in this note"));
+        return;
+      }
+      this.insertSnippet(editor, start, end, cmd, snippet);
+      return;
+    }
+
+    if (cmd.kind === "text-color" || cmd.kind === "bg-color") {
+      // The query goes; the colour goes to the block holding the caret
+      // (the drag model's row block). Without a view (headless) nothing.
+      editor.replaceRange("", start, end);
+      const view = (editor as unknown as { cm?: EditorView }).cm;
+      if (!view?.state || !cmd.color) return;
+      const plan = slashBlockColorPlan(
+        view.state.doc,
+        start.line + 1,
+        cmd.kind === "text-color" ? "text" : "bg",
+        cmd.color,
+        cachedFences(view.state.doc),
+        view.state.selection.main.head
+      );
+      if ("notice" in plan) {
+        new Notice(plan.notice);
+        return;
+      }
+      view.dispatch({
+        changes: plan.changes,
+        ...(plan.caret != null ? { selection: { anchor: plan.caret } } : {}),
+        userEvent: "input.block-color",
+      });
+      return;
+    }
+
+    if (cmd.kind === "template") {
+      // The module removes the query (and a bare list marker) itself. A
+      // template deleted since the menu listed it rejects after that.
+      runTemplateEntry(this.plugin.app, editor, start, end, cmd.templateFile ?? null).catch(
+        (error) => console.error("Notion Flow: template insert failed", error)
+      );
+      return;
+    }
+
+    if (cmd.id === "table") {
+      // "/table4x6" already says the size; otherwise the picker opens
+      // beside the clicked row or, from Enter, under the caret. A host
+      // without a CodeMirror view (headless tests) gets the default size.
+      const size = this.tableSize;
+      this.tableSize = null;
+      const anchor = size ? null : SlashSuggest.pickerAnchor(editor, _evt);
+      if (anchor) {
+        this.openTablePicker(editor, start, end, cmd, anchor);
+        return;
+      }
+      this.insertSnippet(editor, start, end, cmd, size ? buildTableTemplate(size.rows, size.cols) : undefined);
       return;
     }
 
     if (cmd.linePrefix !== undefined) {
-      // Remove the trigger text, then swap the line's block prefix.
-      editor.replaceRange("", start, end);
-      const lineText = editor.getLine(start.line);
+      // Remove the trigger text, then swap the line's block prefix. On a
+      // bare list marker the row first becomes a row of its own.
+      const bare = SlashSuggest.clearBareListMarker(editor, start, end, cmd);
+      if (!bare) editor.replaceRange("", start, end);
+      const row = bare?.line ?? start.line;
+      const lineText = editor.getLine(row);
       // Inside a quote/Callout/column, the "> " markers are the block's
       // structure — a heading or list prefix applies to the CONTENT and
       // must not strip the markers (which would rip the line out of the
@@ -17168,12 +26569,33 @@ export class SlashSuggest extends EditorSuggest<SlashCommand> {
       const newLine = qp
         ? qp + applyLinePrefix(lineText.slice(qp.length), cmd.linePrefix)
         : applyLinePrefix(lineText, cmd.linePrefix);
-      editor.setLine(start.line, newLine);
-      editor.setCursor({ line: start.line, ch: newLine.length });
+      editor.setLine(row, newLine);
+      editor.setCursor({ line: row, ch: newLine.length });
       return;
     }
 
     this.insertSnippet(editor, start, end, cmd);
+    if (cmd.id === "cols2" || cmd.id === "cols3") this.openInsertedColumns(editor);
+  }
+
+  /** /cols lands in the visual column editor, on column 1 and ready to
+   *  type, rather than in the raw `[!nf-cols]` scaffolding. One frame
+   *  later, so Obsidian's suggester has finished closing first. */
+  private openInsertedColumns(editor: Editor) {
+    const view = (editor as unknown as { cm?: EditorView }).cm;
+    const win = view?.dom?.ownerDocument?.defaultView;
+    if (!view || !win) return;
+    win.requestAnimationFrame(() =>
+      guard("open inserted columns", () => false, () => {
+        if (!view.dom.isConnected) return false;
+        const doc = view.state.doc;
+        const header = columnsHeaderAbove(
+          doc,
+          doc.lineAt(view.state.selection.main.head).number
+        );
+        return header != null && openVisualColumnAt(this.plugin, view, header, 0);
+      })
+    );
   }
 }
 
@@ -17181,27 +26603,117 @@ export class SlashSuggest extends EditorSuggest<SlashCommand> {
 /* Plugin                                                              */
 /* ------------------------------------------------------------------ */
 
+/** An Obsidian command's editorCallback, as the plugin wraps it. */
+type EditorCommandCallback = (editor: Editor, ctx: unknown) => unknown;
+
 export default class NotionFlowPlugin extends Plugin {
   settings: NotionFlowSettings = DEFAULT_SETTINGS;
-  private tableScrollDocuments = new Set<Document>();
+  /** The drag-handle ViewPlugin, kept so commands can ask an editor's
+   *  instance for its block selection. */
+  private dragHandlePlugin: ReturnType<typeof makeDragHandlePlugin> | null = null;
+  private canvasEnhancements: CanvasEnhancements | null = null;
+  private unloaded = false;
+  readonly operations = new EditorOperationScope();
+  readonly comments = new CommentController({
+    operations: this.operations,
+    enabled: () => !this.unloaded && this.settings.commenting,
+    hoverCard: () => this.settings.commentHoverCard,
+    identity: (view) => sourcePathForEditorView(this.app.workspace, view),
+  });
+  private pastedUrlTitles = new PastedUrlTitles({
+    operations: this.operations,
+    enabled: () => !this.unloaded && this.settings.pasteUrlTitles,
+    view: (editor) => this.editorView(editor),
+    identity: (view) => sourcePathForEditorView(this.app.workspace, view),
+  });
+  /** Every body class and custom property applyBodyState has written. */
+  private bodyClassesSet = new Set<string>();
+  private bodyVarsSet = new Set<string>();
   private tableScrollObservers = new Set<ResizeObserver>();
   private mermaidMutationObservers = new Set<MutationObserver>();
   private mermaidResizeObservers = new Set<ResizeObserver>();
-  private mermaidDocumentObservers = new Map<Document, MutationObserver>();
+  /** The version whose first-run or update notice was shown, read from
+   *  data.json beside the settings: undefined on a fresh install, "" for
+   *  data saved before the version was recorded. */
+  private lastSeenVersion: string | undefined;
+  /** editorSensitiveKey / noteStyleKey of the settings the open editors
+   *  were last configured and measured with. */
+  private editorOptionsKey = "";
+  private noteStyleOptionsKey = "";
+  /** The settings tab, so a note-style commit made outside it (the style
+   *  switcher) brings its galleries in line while it shows. */
+  settingTab: NotionFlowSettingTab | null = null;
+  /** The page icon and cover (a child component, unloaded with the plugin). */
+  private pageHeader: PageHeader | null = null;
 
   async onload() {
+    this.unloaded = false;
+    // Every editor command registered from here on (the modules' too) does
+    // nothing while one of the plugin's cards has focus.
+    const addCommand = this.addCommand.bind(this);
+    this.addCommand = (command: Command) =>
+      addCommand(guardPopoverCommand(command, (editor) => this.cardHasFocus(editor)));
     await this.loadSettings();
-    this.addSettingTab(new NotionFlowSettingTab(this.app, this));
+    // The editors registered below are configured from these settings.
+    this.editorOptionsKey = editorSensitiveKey(this.settings);
+    this.noteStyleOptionsKey = noteStyleKey(this.settings);
+    this.settingTab = new NotionFlowSettingTab(this.app, this);
+    this.addSettingTab(this.settingTab);
+    // The getter is read on every canvas render: it returns the settings
+    // object itself, never a copy. A canvas default (the minimap toggle, a
+    // saved scheme) is stored without touching the Markdown editors.
+    this.canvasEnhancements = new CanvasEnhancements(this, () => this.settings, (patch) => {
+      Object.assign(this.settings, patch);
+      this.refreshDerivedSettings();
+      void this.persistSettings();
+      this.canvasEnhancements?.refresh();
+    });
 
-    this.registerEditorSuggest(new SlashSuggest(this));
-    this.registerEditorExtension(makeDragHandlePlugin(this));
+    this.registerEditorExtension(operationLifecycle(this.operations));
+    this.registerEvent(this.app.workspace.on("file-open", () => this.operations.check()));
+    this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.operations.check()));
+    const slash = new SlashSuggest(this);
+    this.register(() => slash.tablePickerClose?.());
+    this.registerEditorSuggest(slash);
+    this.dragHandlePlugin = makeDragHandlePlugin(this);
+    this.registerEditorExtension(this.dragHandlePlugin);
+    // A block selection whose caret waits outside it shows no caret: see
+    // blockCaretAwayField. Obsidian draws the native caret, so its colour
+    // is what stands down.
+    this.registerEditorExtension([
+      blockCaretAwayField,
+      EditorView.contentAttributes.compute([blockCaretAwayField], (state): Record<string, string> =>
+        state.field(blockCaretAwayField) ? { style: "caret-color: transparent" } : {}
+      ),
+    ]);
+    // Escape selects the caret's block, once every Escape binding of
+    // Obsidian's has declined the key (see caretBlockEscapeKeymap). The
+    // suggester, menus and popovers that own Escape take it earlier, in
+    // the capture phase.
+    this.registerEditorExtension(
+      caretBlockEscapeKeymap(
+        (v) => (this.dragHandlePlugin ? v.plugin(this.dragHandlePlugin)?.selectCaretBlock() : false) ?? false
+      )
+    );
     this.registerEditorExtension(makeToolbarPlugin(this));
+    this.registerEditorExtension(linkPendingField());
     this.registerEditorExtension(makeListMarkerPlugin());
     this.registerEditorExtension(makeNestedIndentPlugin(this));
     this.registerEditorExtension(makeConcealPlugin(this));
     this.registerEditorExtension(makeMarkdownConcealPlugin(this));
     this.registerEditorExtension(makeHeadingConcealPlugin(this));
+    this.registerEditorExtension(makeTocChipPlugin(this));
+    // Block backgrounds: every Live Preview row of a block whose first row
+    // carries an nf-blk marker is tinted (Reading view tints by CSS alone).
+    this.registerEditorExtension(
+      makeBlockBackgroundPlugin((state, lineNo) => innerBlockAt(state.doc, lineNo, cachedFences(state.doc)))
+    );
     this.registerEditorExtension(makeEmptyHintPlugin(this));
+    this.registerEditorExtension(createCaptionEditingExtensions({
+      enabled: () => this.settings.calloutEditing || this.settings.codeBlockEditing,
+      livePreview: (state) => !!state.field(editorLivePreviewField, false),
+      captionAt: ownedBlockCaption,
+    }));
     this.registerEditorExtension(makeTableKeymap(this));
     // After the table keymap: both claim Tab, and a table cell's own
     // navigation is the more specific meaning of the two.
@@ -17228,7 +26740,7 @@ export default class NotionFlowPlugin extends Plugin {
     // wrapper used by Live Preview. Add a narrowly scoped, focusable scroll
     // region around native Markdown tables so wide content never expands the
     // whole pane. Common plugin-generated table classes are left untouched.
-    this.registerMarkdownPostProcessor((el) => {
+    this.registerMarkdownPostProcessor((el, ctx) => {
       // Reading view has real nested list elements, so one shared phase
       // attribute gives UL bullets and OL numbers the same unlimited cycle,
       // including mixed unordered/ordered ancestry.
@@ -17236,14 +26748,18 @@ export default class NotionFlowPlugin extends Plugin {
 
       // Mermaid can finish rendering asynchronously after this processor
       // runs. Enhance both already-rendered SVGs and late arrivals, then
-      // keep wide-diagram behavior in sync with pane resizing.
+      // keep wide-diagram behavior in sync with pane resizing. A late
+      // arrival lands inside this section, so only a section that still
+      // holds a code block is watched — never the document body.
       if (this.settings.cleanRendering) {
-        this.watchMermaidDocument(el.ownerDocument);
         const diagrams = [
           ...(el.matches(".mermaid") ? [el as HTMLElement] : []),
           ...Array.from(el.querySelectorAll<HTMLElement>(".mermaid")),
         ];
-        for (const diagram of diagrams) this.enhanceMermaid(diagram);
+        for (const diagram of diagrams) this.enhanceMermaid(diagram, ctx);
+        if (diagrams.length === 0 && (el.matches("pre") || el.querySelector("pre"))) {
+          this.watchMermaidSection(el, ctx);
+        }
       }
 
       // Formatting tags written inside fenced code blocks render as
@@ -17261,6 +26777,7 @@ export default class NotionFlowPlugin extends Plugin {
       // honor a code block's saved collapsed state in Reading view and in
       // rendered Callouts. Live Preview's editable top-level code uses the
       // CodeMirror widgets registered below instead.
+      let captionSeamPending = el.matches?.(".el-pre, .el-table") ?? false;
       for (const caption of Array.from(
         el.querySelectorAll<HTMLElement>(
           'small.nf-caption[data-nf-kind="code"], ' +
@@ -17269,52 +26786,7 @@ export default class NotionFlowPlugin extends Plugin {
         )
       )) {
         caption.classList.add("nf-rendered-caption");
-        const sourceTarget = () => {
-          const editorEl = caption.closest<HTMLElement>(".cm-editor");
-          const view = editorEl ? EditorView.findFromDOM(editorEl) : null;
-          if (!view) return null;
-          const anchors = [
-            caption,
-            caption.closest<HTMLElement>(".cm-embed-block"),
-            caption.closest<HTMLElement>(".cm-line"),
-          ].filter((candidate): candidate is HTMLElement => !!candidate);
-          for (const anchor of anchors) {
-            try {
-              const near = view.state.doc.lineAt(view.posAtDOM(anchor, 0)).number;
-              for (
-                let lineNo = Math.max(1, near - 2);
-                lineNo <= Math.min(view.state.doc.lines, near + 2);
-                lineNo++
-              ) {
-                const meta = parseBlockCaption(view.state.doc.line(lineNo).text);
-                if (!meta || meta.kind !== caption.dataset.nfKind) continue;
-                if (meta.kind === "code") {
-                  const fence = fenceAt(cachedFences(view.state.doc), lineNo - 1);
-                  if (fence?.closed && fence.endLine === lineNo - 1) {
-                    return { view, kind: meta.kind, ownerLine: fence.startLine };
-                  }
-                } else if (meta.kind === "table") {
-                  const table = isTableRow(view.state.doc.line(lineNo - 1).text)
-                    ? getTableRange(
-                        view.state.doc,
-                        lineNo - 1,
-                        cachedFences(view.state.doc)
-                      )
-                    : null;
-                  if (table) {
-                    return { view, kind: meta.kind, ownerLine: table.startLine };
-                  }
-                } else {
-                  return { view, kind: meta.kind, ownerLine: lineNo - 1 };
-                }
-              }
-            } catch {
-              // Try the next DOM anchor; inline HTML widgets vary between
-              // Live Preview and rendered Callouts.
-            }
-          }
-          return null;
-        };
+        const sourceTarget = () => captionSourceTarget(caption);
         if (caption.closest(".markdown-source-view.is-live-preview")) {
           caption.setAttribute("role", "button");
           caption.setAttribute("tabindex", "0");
@@ -17325,12 +26797,7 @@ export default class NotionFlowPlugin extends Plugin {
             if (!target) return;
             evt.preventDefault();
             evt.stopPropagation();
-            editBlockCaption(
-              this,
-              target.view,
-              target.kind,
-              target.ownerLine
-            );
+            editBlockCaption(target.view, target.kind, target.ownerLine);
           };
           caption.addEventListener("click", edit);
           caption.addEventListener("keydown", (evt) => {
@@ -17341,29 +26808,8 @@ export default class NotionFlowPlugin extends Plugin {
           caption.parentElement?.tagName === "P"
             ? caption.parentElement
             : caption;
-        const previous = captionBlock.previousElementSibling;
         const kind = caption.dataset.nfKind;
-        if (kind === "image") {
-          const image =
-            previous?.querySelector<HTMLImageElement>(":scope > img") ??
-            (previous?.tagName === "IMG" ? previous as HTMLImageElement : null);
-          image?.classList.add("nf-captioned-image");
-          captionBlock.classList.add("nf-image-caption-block");
-          continue;
-        }
-        if (kind === "table") {
-          // The table may already be inside the scroll wrapper added below,
-          // so look through it as well as at it.
-          const table =
-            previous?.tagName === "TABLE"
-              ? (previous as HTMLElement)
-              : previous?.querySelector<HTMLElement>(":scope > table") ?? null;
-          table?.classList.add("nf-captioned-table");
-          captionBlock.classList.add("nf-table-caption-block");
-          continue;
-        }
-        if (kind !== "code") continue;
-        const collapsed = caption.dataset.nfCollapsed === "true";
+        const collapsed = kind === "code" && caption.dataset.nfCollapsed === "true";
         if (
           collapsed &&
           caption.closest(".markdown-source-view.is-live-preview") &&
@@ -17394,84 +26840,42 @@ export default class NotionFlowPlugin extends Plugin {
             const doc = target.view.state.doc;
             const fence = fenceAt(cachedFences(doc), target.ownerLine);
             if (!fence) return;
-            setBlockCaptionMeta(
+            codeFoldClick(
               target.view,
-              "code",
               fence.startLine,
               codeCaptionMeta(doc, fence)?.caption ?? "",
-              false,
-              true
+              false
             );
           });
         }
-        if (previous?.tagName !== "PRE") continue;
-        const pre = previous as HTMLPreElement;
-        pre.classList.add("nf-captioned-code");
-        captionBlock.classList.add("nf-code-caption-block");
-        pre.classList.toggle("nf-rendered-code-collapsed", collapsed);
-        if (pre.querySelector(":scope > .nf-rendered-code-fold")) continue;
-        const fold = pre.createEl("button", {
-          cls: "nf-rendered-code-fold",
-          attr: {
-            type: "button",
-            "aria-label": t(collapsed ? "Expand code block" : "Collapse code block"),
-            "aria-expanded": String(!collapsed),
-          },
-        });
-        setIcon(fold, "chevron-down");
-        fold.addEventListener("click", (evt) => {
-          evt.preventDefault();
-          evt.stopPropagation();
-          const nextCollapsed = !pre.classList.contains(
-            "nf-rendered-code-collapsed"
-          );
-          // This postprocessor also renders Callout bodies inside Live
-          // Preview, where an editor does exist. There the caption row is
-          // the single source of truth, so write the state back instead of
-          // styling the DOM: a class alone would be discarded the moment
-          // the Callout re-rendered. Reading view has no editor to reach,
-          // and folding stays a view-local affordance there.
-          const target = sourceTarget();
-          if (target?.kind === "code") {
-            const doc = target.view.state.doc;
-            const fence = fenceAt(cachedFences(doc), target.ownerLine);
-            if (fence) {
-              // Deliberately without focusOwner: folding is a view action,
-              // and moving the caret into the block would open the
-              // surrounding Callout as a side effect of a fold click.
-              setBlockCaptionMeta(
-                target.view,
-                "code",
-                fence.startLine,
-                codeCaptionMeta(doc, fence)?.caption ?? "",
-                nextCollapsed
-              );
-              return;
-            }
-          }
-          pre.classList.toggle("nf-rendered-code-collapsed", nextCollapsed);
-          fold.classList.toggle("is-collapsed", nextCollapsed);
-          fold.setAttribute("aria-expanded", String(!nextCollapsed));
-          fold.setAttribute(
-            "aria-label",
-            t(nextCollapsed ? "Expand code block" : "Collapse code block")
-          );
-        });
-        fold.classList.toggle("is-collapsed", collapsed);
+        const owner = captionOwnerIn(captionBlock, kind);
+        bindCaptionOwner(caption, captionBlock, owner);
+        // Reading view: a caption that opens its own section waits for the
+        // section above it, and an image embed may still be loading.
+        if (
+          !owner &&
+          ((captionBlock.parentElement === el && !captionBlock.previousElementSibling) ||
+            (kind === "image" && !!captionBlock.querySelector(".internal-embed")))
+        ) {
+          captionSeamPending = true;
+        }
       }
+      if (captionSeamPending) this.bindCaptionSeamLater(el, ctx);
 
       // Comment anchors in rendered Markdown (Reading view and Live
-      // Preview callout content): Notion-style highlight + hover tooltip.
-      // The note text only ever becomes a title attribute — inert.
+      // Preview callout content): Notion-style highlight + the hover card,
+      // or a plain tooltip when the card is off. The note text only ever
+      // becomes text content or a tooltip — inert.
       if (this.settings.commenting) {
         for (const cmt of Array.from(
           el.querySelectorAll<HTMLElement>('span.nf-cmt[data-nf-cmt]')
         )) {
           cmt.classList.add("nf-cmt-anchor");
-          cmt.setAttribute(
-            "title",
-            decodeCommentAttr(cmt.getAttribute("data-nf-cmt") ?? "")
-          );
+          if (this.settings.commentHoverCard) {
+            this.comments.attachReadingHover(cmt);
+          } else {
+            setCommentTooltip(cmt, decodeCommentAttr(cmt.getAttribute("data-nf-cmt") ?? ""));
+          }
         }
       }
 
@@ -17511,7 +26915,12 @@ export default class NotionFlowPlugin extends Plugin {
                 (child) => (child as HTMLElement).dataset.callout === COL_TYPE
               ) as HTMLElement[]
             : [];
-          const interactive = !!cols.closest(".markdown-source-view.is-live-preview");
+          // Live Preview renders the Callout before it is attached, so
+          // whether these controls are reachable is only known once it
+          // is: every control starts in the Tab order and leaves it in the
+          // next frame unless it sits in Live Preview (Reading view keeps
+          // them hidden and inert).
+          const controls: HTMLElement[] = [];
 
           for (let index = 0; index < columns.length; index++) {
             const column = columns[index];
@@ -17520,10 +26929,11 @@ export default class NotionFlowPlugin extends Plugin {
               cls: "nf-col-menu",
               attr: {
                 type: "button",
-                tabindex: interactive ? "0" : "-1",
+                tabindex: "0",
                 "aria-label": t("Column actions"),
               },
             });
+            controls.push(columnButton);
             columnButton.dataset.nfColumnIndex = String(index);
             setIcon(columnButton, "more-horizontal");
             columnButton.addEventListener("mousedown", (evt) => {
@@ -17557,7 +26967,7 @@ export default class NotionFlowPlugin extends Plugin {
                 cls: "nf-col-resizer",
                 attr: {
                   role: "separator",
-                  tabindex: interactive ? "0" : "-1",
+                  tabindex: "0",
                   "aria-orientation": "vertical",
                   // The usage hint was previously a `title`, which stacked a
                   // native tooltip on top of Obsidian's. Keep the richer
@@ -17569,7 +26979,25 @@ export default class NotionFlowPlugin extends Plugin {
                 },
               });
               handle.dataset.nfColumnDivider = String(index);
+              controls.push(handle);
               content.insertBefore(handle, columns[index + 1]);
+              // The metadata only estimates the split (an auto column is
+              // not an even share once another is pinned): report what is
+              // on screen whenever the gutter is about to be used.
+              const syncValue = () => {
+                try {
+                  const widths = columns.map((column) => column.getBoundingClientRect().width);
+                  if (widths.some((width) => width <= 0)) return;
+                  handle.setAttribute(
+                    "aria-valuenow",
+                    String(columnPercentsFromWidths(widths)[index])
+                  );
+                } catch {
+                  // Detached: keep the estimate.
+                }
+              };
+              handle.addEventListener("focus", syncValue);
+              handle.addEventListener("pointerenter", syncValue);
               handle.addEventListener("pointerdown", (evt) => {
                 startColumnResizeFromDOM(handle, evt);
               });
@@ -17587,25 +27015,28 @@ export default class NotionFlowPlugin extends Plugin {
             }
           }
 
-          if (cols.querySelector(":scope > .nf-cols-menu")) continue;
-          const btn = cols.createEl("button", {
-            cls: "nf-cols-menu",
-            attr: {
-              type: "button",
-              tabindex: interactive ? "0" : "-1",
-              "aria-label": t("Column options"),
-            },
-          });
-          setIcon(btn, "columns-2");
-          btn.addEventListener("mousedown", (evt) => {
-            evt.preventDefault();
-            evt.stopPropagation();
-          });
-          btn.addEventListener("click", (evt) => {
-            evt.preventDefault();
-            evt.stopPropagation();
-            openColumnsMenuFromDOM(btn, evt);
-          });
+          if (!cols.querySelector(":scope > .nf-cols-menu")) {
+            const btn = cols.createEl("button", {
+              cls: "nf-cols-menu",
+              attr: {
+                type: "button",
+                tabindex: "0",
+                "aria-label": t("Column options"),
+              },
+            });
+            controls.push(btn);
+            setIcon(btn, "columns-2");
+            btn.addEventListener("mousedown", (evt) => {
+              evt.preventDefault();
+              evt.stopPropagation();
+            });
+            btn.addEventListener("click", (evt) => {
+              evt.preventDefault();
+              evt.stopPropagation();
+              openColumnsMenuFromDOM(btn, evt);
+            });
+          }
+          settleColumnControls(cols, controls);
         }
       }
 
@@ -17629,7 +27060,6 @@ export default class NotionFlowPlugin extends Plugin {
         wrapper.className = "nf-table-scroll";
         parent.insertBefore(wrapper, table);
         wrapper.appendChild(table);
-        this.tableScrollDocuments.add(ownerDocument);
 
         // A narrow table should not add a redundant landmark or Tab stop.
         // Keep those semantics in sync with real horizontal overflow as the
@@ -17667,28 +27097,35 @@ export default class NotionFlowPlugin extends Plugin {
           observer.observe(wrapper);
           observer.observe(table);
           this.tableScrollObservers.add(observer);
+          // A wrapper that never reaches a document never fires the
+          // observer, which would then hold its (pop-out) window forever.
+          // Obsidian unloads the section's render child with the section.
+          this.bindToSection(wrapper, ctx, () => {
+            observer.disconnect();
+            this.tableScrollObservers.delete(observer);
+          });
         }
         ownerWindow?.requestAnimationFrame(syncAccessibility);
       }
     });
 
+    // Every default chord comes from one list, which the tests check
+    // against core Obsidian's own defaults.
+    const defaultHotkeys = new Map<string, Hotkey[]>();
+    for (const { id, hotkey } of pluginDefaultHotkeys()) {
+      defaultHotkeys.set(id, [...(defaultHotkeys.get(id) ?? []), hotkey]);
+    }
+    const hotkeysFor = (id: string): Hotkey[] => defaultHotkeys.get(id) ?? [];
+
     // Turn-into without the pointer. The handle menu is the discoverable
     // path; these are the one-chord path for someone already typing, which
     // is the only time the conversion is actually wanted.
-    //
-    // Notion's own modifier per platform, and for the same reason it split
-    // them: Ctrl+Alt IS AltGr on the European layouts, where claiming
-    // Ctrl+Alt+2 would take the key that types "@". Mod+Shift is free of
-    // that and is what Notion uses off macOS.
-    const turnIntoModifiers: ("Mod" | "Alt" | "Shift")[] = Platform.isMacOS
-      ? ["Mod", "Alt"]
-      : ["Mod", "Shift"];
     for (const entry of TURN_INTO) {
       this.addCommand({
         id: `turn-into-${entry.id}`,
         name: entry.command,
         icon: entry.icon,
-        hotkeys: [{ modifiers: turnIntoModifiers, key: entry.digit }],
+        hotkeys: hotkeysFor(`turn-into-${entry.id}`),
         editorCallback: (editor) => this.turnBlockAtCaret(editor, entry.prefix),
       });
     }
@@ -17698,50 +27135,78 @@ export default class NotionFlowPlugin extends Plugin {
         id: `wrap-into-${entry.kind}`,
         name: entry.command,
         icon: entry.icon,
-        hotkeys: [{ modifiers: turnIntoModifiers, key: entry.key }],
-        editorCallback: (editor) => this.wrapBlockAtCaret(editor, entry.kind),
+        hotkeys: hotkeysFor(`wrap-into-${entry.kind}`),
+        editorCheckCallback: (checking, editor) => {
+          if (entry.kind === "toggle" && !this.settings.toggleBlocks) return false;
+          if (!checking) this.wrapBlockAtCaret(editor, entry.kind);
+          return true;
+        },
       });
     }
 
     this.addCommand({
+      id: "paste-as-table",
+      name: t("Table: paste clipboard as table"),
+      icon: "table",
+      editorCallback: async (editor) => {
+        let text = "";
+        try {
+          text = await navigator.clipboard.readText();
+        } catch {
+          text = "";
+        }
+        const md = delimitedTextToTable(text);
+        if (!md) {
+          new Notice(t("Nothing to paste as a table"));
+          return;
+        }
+        this.insertTableAtCaret(editor, md);
+      },
+    });
+    this.addCommand({
+      id: "open-block-menu",
+      name: t("Open block menu"),
+      icon: "grip-vertical",
+      hotkeys: hotkeysFor("open-block-menu"),
+      editorCallback: (editor) => this.openBlockMenuAtCaret(editor),
+    });
+    this.addCommand({
       id: "insert-block-below",
       name: t("Insert block below"),
       icon: "plus",
-      // Mod+Alt rather than the turn-into modifiers: off macOS those are
-      // Mod+Shift, and Mod+Shift+Enter already exits a code block.
-      hotkeys: [{ modifiers: ["Mod", "Alt"], key: "Enter" }],
+      hotkeys: hotkeysFor("insert-block-below"),
       editorCallback: (editor) => this.insertBlockAtCaret(editor, 1),
     });
     this.addCommand({
       id: "insert-block-above",
       name: t("Insert block above"),
       icon: "plus",
-      hotkeys: [{ modifiers: ["Mod", "Alt", "Shift"], key: "Enter" }],
+      hotkeys: hotkeysFor("insert-block-above"),
       editorCallback: (editor) => this.insertBlockAtCaret(editor, -1),
     });
     this.addCommand({
       id: "move-block-up",
       name: t("Move block up"),
-      hotkeys: [{ modifiers: ["Alt"], key: "ArrowUp" }],
+      hotkeys: hotkeysFor("move-block-up"),
       editorCallback: (editor) => this.moveBlockVert(editor, -1),
     });
     this.addCommand({
       id: "move-block-down",
       name: t("Move block down"),
-      hotkeys: [{ modifiers: ["Alt"], key: "ArrowDown" }],
+      hotkeys: hotkeysFor("move-block-down"),
       editorCallback: (editor) => this.moveBlockVert(editor, 1),
     });
     this.addCommand({
       id: "duplicate-block",
       name: t("Duplicate block"),
-      hotkeys: [{ modifiers: ["Alt", "Shift"], key: "D" }],
+      hotkeys: hotkeysFor("duplicate-block"),
       editorCallback: (editor) => this.duplicateBlock(editor),
     });
     this.addCommand({
       id: "exit-code-block",
       name: t("Exit code block"),
       // Mod+Enter alone is taken by Obsidian's toggle-checkbox hotkey.
-      hotkeys: [{ modifiers: ["Mod", "Shift"], key: "Enter" }],
+      hotkeys: hotkeysFor("exit-code-block"),
       editorCallback: (editor) => {
         const view = this.editorView(editor);
         if (!view) return;
@@ -17750,22 +27215,142 @@ export default class NotionFlowPlugin extends Plugin {
       },
     });
     this.addCommand({
+      id: "insert-link",
+      name: t("Insert or edit link"),
+      editorCallback: (editor) => {
+        const view = this.focusedNestedView(editor) ?? this.editorView(editor);
+        if (view && !inFenceBody(view.state)) openLinkPopover(view, this);
+      },
+    });
+    this.addCommand({
+      id: "open-shortcut-guide",
+      name: t("Open shortcut guide"),
+      icon: "keyboard",
+      callback: () => this.openShortcutGuide(),
+    });
+    // Try palettes and looks over the open notes (DESIGN-SPEC §7.2). A plain
+    // callback, so it also runs from Reading view, a canvas or an empty
+    // workspace; the switcher previews through the host and saves only on
+    // a commit.
+    this.addCommand({
+      id: "change-note-style",
+      name: t("Change note style…"),
+      icon: "palette",
+      callback: () => new StyleSwitcherModal(this.app, this.noteStyleHost()).open(),
+    });
+    // Collapse, expand, or flip every toggle and foldable Callout in the
+    // note (⌘⌥T on macOS), in one undoable edit of the fold markers.
+    registerToggleFoldCommands(this, {
+      view: (editor) => this.focusedNestedView(editor) ?? this.editorView(editor),
+      options: (view) => {
+        const fences = cachedFences(view.state.doc);
+        return { toggles: this.settings.toggleBlocks !== false, skipLine: (n) => fenceAt(fences, n) != null };
+      },
+    });
+    // Rewrite every /toc list from the note's current headings; offered
+    // only in a note that has one.
+    this.addCommand({
+      id: "refresh-toc",
+      name: t("Refresh table of contents"),
+      icon: "refresh-cw",
+      editorCheckCallback: (checking, editor) => {
+        const view = this.editorView(editor);
+        if (!view) return false;
+        const opts = this.tocOptions(view);
+        if (!findTocBlocks(view.state.doc, opts).length) return false;
+        if (!checking) applyTocRefresh(view, scanHeadings(view.state.doc, opts), opts);
+        return true;
+      },
+    });
+    // "Show comments in this note": every comment as a list (Enter jumps,
+    // ⌘↵ resolves); hidden while commenting is off.
+    registerCommentsList(this, {
+      resolve: (view, pos) => this.comments.resolve(view, pos),
+      enabled: () => !this.unloaded && this.settings.commenting,
+    });
+    // ⋯ → Page style (font, small text, full width) and its commands.
+    registerPageStyle(this);
+    // The emoji icon and cover above a note's title; saveSettings refreshes
+    // it when "Page icon and cover" changes.
+    this.pageHeader = this.addChild(
+      new PageHeader(this, { enabled: () => !this.unloaded && this.settings.pageHeader })
+    );
+    this.addCommand({
       id: "clear-formatting",
       name: t("Clear formatting"),
       // Notion's own clear-formatting chord.
-      hotkeys: [{ modifiers: ["Mod"], key: "\\" }],
+      hotkeys: hotkeysFor("clear-formatting"),
       editorCallback: (editor) => {
-        const view = this.editorView(editor);
+        const view = this.focusedNestedView(editor) ?? this.editorView(editor);
         if (view) clearInlineFormatting(view);
       },
     });
     this.addCommand({
       id: "add-comment",
       name: t("Add comment"),
-      hotkeys: [{ modifiers: ["Mod", "Shift"], key: "M" }],
+      hotkeys: hotkeysFor("add-comment"),
       editorCallback: (editor) => {
         const view = this.editorView(editor);
-        if (view) startAddComment(this, view);
+        if (view) this.comments.add(view);
+      },
+    });
+    this.addCommand({
+      id: "toggle-underline",
+      name: t("Toggle underline"),
+      icon: "underline",
+      hotkeys: hotkeysFor("toggle-underline"),
+      editorCallback: (editor) => {
+        const view = this.focusedNestedView(editor, { cells: true }) ?? this.editorView(editor);
+        if (!view || view.composing) return;
+        // A bare caret underlines the word it sits inside, as ⌘B does.
+        if (view.state.selection.main.empty) {
+          const head = view.state.selection.main.head;
+          const word = view.state.wordAt(head);
+          if (!word || !(word.from < head && head < word.to)) return;
+          view.dispatch({ selection: { anchor: word.from, head: word.to } });
+        }
+        toggleUnderline(view);
+      },
+    });
+    // The toolbar's colour rows, opened on the selection with the first
+    // swatch focused: arrows pick, Enter applies. No default chords.
+    const colorRowCommand = (id: string, name: string, icon: string, mode: "color" | "bg") =>
+      this.addCommand({
+        id,
+        name,
+        icon,
+        editorCheckCallback: (checking, editor) => {
+          if (!this.settings.floatingToolbar) return false;
+          const view = this.focusedNestedView(editor, { cells: true }) ?? this.editorView(editor);
+          if (!view || view.state.selection.main.empty) return false;
+          if (checking) return true;
+          // After the command palette has closed and handed focus back.
+          const win = view.dom.ownerDocument.defaultView ?? window;
+          win.setTimeout(() => {
+            if (view.dom.isConnected) TOOLBAR_HANDLES.get(view)?.openPalette(mode);
+          }, 0);
+          return true;
+        },
+      });
+    colorRowCommand("open-text-color", t("Text color…"), "baseline", "color");
+    colorRowCommand("open-highlight-color", t("Highlight color…"), "highlighter", "bg");
+    this.addCommand({
+      id: "apply-last-text-color",
+      name: t("Apply last used text color"),
+      icon: "baseline",
+      editorCallback: (editor) => {
+        const view = this.focusedNestedView(editor) ?? this.editorView(editor);
+        if (view) this.applyLastColor(view, "color");
+      },
+    });
+    this.addCommand({
+      id: "apply-last-highlight-color",
+      name: t("Apply last used highlight"),
+      icon: "highlighter",
+      hotkeys: hotkeysFor("apply-last-highlight-color"),
+      editorCallback: (editor) => {
+        const view = this.focusedNestedView(editor) ?? this.editorView(editor);
+        if (view) this.applyLastColor(view, "bg");
       },
     });
     this.addCommand({
@@ -17788,12 +27373,12 @@ export default class NotionFlowPlugin extends Plugin {
     });
     this.addCommand({
       id: "format-table",
-      name: t("Format table"),
+      name: t("Table: format"),
       editorCallback: (editor) => this.withTable(editor, formatTable),
     });
     this.addCommand({
       id: "table-insert-row-below",
-      name: t("Insert row below"),
+      name: t("Table: insert row below"),
       editorCallback: (editor) =>
         this.editTable(editor, (t, r) => tableInsertRow(t, r, "below"), (r, c, oldText) => ({
           row: tableInsertRowIndex(oldText, r, "below"),
@@ -17802,7 +27387,7 @@ export default class NotionFlowPlugin extends Plugin {
     });
     this.addCommand({
       id: "table-insert-row-above",
-      name: t("Insert row above"),
+      name: t("Table: insert row above"),
       editorCallback: (editor) =>
         this.editTable(editor, (t, r) => tableInsertRow(t, r, "above"), (r, c, oldText) => ({
           row: tableInsertRowIndex(oldText, r, "above"),
@@ -17811,19 +27396,19 @@ export default class NotionFlowPlugin extends Plugin {
     });
     this.addCommand({
       id: "table-insert-column-right",
-      name: t("Insert column right"),
+      name: t("Table: insert column right"),
       editorCallback: (editor) =>
         this.editTable(editor, (t, _r, c) => tableInsertColumn(t, c, "right"), (r, c) => ({ row: r, col: c + 1 })),
     });
     this.addCommand({
       id: "table-insert-column-left",
-      name: t("Insert column left"),
+      name: t("Table: insert column left"),
       editorCallback: (editor) =>
         this.editTable(editor, (t, _r, c) => tableInsertColumn(t, c, "left"), (r, c) => ({ row: r, col: c })),
     });
     this.addCommand({
       id: "table-delete-row",
-      name: t("Delete row"),
+      name: t("Table: delete row"),
       editorCallback: (editor) =>
         this.editTable(editor, (t, r) => tableDeleteRow(t, r), (r, c, _oldText, newText) => ({
           row: nearestTableDataRow(newText, r),
@@ -17832,18 +27417,46 @@ export default class NotionFlowPlugin extends Plugin {
     });
     this.addCommand({
       id: "table-delete-column",
-      name: t("Delete column"),
+      name: t("Table: delete column"),
       editorCallback: (editor) =>
         this.editTable(editor, (t, _r, c) => tableDeleteColumn(t, c), (r, c, _oldText, newText) => ({
           row: r,
           col: Math.min(c, Math.max(0, ...newText.split("\n").map((line) => parseRow(line).length - 1))),
         })),
     });
+    const structureCommands: { id: string; name: string; kind: TableStructureEdit }[] = [
+      { id: "table-move-row-up", name: "Table: move row up", kind: "move-row-up" },
+      { id: "table-move-row-down", name: "Table: move row down", kind: "move-row-down" },
+      { id: "table-move-column-left", name: "Table: move column left", kind: "move-column-left" },
+      { id: "table-move-column-right", name: "Table: move column right", kind: "move-column-right" },
+      { id: "table-duplicate-row", name: "Table: duplicate row", kind: "duplicate-row" },
+      { id: "table-sort-column-asc", name: "Table: sort column ascending", kind: "sort-asc" },
+      { id: "table-sort-column-desc", name: "Table: sort column descending", kind: "sort-desc" },
+    ];
+    for (const { id, name, kind } of structureCommands) {
+      this.addCommand({
+        id,
+        name: t(name),
+        editorCallback: (editor) => {
+          const recipe = tableEditRecipe(kind);
+          this.editTable(editor, recipe.edit, recipe.target);
+        },
+      });
+    }
 
     // Right-click inside a table (source mode / mid-creation) → cell ops.
     this.registerEvent(
       this.app.workspace.on("editor-menu", (menu, editor) => {
         if (this.settings.tableEditing) this.addTableMenu(menu, editor);
+        // The handle's menu without the handle: the block under the caret.
+        if (this.settings.dragHandles) {
+          menu.addItem((item) =>
+            item
+              .setTitle(t("Block menu…"))
+              .setIcon("grip-vertical")
+              .onClick(() => this.openBlockMenuAtCaret(editor))
+          );
+        }
       })
     );
 
@@ -17852,7 +27465,9 @@ export default class NotionFlowPlugin extends Plugin {
       this.app.workspace.on("editor-paste", (evt, editor) => {
         if (!this.settings.pasteUrlLinks || evt.defaultPrevented) return;
         const clip = evt.clipboardData?.getData("text/plain") ?? "";
-        const replacement = buildPasteLink(editor.getSelection(), clip);
+        const view = this.editorView(editor);
+        if (!view) return;
+        const replacement = selectedUrlPaste(view.state, clip);
         if (!replacement) return;
         evt.preventDefault();
         editor.replaceSelection(replacement);
@@ -17870,15 +27485,29 @@ export default class NotionFlowPlugin extends Plugin {
         if (!RE_HTTP_URL.test(clip) || editor.getSelection()) return;
         const cur = editor.getCursor();
         const view = this.editorView(editor);
-        if (view && fenceAt(cachedFences(view.state.doc), cur.line + 1)) return;
-        const before = editor.getLine(cur.line).slice(0, cur.ch);
-        // Inside inline code (odd backtick count) a URL is data, and right
-        // after "](", it is already a link destination.
-        if (((before.match(/`/g) ?? []).length % 2) === 1) return;
-        if (/\]\([^)\s]*$/.test(before)) return;
+        if (!view || view.state.readOnly || view.state.selection.ranges.length !== 1) return;
+        const fetchTitle = urlPasteAllowed(view.state);
         evt.preventDefault();
         editor.replaceSelection(clip);
-        void this.linkifyPastedUrl(editor, clip, cur);
+        if (fetchTitle) void this.linkifyPastedUrl(editor, clip, cur);
+      })
+    );
+
+    // Spreadsheet cells (tab-separated text) pasted on an empty line become
+    // a Markdown table, also when the app adds its header-less HTML grid.
+    // Other rich tables keep Obsidian's own HTML conversion (see
+    // preferTsvOverHtml); code blocks and table rows paste as is.
+    this.registerEvent(
+      this.app.workspace.on("editor-paste", (evt, editor) => {
+        if (!this.settings.pasteTableFromTsv || evt.defaultPrevented) return;
+        const data = evt.clipboardData;
+        if (!data || data.files.length > 0) return;
+        const plain = data.getData("text/plain");
+        if (!preferTsvOverHtml(data.getData("text/html"), plain) || !this.pasteTableAllowed(editor)) return;
+        const md = tsvToMarkdownTable(plain, { format: formatTable });
+        if (!md) return;
+        evt.preventDefault();
+        this.insertTableAtCaret(editor, md);
       })
     );
 
@@ -17915,34 +27544,335 @@ export default class NotionFlowPlugin extends Plugin {
     );
 
     this.applyCleanClass();
-  }
-
-  private watchMermaidDocument(ownerDocument: Document) {
-    if (this.mermaidDocumentObservers.has(ownerDocument)) return;
-    const scan = (root: ParentNode) => {
-      const element = root as Element;
-      if (typeof element.matches === "function" && element.matches(".mermaid")) {
-        this.enhanceMermaid(element as HTMLElement);
-      }
-      for (const diagram of Array.from(
-        root.querySelectorAll<HTMLElement>(".mermaid")
-      )) this.enhanceMermaid(diagram);
-    };
-    scan(ownerDocument);
-    const Observer = ownerDocument.defaultView?.MutationObserver;
-    if (!Observer || !ownerDocument.body) return;
-    const observer = new Observer((records) => {
-      for (const record of records) {
-        for (const node of Array.from(record.addedNodes)) {
-          if (node.nodeType === 1) scan(node as Element);
+    // Pop-out windows get the same body state, including ones opened later
+    // (and, once the layout is restored, the ones it reopened).
+    this.registerEvent(
+      this.app.workspace.on("window-open", (win) => {
+        try {
+          this.applyBodyState(win.doc);
+        } catch (error) {
+          console.error("Notion Flow: styling a new window failed", error);
         }
-      }
+      })
+    );
+    this.app.workspace.onLayoutReady(() => {
+      this.applyCleanClass();
+      this.routeEditorChords();
+      this.showVersionNotice();
     });
-    observer.observe(ownerDocument.body, { childList: true, subtree: true });
-    this.mermaidDocumentObservers.set(ownerDocument, observer);
   }
 
-  private enhanceMermaid(diagram: HTMLElement) {
+  /**
+   * Obsidian's hotkey scope runs ⌘B / ⌘I / ⌘K before any CodeMirror keymap,
+   * always on the workspace's OUTER editor — even when focus is in a
+   * column's child editor, where the edit then landed in front of the
+   * `> [!nf-cols]` row. Wrapping the commands routes them to the editor
+   * that really has focus, and gives ⌘K the link card the toolbar
+   * advertises.
+   */
+  private routeEditorChords() {
+    this.wrapEditorCommand("editor:insert-link", (orig, editor, ctx) => {
+      // Typed inside one of our cards (the link card itself): the chord
+      // belongs to that card, never to the note behind it.
+      const outer = this.editorView(editor);
+      if (outer && focusInPluginPopover(outer.dom.ownerDocument)) return;
+      const view = this.focusedNestedView(editor, { cells: true }) ?? outer;
+      const card = this.settings.floatingToolbar && !!view && !inFenceBody(view.state);
+      // An open column owns the caret even when focus is elsewhere; the
+      // outer editor's caret waits on the row's hidden source.
+      if (view === outer && outer && columnEditorOpen(outer)) return;
+      if (view && inColumnEditor(view)) {
+        // Never the original here: it would write into the outer note.
+        if (card) openLinkPopover(view, this);
+        else insertLink(view);
+        return;
+      }
+      if (view && card) {
+        openLinkPopover(view, this);
+        return;
+      }
+      return orig(editor, ctx);
+    });
+    const formats: [string, string, string, string][] = [
+      ["editor:toggle-bold", "**", "<b>", "</b>"],
+      ["editor:toggle-italics", "*", "<i>", "</i>"],
+    ];
+    for (const [id, marker, open, close] of formats) {
+      this.wrapEditorCommand(id, (orig, editor, ctx) => {
+        const outer = this.editorView(editor);
+        // Inside one of our cards (the link card's inputs) ⌘B/⌘I are the
+        // card's; Obsidian's toggle would write into the note behind it.
+        if (outer && focusInPluginPopover(outer.dom.ownerDocument)) return;
+        // Table cells and the note itself keep Obsidian's own toggle.
+        const view = this.focusedNestedView(editor);
+        if (view && inColumnEditor(view)) {
+          toggleInlineFormatIn(view, marker, open, close);
+          return;
+        }
+        // Never the original while a column is open: the outer caret sits
+        // at the start of `> [!nf-cols]`, where markers would break the row.
+        if (outer && columnEditorOpen(outer)) return;
+        return orig(editor, ctx);
+      });
+    }
+  }
+
+  /** Swap an Obsidian command's editorCallback for `wrap`, restored on
+   *  unload unless something wrapped it again after us. Obsidian's derived
+   *  checkCallback reads editorCallback at call time, so this takes effect
+   *  for hotkeys and the palette alike. */
+  private wrapEditorCommand(
+    id: string,
+    wrap: (orig: EditorCommandCallback, editor: Editor, ctx: unknown) => unknown
+  ) {
+    const commands = (this.app as unknown as {
+      commands?: { commands?: Record<string, { editorCallback?: EditorCommandCallback }> };
+    }).commands?.commands;
+    const cmd = commands?.[id];
+    const orig = cmd?.editorCallback;
+    if (!cmd || !orig) return;
+    const wrapped: EditorCommandCallback = (editor, ctx) => wrap(orig.bind(cmd), editor, ctx);
+    cmd.editorCallback = wrapped;
+    this.register(() => {
+      if (cmd.editorCallback === wrapped) cmd.editorCallback = orig;
+    });
+  }
+
+  /** The nested CodeMirror inside `editor` a command acts on — the focused
+   *  column child or (with `cells`) table-cell editor, else the open column
+   *  while focus is outside every nested editor (see nestedEditorFor) — or
+   *  null when the note itself is meant. */
+  private focusedNestedView(editor: Editor, opts: { cells?: boolean } = {}): EditorView | null {
+    const outer = this.editorView(editor);
+    if (!outer) return null;
+    return nestedEditorFor(outer, opts);
+  }
+
+  /** The editor's keyboard guide, from the command palette, the settings
+   *  tab and the first-run notice. */
+  openShortcutGuide() {
+    new ShortcutsModal(
+      this.app,
+      editorHelpSections(this.settings, this.app),
+      t("Change these under Settings → Hotkeys."),
+      () => this.openHotkeySettings()
+    ).open();
+  }
+
+  /** Obsidian's Hotkeys tab, filtered to the plugin's commands — or a
+   *  Notice saying where it is when the (private) settings API is gone. */
+  openHotkeySettings() {
+    try {
+      const setting = (this.app as unknown as {
+        setting?: {
+          open?: () => void;
+          openTabById?: (id: string) => unknown;
+          activeTab?: {
+            searchComponent?: { setValue?: (value: string) => unknown; onChanged?: () => void };
+          };
+        };
+      }).setting;
+      setting?.open?.();
+      if (!setting?.openTabById?.("hotkeys")) throw new Error("no Hotkeys tab");
+      const search = setting.activeTab?.searchComponent;
+      search?.setValue?.("Notion Flow");
+      search?.onChanged?.();
+    } catch {
+      new Notice(t("Could not open Hotkeys; open Settings → Hotkeys and search Notion Flow."));
+    }
+  }
+
+  /** Once the workspace is up: welcome a fresh install with a pointer to
+   *  the handle and the guide, or tell an updated one where the changes
+   *  are. Shown once per version; the version is recorded right away so a
+   *  session that changes no setting does not see it again. */
+  private showVersionNotice() {
+    const version = this.manifest.version;
+    if (this.unloaded || this.lastSeenVersion === version) return;
+    if (this.lastSeenVersion === undefined) {
+      const notice = new Notice(
+        t("Notion Flow is ready. Hover a block for ⋮⋮ and +, or open the shortcut guide."),
+        12000
+      );
+      noticeLink(notice, () => this.openShortcutGuide());
+    } else {
+      const notice = new Notice(
+        t("Notion Flow updated to {v}. Click to see what changed.").replace("{v}", version),
+        12000
+      );
+      // What changed, in the app: the highlights with Try it, and the tour.
+      noticeLink(notice, () => this.openWhatsNew());
+    }
+    this.lastSeenVersion = version;
+    void this.persistSettings();
+  }
+
+  /** This version's What's new dialog: each highlight's Try it runs its
+   *  command (or opens these settings), and the tour notes are written
+   *  into the vault on request. */
+  openWhatsNew() {
+    new WhatsNewModal(this.app, {
+      version: this.manifest.version,
+      onTour: () => void createTourNote(this.app),
+      run: (id) =>
+        (this.app as unknown as { commands: { executeCommandById(id: string): boolean } }).commands.executeCommandById(id),
+      openSettings: () => this.openOwnSettings(),
+    }).open();
+  }
+
+  /** Settings → Notion Flow (Obsidian's private settings API), scrolled to
+   *  the Note style section. */
+  openOwnSettings() {
+    const setting = (this.app as unknown as {
+      setting?: { open?: () => void; openTabById?: (id: string) => unknown };
+    }).setting;
+    setting?.open?.();
+    setting?.openTabById?.(this.manifest.id);
+    this.settingTab?.revealNoteStyle();
+  }
+
+  /** Whether a paste at the caret may turn into a table: a single caret on
+   * an otherwise empty line, outside code fences and table rows. */
+  private pasteTableAllowed(editor: Editor): boolean {
+    if (editor.getSelection()) return false;
+    const cur = editor.getCursor();
+    const lineText = editor.getLine(cur.line);
+    if (!blankPasteLine(lineText) || isTableRow(lineText)) return false;
+    const view = this.editorView(editor);
+    if (!view) return true;
+    return !view.state.readOnly && !fenceAt(cachedFences(view.state.doc), cur.line + 1);
+  }
+
+  /** Drop a table onto the caret: an empty line takes it whole (quoted
+   * rows keep the line's marker); elsewhere the table lands on rows of its
+   * own so the surrounding text is never spliced into a cell. */
+  private insertTableAtCaret(editor: Editor, md: string) {
+    const from = editor.getCursor("from");
+    const to = editor.getCursor("to");
+    const lineText = editor.getLine(from.line);
+    if (from.line === to.line && blankPasteLine(lineText)) {
+      const prefixLength = quoteMarkerPrefix(lineText)?.length ?? 0;
+      const lineAt = (n: number) => (n >= 0 && n < editor.lineCount() ? editor.getLine(n) : null);
+      const landing = tablePasteLanding(lineText, lineAt(from.line + 1), md, {
+        previous: lineAt(from.line - 1),
+        following: lineAt(from.line + 2),
+      });
+      editor.replaceRange(
+        landing.insert,
+        { line: from.line, ch: prefixLength },
+        { line: from.line, ch: lineText.length }
+      );
+      // Below the table, never on its last row: Live Preview's table widget
+      // would move that caret into the first header cell.
+      editor.setCursor({ line: from.line + landing.caretLineOffset, ch: landing.caretCh });
+      return;
+    }
+    const before = lineText.slice(0, from.ch).trim() !== "";
+    const after = editor.getLine(to.line).slice(to.ch).trim() !== "";
+    const insert = (before ? "\n" : "") + md + (after ? "\n" : "");
+    editor.replaceSelection(buildQuotedPaste(lineText, from.ch, insert) ?? insert);
+  }
+
+  /**
+   * Reading view hands the post-processor one section at a time, before it
+   * attaches that section: a caption row that opens its own section cannot
+   * see the table or code block in the section above yet, and a table or
+   * code block re-rendered on its own cannot see the caption below it.
+   * Bind across that seam once the section is in the document — a frame
+   * later, or up to three more while it is still detached. A caption the
+   * note does not attach to that block (a blank line between) stays apart,
+   * as it does in Live Preview.
+   */
+  private bindCaptionSeamLater(
+    el: HTMLElement,
+    ctx: MarkdownPostProcessorContext,
+    attempt = 0
+  ) {
+    const win = el.ownerDocument.defaultView ?? window;
+    win.requestAnimationFrame(() =>
+      guard("caption seam", () => undefined, () => {
+        if (!el.isConnected) {
+          if (attempt < 3) this.bindCaptionSeamLater(el, ctx, attempt + 1);
+          return;
+        }
+        const owned = (section: Element): boolean => {
+          let info: { text: string; lineStart: number } | null = null;
+          try {
+            info = ctx.getSectionInfo(section as HTMLElement);
+          } catch {
+            info = null;
+          }
+          // No source to check (a rendered embed): adjacency decides, as
+          // it does in rendered Callouts.
+          if (!info) return true;
+          return captionOwnedInSource(info.text, info.lineStart);
+        };
+        for (const caption of Array.from(
+          el.querySelectorAll<HTMLElement>("small.nf-caption.nf-rendered-caption[data-nf-kind]")
+        )) {
+          const captionBlock =
+            caption.parentElement?.tagName === "P" ? caption.parentElement : caption;
+          const kind = caption.dataset.nfKind;
+          const owner = captionOwnerIn(captionBlock, kind, el);
+          if (!owner) continue;
+          // A table or code caption that opens the section: its owner is
+          // across the seam. (An image shares the caption's paragraph.)
+          const acrossSeam =
+            kind !== "image" &&
+            captionBlock.parentElement === el &&
+            !captionBlock.previousElementSibling;
+          if (acrossSeam && !owned(el)) continue;
+          bindCaptionOwner(caption, captionBlock, owner);
+        }
+        const next = el.matches(".el-pre, .el-table") ? el.nextElementSibling : null;
+        const lead = sectionLeadCaption(next);
+        if (next && lead && lead.caption.classList.contains("nf-rendered-caption")) {
+          const owner = captionOwnerIn(lead.captionBlock, lead.caption.dataset.nfKind, next);
+          if (owner && owned(next)) bindCaptionOwner(lead.caption, lead.captionBlock, owner);
+        }
+      })
+    );
+  }
+
+  /** Mermaid replaces a section's code block with its diagram after the
+   * post-processor has run. Watch that one section for the `.mermaid`
+   * element and stop as soon as it is enhanced, or when Obsidian unloads
+   * the section (a MarkdownRenderChild on `el` follows its lifecycle). */
+  private watchMermaidSection(el: HTMLElement, ctx: MarkdownPostProcessorContext) {
+    const Observer = el.ownerDocument.defaultView?.MutationObserver;
+    if (!Observer) return;
+    const stop = () => {
+      observer.disconnect();
+      this.mermaidMutationObservers.delete(observer);
+    };
+    const observer = new Observer(() => {
+      const diagrams = Array.from(el.querySelectorAll<HTMLElement>(".mermaid"));
+      if (diagrams.length === 0) return;
+      for (const diagram of diagrams) this.enhanceMermaid(diagram, ctx);
+      stop();
+    });
+    observer.observe(el, { childList: true, subtree: true });
+    this.mermaidMutationObservers.add(observer);
+    this.bindToSection(el, ctx, stop);
+  }
+
+  /** Run `cleanup` when Obsidian unloads the rendered section `el` belongs
+   *  to: a MarkdownRenderChild on `el` follows the section's lifecycle, so
+   *  an observer tied to it cannot outlive a closed note or pop-out window.
+   *  Looked up at runtime so the test bundle's `obsidian` stand-in needs no
+   *  such class; without it the cleanup still runs with the plugin. */
+  private bindToSection(el: HTMLElement, ctx: MarkdownPostProcessorContext | undefined, cleanup: () => void) {
+    if (!ctx) return;
+    const RenderChild = Reflect.get(obsidianApi, "MarkdownRenderChild") as
+      | (new (containerEl: HTMLElement) => MarkdownRenderChild)
+      | undefined;
+    if (!RenderChild) return;
+    const child = new RenderChild(el);
+    child.register(cleanup);
+    ctx.addChild(child);
+  }
+
+  private enhanceMermaid(diagram: HTMLElement, ctx?: MarkdownPostProcessorContext) {
     if (diagram.dataset.nfMermaidEnhanced === "true") return;
     diagram.dataset.nfMermaidEnhanced = "true";
     diagram.classList.add("nf-mermaid");
@@ -18002,6 +27932,10 @@ export default class NotionFlowPlugin extends Plugin {
         observer.observe(diagram);
         observer.observe(svg);
         this.mermaidResizeObservers.add(observer);
+        this.bindToSection(diagram, ctx, () => {
+          observer.disconnect();
+          this.mermaidResizeObservers.delete(observer);
+        });
       }
       ownerWindow?.requestAnimationFrame(sync);
       return true;
@@ -18022,10 +27956,28 @@ export default class NotionFlowPlugin extends Plugin {
     });
     observer.observe(diagram, { childList: true, subtree: true });
     this.mermaidMutationObservers.add(observer);
+    this.bindToSection(diagram, ctx, () => {
+      observer.disconnect();
+      this.mermaidMutationObservers.delete(observer);
+    });
+  }
+
+  /** Whether focus is in one of the plugin's cards (see guardPopoverCommand),
+   *  in the window of `editor`. */
+  private cardHasFocus(editor: Editor): boolean {
+    const doc = this.editorView(editor)?.dom.ownerDocument ?? (typeof document === "undefined" ? null : document);
+    return !!doc && focusInPluginPopover(doc);
   }
 
   private editorView(editor: Editor): EditorView | null {
     return ((editor as unknown as { cm?: EditorView }).cm as EditorView) ?? null;
+  }
+
+  /** The drag-handle instance that owns `view`'s block selection, or null
+   *  when drag handles (and with them block mode) are off. */
+  blockSelectionFor(view: EditorView) {
+    if (!this.settings.dragHandles || !this.dragHandlePlugin) return null;
+    return view.plugin(this.dragHandlePlugin);
   }
 
 
@@ -18034,15 +27986,100 @@ export default class NotionFlowPlugin extends Plugin {
    * the move and duplicate commands use, so a row of a Callout converts as
    * that row and a list item brings its children — the block the writer
    * would point at, not the paragraph the cursor happens to sit in.
+   *
+   * A text selection retypes every block it touches, in one transaction,
+   * the way the block-selection batch does; structural blocks it cannot
+   * retype are left alone and counted in a notice.
    */
   private turnBlockAtCaret(editor: Editor, prefix: string) {
-    const view = this.editorView(editor);
+    const view = this.focusedNestedView(editor) ?? this.editorView(editor);
     if (!view) return;
     const doc = view.state.doc;
     const fences = cachedFences(doc);
-    const block = innerBlockAt(doc, editor.getCursor().line + 1, fences);
+    const selection = view.state.selection.main;
+    const blocks = selection.empty
+      ? []
+      : blocksTouchedBySelection(doc, selection.from, selection.to, fences);
+    if (blocks.length > 1) {
+      const result = batchTurnIntoChanges(doc, blocks, prefix, fences);
+      if (result.changes.length > 0) {
+        view.dispatch({ changes: result.changes, userEvent: "input.turninto.batch" });
+      }
+      if (result.skipped > 0) {
+        new Notice(
+          result.skipped === 1
+            ? t("Skipped 1 structural block.")
+            : t("Skipped {n} structural blocks.").replace("{n}", String(result.skipped))
+        );
+      }
+      return;
+    }
+    const block = blocks[0] ??
+      innerBlockAt(doc, doc.lineAt(selection.head).number, fences);
     if (!block) return;
     turnBlockInto(view, block, prefix, fences);
+  }
+
+  /** The handle's block menu from the keyboard or the context menu: for
+   *  the one selected block when block mode holds exactly one, else for
+   *  the block under the caret, anchored under that block's first row. */
+  private openBlockMenuAtCaret(editor: Editor) {
+    const view = this.editorView(editor);
+    if (!view) return;
+    const dh = this.dragHandlePlugin ? view.plugin(this.dragHandlePlugin) : null;
+    const doc = view.state.doc;
+    const fences = cachedFences(doc);
+    const selected = dh?.selectedBlocks.length === 1 ? dh.selectedBlocks[0] : null;
+    const block = selected ??
+      innerBlockAt(doc, doc.lineAt(view.state.selection.main.head).number, fences);
+    if (!block || block.startLine < 1 || block.endLine > doc.lines) return;
+    const from = doc.line(block.startLine).from;
+    const show = (c: { left: number; bottom: number } | null) => {
+      // A row outside the rendered viewport has no coordinates; fall back
+      // to the editor's own corner rather than the window's.
+      const rect = view.contentDOM.getBoundingClientRect();
+      // Like a handle click, the menu takes over from the selection so the
+      // two do not both answer Escape. clearBlockSelection dispatches no
+      // transaction, so it is safe from a measure write phase too.
+      if (selected) dh?.clearBlockSelection();
+      // The block stays highlighted while its menu is open, as it does
+      // for a handle click (measured a frame later: this can run inside
+      // a measure cycle).
+      if (dh) {
+        dh.menuBlock = block;
+        dh.refreshMenuHighlight();
+      }
+      try {
+        openBlockMenu(
+          this.app,
+          view,
+          block,
+          fences,
+          { x: c?.left ?? rect.left, y: (c?.bottom ?? rect.top) + 2 },
+          this.settings.slashCommands,
+          this.settings.columnLayout,
+          this.settings.toggleBlocks,
+          dh ? (landed, span, inside) => dh.landSelection(landed, span, inside) : undefined,
+          dh ? () => dh.releaseMenuBlock(block) : undefined,
+          this.operations
+        );
+      } catch (err) {
+        dh?.releaseMenuBlock(block);
+        throw err;
+      }
+    };
+    const c = view.coordsAtPos(from);
+    if (c) {
+      show(c);
+      return;
+    }
+    // The block's first row is scrolled out of CodeMirror's rendered
+    // range: bring it on screen, then anchor once it has coordinates.
+    view.dispatch({ effects: EditorView.scrollIntoView(from, { y: "center" }) });
+    view.requestMeasure({
+      read: (v) => v.coordsAtPos(from),
+      write: (coords) => show(coords),
+    });
   }
 
   /** Wrap the block at the caret in a Callout, a toggle, or a fence. */
@@ -18079,36 +28116,7 @@ export default class NotionFlowPlugin extends Plugin {
     url: string,
     at: EditorPosition
   ) {
-    let title: string | null = null;
-    let timer = 0;
-    try {
-      const res = await Promise.race([
-        requestUrl({ url, throw: false }),
-        new Promise<null>((resolve) => {
-          timer = window.setTimeout(() => resolve(null), 8000);
-        }),
-      ]);
-      if (res && res.status >= 200 && res.status < 300) {
-        const type = String(res.headers?.["content-type"] ?? "");
-        if (!type || type.includes("html")) {
-          title = extractHtmlTitle(res.text ?? "");
-        }
-      }
-    } catch {
-      // Offline, blocked, or a non-text body — keep the plain URL.
-    } finally {
-      window.clearTimeout(timer);
-    }
-    if (!title) return;
-    const link = buildTitledLink(url, title);
-    if (!link) return;
-    try {
-      const line = editor.getLine(at.line) ?? "";
-      if (line.slice(at.ch, at.ch + url.length) !== url) return;
-      editor.replaceRange(link, at, { line: at.line, ch: at.ch + url.length });
-    } catch {
-      // The editor may have been detached while the title loaded.
-    }
+    await this.pastedUrlTitles.linkify(editor, url, at);
   }
 
   /** Rewrite the table under the cursor with `fn`; no-op elsewhere. */
@@ -18181,10 +28189,29 @@ export default class NotionFlowPlugin extends Plugin {
     });
   }
 
-  /** Add cursor-relative table operations to a right-click editor menu. */
+  /** Add cursor-relative table operations to a right-click editor menu:
+   *  one "Table ▸" entry whose submenu holds them all, so the editor menu
+   *  (Obsidian's own, native for users with nativeMenus on, where a
+   *  submenu survives but icons do not) keeps "Block menu…" in view. */
   private addTableMenu(menu: Menu, editor: Editor) {
     const c = this.tableCtx(editor);
     if (!c) return;
+    menu.addSeparator();
+    let sub: Menu | null = null;
+    menu.addItem((top) => {
+      top.setTitle(t("Table")).setIcon("table");
+      const withSub = top as unknown as { setSubmenu?: () => Menu };
+      if (typeof withSub.setSubmenu === "function") sub = withSub.setSubmenu();
+      else top.setIsLabel(true);
+    });
+    // Without submenus (older builds) the rows follow the label flat.
+    this.fillTableMenu((sub as Menu | null) ?? menu, editor, c);
+  }
+
+  /** The table operations at the caret, grouped: insert | move and
+   *  duplicate | sort | alignment | colours and Format table | delete.
+   *  Titles are plain text: a native menu keeps only titleEl's text. */
+  private fillTableMenu(menu: Menu, editor: Editor, c: NonNullable<ReturnType<NotionFlowPlugin["tableCtx"]>>) {
     const d = c.lines.findIndex(isDelimRow);
     const onBodyRow = !isDelimRow(c.lines[c.row]) && c.row > (d < 0 ? 0 : d);
     const nCols = Math.max(1, ...c.lines.map((l) => parseRow(l).length));
@@ -18208,7 +28235,6 @@ export default class NotionFlowPlugin extends Plugin {
         if (!opts.disabled) i.onClick(() => this.editTable(editor, fn, target));
       });
 
-    menu.addSeparator();
     add("Insert row above", "arrow-up-to-line", (t, r) => tableInsertRow(t, r, "above"), (r, col, oldText) => ({
       row: tableInsertRowIndex(oldText, r, "above"),
       col,
@@ -18220,21 +28246,20 @@ export default class NotionFlowPlugin extends Plugin {
     add("Insert column left", "arrow-left-to-line", (t, _r, col) => tableInsertColumn(t, col, "left"), (r, col) => ({ row: r, col }));
     add("Insert column right", "arrow-right-to-line", (t, _r, col) => tableInsertColumn(t, col, "right"), (r, col) => ({ row: r, col: col + 1 }));
     menu.addSeparator();
-    add("Delete row", "trash-2", (t, r) => tableDeleteRow(t, r), (r, col, _oldText, newText) => ({
-      row: nearestTableDataRow(newText, r),
-      col,
-    }), { disabled: !onBodyRow, warning: onBodyRow });
-    add("Delete column", "trash-2", (t, _r, col) => tableDeleteColumn(t, col), (r, col, _oldText, newText) => ({
-      row: r,
-      col: Math.min(col, Math.max(0, ...newText.split("\n").map((line) => parseRow(line).length - 1))),
-    }), { disabled: nCols <= 1, warning: nCols > 1 });
+    for (const { kind, title, icon } of TABLE_STRUCTURE_ROWS) {
+      if (kind === "sort-asc") menu.addSeparator();
+      const recipe = tableEditRecipe(kind);
+      add(title, icon, recipe.edit, recipe.target, {
+        disabled: !tableStructureEditEnabled(c.text, c.row, c.col, kind),
+      });
+    }
     menu.addSeparator();
     const currentAlign = tableColumnAlignment(c.text, c.col);
     const align = (a: ColumnAlign, title: string, icon: string) =>
       add(title, icon, (t, _r, col) => tableSetAlignment(t, col, a), (r, col) => ({ row: r, col }), {
         checked: currentAlign === a,
       });
-    align("none", "Default alignment", "minus");
+    align("none", "Default alignment", "align-justify");
     align("left", "Align left", "align-left");
     align("center", "Align center", "align-center");
     align("right", "Align right", "align-right");
@@ -18253,13 +28278,20 @@ export default class NotionFlowPlugin extends Plugin {
         if (typeof withSub.setSubmenu !== "function") return;
         const sub = withSub.setSubmenu();
         for (const name of PALETTE_COLORS) {
-          sub.addItem((si) =>
+          sub.addItem((si) => {
             si
               .setTitle(t(COLOR_LABELS[name]))
-              .setIcon("circle")
+              .setIcon("square")
               .setChecked(current === name)
-              .onClick(() => apply(name))
-          );
+              .onClick(() => apply(name));
+            // A filled square previews the tint in a DOM menu (styles.css
+            // .nf-menu-swatch.is-bg); a native menu keeps the label.
+            const iconEl = (si as unknown as { iconEl?: HTMLElement }).iconEl;
+            if (iconEl) {
+              iconEl.style.color = `rgb(var(--nf-${name}-rgb))`;
+              iconEl.classList.add("nf-menu-swatch", "is-bg");
+            }
+          });
         }
         sub.addItem((si) =>
           si
@@ -18278,6 +28310,15 @@ export default class NotionFlowPlugin extends Plugin {
     menu.addItem((i) =>
       i.setTitle(t("Format table")).setIcon("wand-2").onClick(() => this.withTable(editor, formatTable))
     );
+    menu.addSeparator();
+    add("Delete row", TABLE_DELETE_ICONS.row, (t, r) => tableDeleteRow(t, r), (r, col, _oldText, newText) => ({
+      row: nearestTableDataRow(newText, r),
+      col,
+    }), { disabled: !onBodyRow, warning: onBodyRow });
+    add("Delete column", TABLE_DELETE_ICONS.column, (t, _r, col) => tableDeleteColumn(t, col), (r, col, _oldText, newText) => ({
+      row: r,
+      col: Math.min(col, Math.max(0, ...newText.split("\n").map((line) => parseRow(line).length - 1))),
+    }), { disabled: nCols <= 1, warning: nCols > 1 });
   }
 
   /** Move the block under the cursor above/below its neighbor, cursor riding along. */
@@ -18337,175 +28378,270 @@ export default class NotionFlowPlugin extends Plugin {
     const cur = editor.getCursor();
     const block = innerBlockAt(doc, cur.line + 1, fences);
     if (!block) return;
-    const text = doc.sliceString(
-      doc.line(block.startLine).from,
-      doc.line(block.endLine).to
-    );
-    const lines = text.split("\n");
-    const last = lines[lines.length - 1];
-    const seam = seamRowBetween(last, lines[0], block.quotePrefix);
-    const nextText = block.endLine < doc.lines
-      ? doc.line(block.endLine + 1).text
-      : "";
-    const trailing = seamRowBetween(last, nextText, block.quotePrefix);
+    const copy = duplicateBlockChange(doc, block);
     view.dispatch({
-      changes: {
-        from: doc.line(block.endLine).to,
-        insert:
-          (seam === null ? "\n" : `\n${seam}\n`) +
-          text +
-          (trailing === null ? "" : `\n${trailing}`),
-      },
+      changes: { from: copy.from, insert: copy.insert },
       userEvent: "input.duplicate",
     });
     editor.setCursor({
-      line:
-        cur.line +
-        (block.endLine - block.startLine + 1) +
-        (seam === null ? 0 : 1),
+      line: cur.line + (copy.copyLine - block.startLine),
       ch: cur.ch,
     });
   }
 
   onunload() {
+    // Collected before the teardown below detaches anything; menus go
+    // first, since an open one could still edit a note.
+    const docs = this.styleDocuments();
+    hideTrackedMenus();
+    this.canvasEnhancements?.destroy();
+    this.canvasEnhancements = null;
+    this.unloaded = true;
+    this.operations.dispose();
     for (const observer of this.tableScrollObservers) observer.disconnect();
     this.tableScrollObservers.clear();
     for (const observer of this.mermaidMutationObservers) observer.disconnect();
     this.mermaidMutationObservers.clear();
     for (const observer of this.mermaidResizeObservers) observer.disconnect();
     this.mermaidResizeObservers.clear();
-    for (const observer of this.mermaidDocumentObservers.values()) observer.disconnect();
-    this.mermaidDocumentObservers.clear();
-    for (const doc of this.tableScrollDocuments) {
-      for (const wrapper of Array.from(doc.querySelectorAll<HTMLElement>(".nf-table-scroll"))) {
-        const table = wrapper.querySelector<HTMLTableElement>(":scope > table");
-        if (table && wrapper.parentElement) wrapper.parentElement.insertBefore(table, wrapper);
-        wrapper.remove();
+    // Every open window's tables, pop-outs included (styleDocuments finds
+    // them through their leaves), go back to their unwrapped DOM.
+    for (const doc of docs) {
+      try {
+        for (const wrapper of queryAllIn<HTMLElement>(doc, ".nf-table-scroll")) {
+          const table = wrapper.querySelector<HTMLTableElement>(":scope > table");
+          if (table && wrapper.parentElement) wrapper.parentElement.insertBefore(table, wrapper);
+          wrapper.remove();
+        }
+      } catch (error) {
+        console.error("Notion Flow: unwrapping tables on unload failed", error);
       }
     }
-    this.tableScrollDocuments.clear();
-    for (const cls of [
-      "nf-clean",
-      "nf-dragging",
-      "nf-resizing-columns",
-      "nf-tables",
-      "nf-table-stripes",
-      "nf-thead-tint",
-      "nf-list-color",
-      "nf-quote-color",
-      "nf-code-color",
-      "nf-code-block-edit",
-      "nf-callout-menu",
-      "nf-columns",
-      "nf-comments",
-    ]) {
-      document.body.classList.remove(cls);
+    for (const doc of docs) {
+      // One detached pop-out must not stop the others from being cleaned.
+      try {
+        const body = doc.body;
+        clearBodyStyle(body);
+        for (const cls of this.bodyClassesSet) body.classList.remove(cls);
+        for (const cls of TRANSIENT_BODY_CLASSES) body.classList.remove(cls);
+        for (const name of this.bodyVarsSet) body.style.removeProperty(name);
+        for (const host of queryAllIn(doc, ".nf-block-menu-anchor")) host.remove();
+        for (const el of queryAllIn(doc, "[data-nf-list-phase]")) {
+          el.removeAttribute("data-nf-list-phase");
+        }
+      } catch (error) {
+        console.error("Notion Flow: cleaning a window on unload failed", error);
+      }
     }
-    for (const theme of CODE_THEMES) {
-      if (theme !== "default") document.body.classList.remove(`nf-code-theme-${theme}`);
-    }
-    document.body.style.removeProperty("--nf-table-header-bg");
-    document.body.style.removeProperty("--nf-list-marker");
-    document.body.style.removeProperty("--nf-quote-bar");
-    document.body.style.removeProperty("--nf-inline-code");
   }
 
-  /** Each appearance feature drives its own body class, so table look,
-   *  stripes, header tint, and marker color work independently of the
-   *  cleaner-rendering toggle. */
-  applyCleanClass() {
-    document.body.classList.toggle("nf-clean", this.settings.cleanRendering);
+  /** Record and set one body class, so unload removes exactly the ones
+   *  the plugin wrote, from every window. */
+  private setBodyClass(doc: Document, cls: string, on: boolean) {
+    this.bodyClassesSet.add(cls);
+    doc.body.classList.toggle(cls, on);
+  }
+
+  /** Record and set (or, for null, remove) one body custom property. */
+  private setBodyVar(doc: Document, name: string, value: string | null) {
+    this.bodyVarsSet.add(name);
+    if (value == null) doc.body.style.removeProperty(name);
+    else doc.body.style.setProperty(name, value);
+  }
+
+  /** The main window's document and every pop-out window's, found through
+   *  the leaves they hold. */
+  styleDocuments(): Document[] {
+    const docs = new Set<Document>([document]);
+    try {
+      this.app.workspace.iterateAllLeaves((leaf) => {
+        const doc = leaf.view?.containerEl?.ownerDocument;
+        if (doc?.body) docs.add(doc);
+      });
+    } catch {
+      // The workspace is not laid out yet: the main window is all there is.
+    }
+    return [...docs];
+  }
+
+  /** The note style (palette × look × overrides, DESIGN-SPEC §6.3) on the
+   *  given windows' bodies. One computed style per settings state; only the
+   *  differences are written, so an unchanged style costs no restyle. */
+  applyNoteStyle(docs: Document[] = this.styleDocuments(), style?: BodyStyle) {
+    const computed = style ?? computeBodyStyle(this.settings, noteStyleEnv);
+    for (const doc of docs) {
+      try {
+        applyBodyStyle(doc.body, computed);
+      } catch (error) {
+        console.error("Notion Flow: applying the note style failed", error);
+      }
+    }
+  }
+
+  /** The TOC module's options for `view`'s note (see tocOptionsFor). */
+  tocOptions(view: EditorView): TocOptions {
+    return tocOptionsFor(this.app, view);
+  }
+
+  /** What the note-style UI (galleries, switcher, code-theme gallery)
+   *  works through. Reads the settings lazily: Restore defaults replaces
+   *  the object. A commit made through it (the switcher, in the main
+   *  window) also refreshes the settings tab while that is open in its
+   *  own window; the tab builds its own host from this one. */
+  noteStyleHost(): NoteStyleHost {
+    const plugin = this;
+    return {
+      app: this.app,
+      get settings() {
+        return plugin.settings;
+      },
+      save: async () => {
+        await plugin.saveSettings();
+        plugin.settingTab?.noteStyleChangedIfShown();
+      },
+      apply: () => plugin.applyNoteStyle(),
+      preview: (s) => plugin.previewNoteStyle(s),
+      dependsOn: () => {},
+      changed: () => plugin.settingTab?.noteStyleChangedIfShown(),
+    };
+  }
+
+  /** Show `s`'s note style on every window without saving it (the
+   *  switcher's live preview); applyNoteStyle() restores the saved one. */
+  previewNoteStyle(s: NoteStyleSettings) {
+    this.applyNoteStyle(this.styleDocuments(), computeBodyStyle(s, noteStyleEnv));
+  }
+
+  /** Everything the plugin keeps on one window's <body>: each appearance
+   *  feature drives its own class (table look, stripes and the rest work
+   *  independently of cleaner rendering), the translated hints, and the
+   *  note style. */
+  applyBodyState(doc: Document, style?: BodyStyle) {
+    const s = this.settings;
+    this.setBodyClass(doc, "nf-clean", s.cleanRendering);
     // Generated content cannot be localized from CSS, so the translated
     // hint is published as a CSS string once, here.
-    document.body.style.setProperty(
-      "--nf-empty-hint",
-      JSON.stringify(t("Type / for commands"))
+    this.setBodyVar(doc, "--nf-empty-hint", JSON.stringify(t("Type / for commands")));
+    this.setBodyVar(doc, "--nf-caption-hint", JSON.stringify(t("Add caption")));
+    this.setBodyVar(
+      doc,
+      "--nf-toggle-empty-hint",
+      JSON.stringify(t("Empty toggle. Click to add content."))
     );
+    this.setBodyClass(doc, "nf-callout-menu", s.calloutEditing);
+    this.setBodyClass(doc, "nf-code-block-edit", s.codeBlockEditing);
+    this.setBodyClass(doc, "nf-columns", s.columnLayout);
+    this.setBodyClass(doc, "nf-toggles", s.toggleBlocks);
+    this.setBodyClass(doc, "nf-comments", s.commenting);
+    this.setBodyClass(doc, "nf-tables", s.tableStyle);
+    this.setBodyClass(doc, "nf-table-stripes", s.tableStripes);
+    this.applyNoteStyle([doc], style);
+  }
+
+  /** Apply the body state to every window (settings changed or loaded). */
+  applyCleanClass() {
+    const style = computeBodyStyle(this.settings, noteStyleEnv);
+    for (const doc of this.styleDocuments()) {
+      try {
+        this.applyBodyState(doc, style);
+      } catch (error) {
+        console.error("Notion Flow: applying body classes failed", error);
+      }
+    }
     // Settings can be enabled after a note has already rendered. Upgrade the
     // current document immediately instead of waiting for another Markdown
     // render pass; pop-out documents are picked up by their post-processors.
     if (this.settings.cleanRendering) {
-      this.watchMermaidDocument(document);
       for (const diagram of Array.from(
         document.querySelectorAll<HTMLElement>(".mermaid")
       )) this.enhanceMermaid(diagram);
     }
-    document.body.classList.toggle(
-      "nf-callout-menu",
-      this.settings.calloutEditing
-    );
-    document.body.classList.toggle(
-      "nf-code-block-edit",
-      this.settings.codeBlockEditing
-    );
-    document.body.classList.toggle("nf-columns", this.settings.columnLayout);
-    document.body.classList.toggle("nf-toggles", this.settings.toggleBlocks);
-    document.body.classList.toggle("nf-comments", this.settings.commenting);
-    document.body.classList.toggle("nf-tables", this.settings.tableStyle);
-    document.body.classList.toggle("nf-table-stripes", this.settings.tableStripes);
-    const c = this.settings.tableHeaderColor;
-    document.body.classList.toggle("nf-thead-tint", c !== "default");
-    if (c === "none") {
-      document.body.style.setProperty("--nf-table-header-bg", "transparent");
-    } else if ((PALETTE_COLORS as readonly string[]).includes(c)) {
-      // Theme palette tint: follows the theme and light/dark mode.
-      document.body.style.setProperty(
-        "--nf-table-header-bg",
-        paletteTint(c, 0.16)
-      );
-    } else {
-      document.body.style.removeProperty("--nf-table-header-bg");
-    }
-    const lm = this.settings.listMarkerColor;
-    document.body.classList.toggle("nf-list-color", lm !== "default");
-    if (lm === "accent") {
-      document.body.style.setProperty("--nf-list-marker", "var(--interactive-accent)");
-    } else if ((PALETTE_COLORS as readonly string[]).includes(lm)) {
-      document.body.style.setProperty("--nf-list-marker", paletteTextColor(lm));
-    } else {
-      document.body.style.removeProperty("--nf-list-marker");
-    }
-    const qb = this.settings.quoteBarColor;
-    document.body.classList.toggle("nf-quote-color", qb !== "default");
-    if (qb === "text") {
-      document.body.style.setProperty("--nf-quote-bar", "var(--text-normal)");
-    } else if (qb === "accent") {
-      document.body.style.setProperty("--nf-quote-bar", "var(--interactive-accent)");
-    } else if ((PALETTE_COLORS as readonly string[]).includes(qb)) {
-      document.body.style.setProperty("--nf-quote-bar", paletteTextColor(qb));
-    } else {
-      document.body.style.removeProperty("--nf-quote-bar");
-    }
-    const ic = this.settings.inlineCodeColor;
-    const validInlineCode = (PALETTE_COLORS as readonly string[]).includes(ic);
-    document.body.classList.toggle("nf-code-color", validInlineCode);
-    if (validInlineCode) {
-      document.body.style.setProperty("--nf-inline-code", paletteTextColor(ic));
-    } else {
-      document.body.style.removeProperty("--nf-inline-code");
-    }
-    const codeTheme = (CODE_THEMES as readonly string[]).includes(this.settings.codeTheme)
-      ? this.settings.codeTheme
-      : "default";
-    for (const theme of CODE_THEMES) {
-      if (theme !== "default") {
-        document.body.classList.toggle(
-          `nf-code-theme-${theme}`,
-          codeTheme === theme
-        );
-      }
-    }
   }
 
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const data = ((await this.loadData()) ?? null) as
+      | (Partial<NotionFlowSettings> & { lastSeenVersion?: string })
+      | null;
+    // The version travels in data.json beside the settings, never inside
+    // them, so it is neither a setting to reset nor one to compare.
+    this.lastSeenVersion = data ? data.lastSeenVersion ?? "" : undefined;
+    const { settings, persist } = loadedSettings(data);
+    this.settings = settings;
+    this.refreshDerivedSettings();
+    // The one-shot note-style migration is written once, right away.
+    // persistSettings, not saveSettings: this runs inside onload, before
+    // the editors and the canvas manager exist.
+    if (persist) await this.persistSettings();
+  }
+
+  /** Recompute the settings derived from others. canvasFallbackPalette is
+   *  the canvas preset paired with the note palette, which maps without a
+   *  palette of their own use; persistSettings never stores it. */
+  private refreshDerivedSettings() {
+    this.settings.canvasFallbackPalette = canvasPaletteFor(this.settings);
+  }
+
+  /** Write the settings to data.json, stamped with the version writing
+   *  them, without re-evaluating the editors: the light half of
+   *  saveSettings, enough for menu state such as slash recents. */
+  persistSettings(): Promise<void> {
+    return this.saveData(persistedSettings(this.settings, this.manifest.version));
+  }
+
+  /** Remember the colour just picked from the toolbar, so the last-used
+   *  swatch and commands can re-apply it. The toolbar reads it when it
+   *  acts, so storing it is enough. */
+  rememberColor(kind: "color" | "bg", name: PaletteColor | "default") {
+    const key = kind === "color" ? "lastTextColor" : "lastHighlightColor";
+    if (this.settings[key] === name) return;
+    this.settings[key] = name;
+    void this.persistSettings();
+  }
+
+  /** Re-apply the last colour picked from the toolbar to the selection. */
+  applyLastColor(view: EditorView, kind: "color" | "bg") {
+    const last = paletteChoice(
+      kind === "color" ? this.settings.lastTextColor : this.settings.lastHighlightColor,
+      kind
+    );
+    if (!last || view.state.selection.main.empty) {
+      new Notice(t("Pick a color from the toolbar first"));
+      return;
+    }
+    if (last === "default") {
+      applyDefaultHighlight(view);
+      return;
+    }
+    const index = PALETTE_COLORS.indexOf(last);
+    if (kind === "color") applyTextColor(view, TEXT_COLORS[index]);
+    else applyHighlightColor(view, BG_COLORS[index]);
   }
 
   async saveSettings() {
-    await this.saveData(this.settings);
+    this.operations.check();
+    this.refreshDerivedSettings();
+    await this.persistSettings();
     this.applyCleanClass();
-    // Re-evaluate editor extensions (nested-indent decorations, handles).
-    this.app.workspace.updateOptions();
+    this.canvasEnhancements?.refresh();
+    // The page header shows or goes at once (it rebuilds only what changed).
+    this.pageHeader?.refresh();
+    // Re-evaluate editor extensions (nested-indent decorations, handles)
+    // only when a setting they are configured from changed: reconfiguring
+    // rebuilds every open editor's state.
+    const key = editorSensitiveKey(this.settings);
+    const styleKey = noteStyleKey(this.settings);
+    if (key !== this.editorOptionsKey) {
+      this.editorOptionsKey = key;
+      this.app.workspace.updateOptions();
+    } else if (styleKey !== this.noteStyleOptionsKey) {
+      // The body classes just swapped change line heights: let each
+      // editor re-measure without reconfiguring it.
+      for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+        const editor = (leaf.view as { editor?: Editor }).editor;
+        if (editor) this.editorView(editor)?.requestMeasure();
+      }
+    }
+    this.noteStyleOptionsKey = styleKey;
   }
 }
 
@@ -18535,7 +28671,7 @@ const NOTION_FLOW_DEMO_ZH_URL =
   `${NOTION_FLOW_REPO_BLOB_URL}/examples/notion-flow-demo.zh.md`;
 
 type BooleanSettingKey = {
-  [K in keyof NotionFlowSettings]: NotionFlowSettings[K] extends boolean ? K : never;
+  [K in keyof NotionFlowSettings]-?: NotionFlowSettings[K] extends boolean ? K : never;
 }[keyof NotionFlowSettings];
 
 /** Compact caption editor shared by code blocks and images. Captions are
@@ -18560,8 +28696,10 @@ class TextPromptModal extends Modal {
   }
 
   onOpen() {
-    this.contentEl.addClass("nf-caption-modal");
-    this.contentEl.createEl("h2", { text: this.options.title });
+    this.contentEl.addClass("nf-prompt-modal");
+    // setTitle arrived in Obsidian 1.5; older builds still have the bare title element.
+    if (typeof this.setTitle === "function") this.setTitle(this.options.title);
+    else this.titleEl?.setText(this.options.title);
     this.input = this.contentEl.createEl("input", {
       cls: "nf-caption-input",
       attr: {
@@ -18602,34 +28740,92 @@ class TextPromptModal extends Modal {
   }
 }
 
+let confirmModalSeq = 0;
+
+/**
+ * What Enter does in a confirm dialog: a button other than the confirm
+ * button that holds focus inside the dialog keeps the browser's default
+ * (it activates THAT button — Cancel cancels), anything else confirms.
+ */
+export function confirmEnterAction(
+  active: { tagName?: string } | null,
+  modalEl: { contains(node: unknown): boolean },
+  confirmEl: unknown
+): "default" | "confirm" {
+  if (
+    active &&
+    active.tagName === "BUTTON" &&
+    active !== confirmEl &&
+    modalEl.contains(active)
+  ) {
+    return "default";
+  }
+  return "confirm";
+}
+
 /** Obsidian has no built-in confirm dialog; window.confirm renders a
  * jarring OS chrome dialog and blocks the renderer. This matches the
- * app's modal styling and keyboard handling (Esc cancels). */
+ * app's modal styling and keyboard handling: Esc cancels, and Enter
+ * activates the focused button. A destructive dialog starts on Cancel,
+ * so a reflexive Enter never deletes or resets anything; Tab reaches the
+ * warning button. */
 class ConfirmModal extends Modal {
+  private destructive: boolean;
+  private cancelButton: HTMLButtonElement | null = null;
+  private confirmButton: HTMLButtonElement | null = null;
+
   constructor(
     app: App,
+    private title: string,
     private message: string,
     private cta: string,
-    private onConfirm: () => void
+    private onConfirm: () => void,
+    options: { destructive?: boolean } = {}
   ) {
     super(app);
+    this.destructive = options.destructive ?? true;
+  }
+
+  open() {
+    // Obsidian focuses the first focusable element after onOpen (Cancel),
+    // which the Enter handler used to ignore. Place the focus ourselves.
+    (this as unknown as { hasInitialInputFocus: boolean }).hasInitialInputFocus = false;
+    super.open();
+    (this.destructive ? this.cancelButton : this.confirmButton)?.focus({
+      preventScroll: true,
+    });
   }
 
   onOpen() {
-    this.contentEl.createEl("p", { text: this.message });
+    // setTitle arrived in Obsidian 1.5; older builds still have the bare title element.
+    if (typeof this.setTitle === "function") this.setTitle(this.title);
+    else this.titleEl?.setText(this.title);
+    const messageId = `nf-confirm-message-${++confirmModalSeq}`;
+    this.contentEl.createEl("p", { text: this.message, attr: { id: messageId } });
+    this.modalEl.setAttribute("aria-describedby", messageId);
+    const confirm = () => {
+      this.close();
+      this.onConfirm();
+    };
+    this.scope.register([], "Enter", (evt) => {
+      // The modal lives in whichever window opened it (Settings is a popout).
+      const active = this.modalEl.ownerDocument.activeElement;
+      if (confirmEnterAction(active, this.modalEl, this.confirmButton) === "default") {
+        return true;
+      }
+      evt.preventDefault();
+      confirm();
+      return false;
+    });
     new Setting(this.contentEl)
-      .addButton((button) =>
-        button.setButtonText(t("Cancel")).onClick(() => this.close())
-      )
-      .addButton((button) =>
-        button
-          .setButtonText(this.cta)
-          .setWarning()
-          .onClick(() => {
-            this.close();
-            this.onConfirm();
-          })
-      );
+      .addButton((button) => {
+        button.setButtonText(t("Cancel")).onClick(() => this.close());
+        this.cancelButton = button.buttonEl;
+      })
+      .addButton((button) => {
+        button.setButtonText(this.cta).setWarning().onClick(confirm);
+        this.confirmButton = button.buttonEl;
+      });
   }
 
   onClose() {
@@ -18637,83 +28833,419 @@ class ConfirmModal extends Modal {
   }
 }
 
+/** Options a settings row takes beyond its name and description. */
+interface SettingRowOptions {
+  /** The boolean settings the row is meaningful under. While one of them
+   *  is off the row is disabled: dimmed, or hidden when that parent
+   *  governs more than three rows (see dependentRowState). */
+  dependsOn?: BooleanSettingKey | BooleanSettingKey[];
+  /** A muted chip after the name ("Needs Comments", already translated),
+   *  shown only while a parent is off. */
+  needs?: string;
+  /** Already translated text for the Details disclosure in place of the
+   *  automatic sentence split, so a hand-written short description can
+   *  keep the full text. */
+  details?: string;
+  /** A short, already translated note appended to the visible description. */
+  note?: string;
+  /** Values for the description's placeholders, already translated:
+   *  { panel: "…" } fills "{panel}". */
+  vars?: Record<string, string>;
+}
+
+/** A settings row that follows its parent toggles (syncDependents). */
+interface DependentRow {
+  setting: Setting;
+  parents: BooleanSettingKey[];
+  needsEl: HTMLElement | null;
+  /** Dimmed while a parent is off, never hidden and not counted: the Note
+   *  style section's Customize rows, which sit in their own disclosure. */
+  dimOnly?: boolean;
+}
+
+/**
+ * What a dependent settings row shows for its parents' values: "on" while
+ * every parent is on. While one is off, "hide" when that parent governs
+ * more than three rows (a switched-off feature folds its options away)
+ * and "dim" otherwise (a lone dependent stays in sight, disabled, with its
+ * "Needs …" chip). Pure; `counts` is the number of rows naming each parent.
+ */
+export function dependentRowState(
+  parents: readonly string[],
+  values: Record<string, unknown>,
+  counts: ReadonlyMap<string, number>
+): "on" | "dim" | "hide" {
+  const off = parents.filter((p) => values[p] !== true);
+  if (off.length === 0) return "on";
+  return off.some((p) => (counts.get(p) ?? 0) > 3) ? "hide" : "dim";
+}
+
+/** Every dependent row's state (dependentRowState), counting each parent
+ *  over the rows that are not dimOnly: those only ever dim, and do not make
+ *  their parent's other rows hide. */
+export function dependentStates(
+  rows: readonly { parents: readonly string[]; dimOnly?: boolean }[],
+  values: Record<string, unknown>
+): ("on" | "dim" | "hide")[] {
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    if (row.dimOnly) continue;
+    for (const parent of row.parents) counts.set(parent, (counts.get(parent) ?? 0) + 1);
+  }
+  const none = new Map<string, number>();
+  return rows.map((row) => dependentRowState(row.parents, values, row.dimOnly ? none : counts));
+}
+
+/** Whether a settings group hides: it holds only rows, and every one of
+ *  them is hidden. Other content (a gallery, a grid) keeps it shown. */
+export function settingGroupHidden(items: readonly { row: boolean; hidden: boolean }[]): boolean {
+  return items.length > 0 && items.every((item) => item.row && item.hidden);
+}
+
+type StringSettingKey = {
+  [K in keyof NotionFlowSettings]-?: NotionFlowSettings[K] extends string ? K : never;
+}[keyof NotionFlowSettings];
+
+/** CJK ideographs and symbols, compatibility ideographs, and fullwidth forms:
+ *  U+2E80–U+9FFF, U+F900–U+FAFF, U+FF00–U+FFEF. */
+const RE_WIDE_CHAR = /[⺀-鿿豈-﫿＀-￯]/;
+
+/** A description's length as the eye reads it: a CJK or fullwidth
+ *  character is as wide as two Latin letters, so Chinese copy collapses
+ *  behind Details at the same visual length as English. Counts code
+ *  points, so an emoji is one. */
+export function descriptionUnits(text: string): number {
+  let n = 0;
+  for (const ch of text) n += RE_WIDE_CHAR.test(ch) ? 2 : 1;
+  return n;
+}
+
+/**
+ * Settings copy stays readable at a glance: the leading sentences up to
+ * about `limit` units (descriptionUnits) stay visible, the rest goes behind
+ * a Details disclosure. Whole sentences only — the first is kept even when
+ * it alone is longer than the limit — and both Latin and CJK terminators
+ * count, so a translation splits at its own sentence ends.
+ */
+export function splitDescription(
+  text: string,
+  limit = 140
+): { lead: string; rest: string } {
+  const full = text.trim();
+  if (descriptionUnits(full) <= limit) return { lead: full, rest: "" };
+  const ends = /[.!?](?=\s)|[。！？]/g;
+  let cut = 0;
+  let m: RegExpExecArray | null;
+  while ((m = ends.exec(full))) {
+    const end = m.index + 1;
+    if (cut > 0 && descriptionUnits(full.slice(0, end)) > limit) break;
+    cut = end;
+  }
+  if (cut === 0 || cut >= full.length) return { lead: full, rest: "" };
+  return { lead: full.slice(0, cut).trim(), rest: full.slice(cut).trim() };
+}
+
+/** The chords a drag handle stands for, as a note after the row's
+ *  description: "⌘⌥= Insert block below · ⌥↑ Move block up · …". */
+function blockChordNote(app: App): string {
+  const ids: BlockActionId[] = [
+    "insert-block-below",
+    "move-block-up",
+    "move-block-down",
+    "duplicate-block",
+  ];
+  return ids
+    .flatMap((id) => {
+      const chord = commandChord(app, id, blockActionChord(id));
+      return chord ? [`${chord} ${t(BLOCK_ACTION_LABELS[id])}`] : [];
+    })
+    .join(" · ");
+}
+
+/** The block chords the settings row lists, in its order: the chord
+ *  Obsidian currently has for each command (the plugin's default while
+ *  nothing is bound), then the command's name. The toggle row goes with
+ *  the toggle feature. */
+export function blockChordRows(
+  app: App | null,
+  settings: NotionFlowSettings
+): { chord: string; label: string }[] {
+  const defaults = new Map<string, Hotkey>();
+  for (const { id, hotkey } of pluginDefaultHotkeys()) defaults.set(id, hotkey);
+  const row = (id: string, label: string) => {
+    const fallback = defaults.get(id);
+    return { chord: commandChord(app, id, fallback ?? null) ?? "", label };
+  };
+  const rows: { chord: string; label: string }[] = [];
+  for (const entry of TURN_INTO) rows.push(row(`turn-into-${entry.id}`, entry.title));
+  for (const entry of WRAP_INTO) {
+    if (entry.kind === "toggle" && !settings.toggleBlocks) continue;
+    rows.push(row(`wrap-into-${entry.kind}`, entry.title));
+  }
+  for (const id of Object.keys(BLOCK_ACTION_CHORDS) as BlockActionId[]) {
+    rows.push(row(id, t(BLOCK_ACTION_LABELS[id])));
+  }
+  return rows;
+}
+
 class NotionFlowSettingTab extends PluginSettingTab {
   plugin: NotionFlowPlugin;
   private resetButton: HTMLButtonElement | null = null;
+  /** The native 1.13 groups display() built, in order, and the list the
+   *  next row goes into. */
+  private groups: SettingGroup[] = [];
+  private list!: HTMLElement;
+  /** Rows to disable, dim or hide while one of their parent toggles is off. */
+  private dependents: DependentRow[] = [];
+  /** The Note style section, the code-theme gallery and the colour rows:
+   *  they share the settings and hear about each other's changes through
+   *  noteStyleChanged(). */
+  private noteStyleSection: ReturnType<typeof renderNoteStyleSection> | null = null;
+  private codeGallery: { refresh(): void } | null = null;
+  private colorRows: { key: DotKey; dropdown: DropdownComponent; dot: { refresh(): void } }[] = [];
+  /** Owns the preview card's rendered Markdown; unloaded on every rebuild. */
+  private previewComponent: Component | null = null;
+  /** Between display() and hide(): the tab is on screen. */
+  private shown = false;
 
   constructor(app: App, plugin: NotionFlowPlugin) {
     super(app, plugin);
     this.plugin = plugin;
+    this.icon = "blocks";
   }
 
-  /** A toggle setting bound to a boolean settings key. */
+  /** Open a native settings group (1.13's card with its heading); the rows
+   *  created next go into it. `title` is already translated. */
+  private group(title: string): SettingGroup {
+    const group = new SettingGroup(this.containerEl).setHeading(title);
+    this.groups.push(group);
+    this.list = group.listEl;
+    return group;
+  }
+
+  /** A new row at the end of `parent`, by default the current group's list. */
+  private row(parent: HTMLElement = this.list): Setting {
+    const group = this.groups[this.groups.length - 1];
+    if (!group || group.listEl !== parent) return new Setting(parent);
+    let setting!: Setting;
+    group.addSetting((s) => (setting = s));
+    return setting;
+  }
+
+  /** Fill a row's description — the leading sentences, an optional note,
+   *  the remainder behind Details — add its "Needs …" chip and register its
+   *  parent toggles. `text` is already translated. */
+  private describe(setting: Setting, text: string, opts: SettingRowOptions = {}): Setting {
+    // Chords in the prose read like every other chord the plugin prints
+    // (⌘⇧↩, not "Cmd/Ctrl+Shift+Enter"), in either language.
+    let full = expandProseChords(text);
+    for (const [name, value] of Object.entries(opts.vars ?? {})) full = full.split(`{${name}}`).join(value);
+    const { lead, rest } = opts.details
+      ? { lead: full, rest: expandProseChords(opts.details) }
+      : splitDescription(full);
+    setting.setDesc(lead);
+    if (opts.note) {
+      setting.descEl.createSpan({ cls: "nf-setting-note", text: ` ${opts.note}` });
+    }
+    if (rest) {
+      const details = setting.descEl.createEl("details", { cls: "nf-setting-details" });
+      // An explicit tab stop: Obsidian's Settings Tab sequence takes only
+      // the controls it recognises, and a bare <summary> is not one of them.
+      details.createEl("summary", { text: t("Details"), attr: { tabindex: "0" } });
+      details.createEl("p", { text: rest });
+    }
+    const parents = opts.dependsOn === undefined ? [] : [opts.dependsOn].flat();
+    let needsEl: HTMLElement | null = null;
+    if (opts.needs) {
+      needsEl = setting.nameEl.createSpan({ cls: "nf-setting-needs", text: opts.needs });
+      needsEl.toggle(false);
+    }
+    if (parents.length > 0) this.dependents.push({ setting, parents, needsEl });
+    return setting;
+  }
+
+  /** Bring every dependent row in line with all of its parents, and hide a
+   *  group whose rows are all hidden. Recomputed whole on every toggle. */
+  private syncDependents() {
+    const values = this.plugin.settings as unknown as Record<string, unknown>;
+    const states = dependentStates(this.dependents, values);
+    const hidden = new Set<Element>();
+    this.dependents.forEach((row, i) => {
+      const state = states[i];
+      row.setting.setDisabled(state !== "on");
+      row.setting.settingEl.toggleClass("nf-setting-dependent", state === "dim");
+      row.setting.settingEl.toggle(state !== "hide");
+      row.needsEl?.toggle(state === "dim");
+      if (state === "hide") hidden.add(row.setting.settingEl);
+    });
+    for (const group of this.groups) {
+      const items = Array.from(group.listEl.children).map((el) => ({
+        row: el.hasClass("setting-item"),
+        hidden: hidden.has(el),
+      }));
+      group.listEl.parentElement?.toggle(!settingGroupHidden(items));
+    }
+  }
+
+  /** A toggle row bound to a boolean settings key; `parent` is the list it
+   *  goes into (the current group's). */
   private toggle(
     parent: HTMLElement,
     name: string,
     desc: string,
-    key: BooleanSettingKey
+    key: BooleanSettingKey,
+    opts: SettingRowOptions = {}
   ): Setting {
-    return new Setting(parent)
+    const setting = this.row(parent)
       .setName(t(name))
-      .setDesc(t(desc))
       .addToggle((tg) =>
         tg.setValue(this.plugin.settings[key]).onChange(async (v) => {
           this.plugin.settings[key] = v;
           await this.plugin.saveSettings();
           this.syncResetButton();
+          this.syncDependents();
         })
       );
+    return this.describe(setting, t(desc), opts);
   }
 
-  /** A dropdown of theme palette colors, with leading custom options. */
+  /** A dropdown of theme palette colors, with leading custom options and a
+   *  dot in the effective color before it. */
   private colorDropdown(
     parent: HTMLElement,
     name: string,
     desc: string,
-    key: "tableHeaderColor" | "listMarkerColor" | "quoteBarColor" | "inlineCodeColor",
+    key: DotKey,
     leading: [string, string][]
   ): Setting {
-    return new Setting(parent)
+    let dropdown!: DropdownComponent;
+    const setting = this.row(parent)
       .setName(t(name))
-      .setDesc(t(desc))
       .addDropdown((dd) => {
+        dropdown = dd;
         for (const [value, label] of leading) dd.addOption(value, t(label));
         for (const c of PALETTE_COLORS) dd.addOption(c, t(COLOR_LABELS[c]));
         dd.setValue(this.plugin.settings[key]).onChange(async (v) => {
           this.plugin.settings[key] = v;
           await this.plugin.saveSettings();
           this.syncResetButton();
+          // The Note style section's override notice and chip count it too.
+          this.noteStyleSection?.refresh();
         });
       });
+    // The dot repaints on the select's own change; refresh() after the
+    // section or Restore changed the value behind it.
+    this.colorRows.push({ key, dropdown, dot: colorDot(setting, key, () => this.plugin.settings[key]) });
+    return this.describe(setting, t(desc));
   }
 
-  private codeThemeDropdown(parent: HTMLElement): Setting {
-    return new Setting(parent)
-      .setName(t("Code block theme"))
-      .setDesc(t("Syntax colors for fenced code blocks in Live Preview and Reading view. Obsidian adaptive is designed for the default theme and follows light/dark mode."))
+  /** A dropdown bound to a string settings key; `options` are [value,
+   *  label] pairs, the labels translated here. */
+  private dropdown(
+    name: string,
+    desc: string,
+    key: StringSettingKey,
+    options: [string, string][],
+    opts: SettingRowOptions = {}
+  ): Setting {
+    const setting = this.row()
+      .setName(t(name))
       .addDropdown((dd) => {
-        for (const value of CODE_THEMES) {
-          dd.addOption(value, t(CODE_THEME_LABELS[value]));
-        }
-        dd.setValue(this.plugin.settings.codeTheme).onChange(async (value) => {
-          this.plugin.settings.codeTheme = value;
+        for (const [value, label] of options) dd.addOption(value, t(label));
+        dd.setValue(this.plugin.settings[key]).onChange(async (value) => {
+          this.plugin.settings[key] = value;
           await this.plugin.saveSettings();
           this.syncResetButton();
         });
       });
+    return this.describe(setting, t(desc), opts);
   }
 
-  /** Native Obsidian settings heading (supported by the declared 1.5 minimum). */
-  private heading(title: string, desc: string): Setting {
-    return new Setting(this.containerEl)
-      .setName(t(title))
-      .setDesc(t(desc))
-      .setHeading();
+  /** A moment.js format field with a live sample under its description;
+   *  an emptied field falls back to the default. */
+  private formatField(name: string, desc: string, key: "dateFormat" | "timeFormat"): Setting {
+    const setting = this.describe(this.row().setName(t(name)), t(desc));
+    const preview = setting.descEl.createDiv({ cls: "nf-setting-format-preview" });
+    const paint = (format: string) => {
+      const sample = formatSlashDate(format || DEFAULT_SETTINGS[key]);
+      preview.setText(t("Preview: {value}").replace("{value}", () => sample));
+    };
+    setting.addText((text) => {
+      text
+        .setPlaceholder(DEFAULT_SETTINGS[key])
+        .setValue(this.plugin.settings[key])
+        .onChange(async (value) => {
+          this.plugin.settings[key] = value.trim() || DEFAULT_SETTINGS[key];
+          paint(value.trim());
+          await this.plugin.saveSettings();
+          this.syncResetButton();
+        });
+    });
+    paint(this.plugin.settings[key]);
+    return setting;
+  }
+
+  /** What the Note style section and the code-theme gallery work through:
+   *  the plugin's host, with the tab's dependents and change fan-out.
+   *  Settings are read lazily, since Restore defaults replaces the object. */
+  private styleHost(): NoteStyleHost {
+    const tab = this;
+    const plugin = this.plugin.noteStyleHost();
+    return {
+      app: this.app,
+      get settings() {
+        return tab.plugin.settings;
+      },
+      save: () => tab.plugin.saveSettings(),
+      apply: plugin.apply,
+      preview: plugin.preview,
+      dependsOn: (setting, key) => {
+        tab.dependents.push({ setting, parents: [key], needsEl: null, dimOnly: true });
+      },
+      changed: () => tab.noteStyleChanged(),
+    };
+  }
+
+  /** A note-style value changed (a gallery, Follow the style for all, a
+   *  colour row, the switcher): bring every note-style control in line in
+   *  place, keeping the scroll position and the focus. */
+  private noteStyleChanged() {
+    this.syncResetButton();
+    this.noteStyleSection?.refresh();
+    this.codeGallery?.refresh();
+    for (const row of this.colorRows) {
+      row.dropdown.setValue(this.plugin.settings[row.key]);
+      row.dot.refresh();
+    }
+  }
+
+  /** noteStyleChanged(), while the tab is on screen (the switcher commits
+   *  from the main window while Settings may be open in its own). */
+  noteStyleChangedIfShown() {
+    if (this.shown) this.noteStyleChanged();
+  }
+
+  /** Scroll the Note style section to the top of the open tab (What's new
+   *  → Try it). */
+  revealNoteStyle() {
+    const section = this.noteStyleSection?.el;
+    if (!this.shown || !section) return;
+    const box = this.containerEl;
+    const win = box.ownerDocument.defaultView ?? window;
+    const reveal = () => {
+      if (this.shown && section.isConnected) section.scrollIntoView({ block: "start" });
+    };
+    reveal();
+    // A Settings window that is still opening lays the tab out again as
+    // it sizes itself (measured: 112 px tall at first); follow it briefly.
+    if (typeof win.ResizeObserver !== "function") return;
+    const observer = new win.ResizeObserver(reveal);
+    observer.observe(box);
+    win.setTimeout(() => observer.disconnect(), 1000);
   }
 
   private usesDefaults(): boolean {
-    return (Object.keys(DEFAULT_SETTINGS) as Array<keyof NotionFlowSettings>)
-      .every((key) => this.plugin.settings[key] === DEFAULT_SETTINGS[key]);
+    return settingsAtDefaults(this.plugin.settings);
   }
 
   private syncResetButton() {
@@ -18724,195 +29256,413 @@ class NotionFlowSettingTab extends PluginSettingTab {
     window.open(url, "_blank", "noopener,noreferrer");
   }
 
+  /** Jump to Obsidian's Hotkeys tab filtered to this plugin, through the
+   *  private settings API; when that is missing, say where to look. */
+  private openHotkeys() {
+    this.plugin.openHotkeySettings();
+  }
+
+  /** Let go of what the last display() built beyond the DOM. */
+  private teardown() {
+    this.noteStyleSection?.destroy();
+    this.noteStyleSection = null;
+    this.codeGallery = null;
+    this.colorRows = [];
+    this.previewComponent?.unload();
+    this.previewComponent = null;
+  }
+
+  hide(): void {
+    this.shown = false;
+    this.teardown();
+    super.hide();
+  }
+
   display(): void {
+    // Restore defaults re-enters display() without a hide().
+    this.teardown();
     this.containerEl.empty();
     this.containerEl.addClass("nf-settings");
+    this.shown = true;
     this.resetButton = null;
+    this.groups = [];
+    this.dependents = [];
+    const canvas: SettingRowOptions = { dependsOn: "canvasEnhancements" };
+    // The map look rows only draw with Canvas appearance on (its
+    // .nf-canvas-polished scope), auto colors included; Fit, Card sizing
+    // and Background work without it.
+    const canvasLook: SettingRowOptions = { dependsOn: ["canvasEnhancements", "canvasAppearance"] };
+    const panel = { panel: t("the style panel (canvas toolbar → Style)") };
 
-    this.heading(
-      "Editing",
-      "Core controls for writing, inserting, formatting, and moving blocks."
-    );
+    this.group(t("Writing"));
     this.toggle(
-      this.containerEl,
-      "Drag-and-drop blocks",
-      "Show a drag handle in the left margin to reorder paragraphs, headings, lists, quotes, callouts, tables, and code blocks.",
-      "dragHandles"
-    );
-    this.toggle(
-      this.containerEl,
+      this.list,
       "Slash commands",
       "Type / to insert headings, lists, callouts, tables, and more.",
       "slashCommands"
     );
+    this.formatField(
+      "Date format",
+      "What /date, /tomorrow and /yesterday write, in moment.js tokens.",
+      "dateFormat"
+    );
+    this.formatField("Time format", "What /time writes, in moment.js tokens.", "timeFormat");
     this.toggle(
-      this.containerEl,
+      this.list,
+      "Empty-line hint",
+      'Show a faint "Type / for commands" on the empty line you are writing on, the way Notion labels an empty block. It is display-only — nothing is written to the note — and it never appears inside a code block or on a line that already has text.',
+      "emptyLineHint",
+      { dependsOn: "slashCommands", needs: t("Needs Slash commands") }
+    );
+    this.toggle(
+      this.list,
       "Floating format toolbar",
       "Show text formatting on selection and table actions when a cell is active.",
       "floatingToolbar"
     );
     this.toggle(
-      this.containerEl,
-      "Paste URLs as links",
-      "Pasting a URL over selected text turns it into [text](url).",
-      "pasteUrlLinks"
-    );
-    this.toggle(
-      this.containerEl,
-      "Paste URLs with page titles",
-      "Pasting a URL with nothing selected fetches the page title in the background and turns the URL into [title](url). The plain URL stays when the page cannot be reached; code contexts are never touched.",
-      "pasteUrlTitles"
-    );
-    this.toggle(
-      this.containerEl,
-      "Callout and quote enhancements",
-      "Enter continues the block and exits on an empty line, Backspace at the text start removes a \">\" marker, multi-line pastes stay inside the block, a Callout keeps its rendered look while you edit inside it, and clicking its icon opens the type menu.",
-      "calloutEditing"
-    );
-    this.toggle(
-      this.containerEl,
-      "Code block enhancements",
-      "In fenced code blocks, Enter keeps the current line's indentation (so blocks nested in lists stay aligned), Backspace at the text start removes one indent level, Enter after an unclosed ``` writes the closing fence, and Cmd/Ctrl+Shift+Enter (the \"Exit code block\" command) exits below the block.",
-      "codeBlockEditing"
-    );
-    this.toggle(
-      this.containerEl,
-      "Block indentation with Tab",
-      "Tab and Shift+Tab step the block holding the caret through the same nesting levels a sideways drag offers — a paragraph, heading, quote, or Callout tucks under the list item above it. List items stay with Obsidian's own indent, table cells with table navigation, and code blocks with code indentation; where a block has nowhere to go, Tab keeps its ordinary meaning.",
-      "blockIndent"
-    );
-    this.toggle(
-      this.containerEl,
+      this.list,
       "Shorthand while typing",
       'Type ">!" and a space for a Callout — ">!tip", ">!warning" pick the type, a trailing "+" or "-" makes it foldable — and "[]" and a space for a to-do. The shorthand only expands at the end of a line you are typing, never inside code, and one undo puts the characters back.',
       "inputRules"
     );
     this.toggle(
-      this.containerEl,
-      "Empty-line hint",
-      'Show a faint "Type / for commands" on the empty line you are writing on, the way Notion labels an empty block. It is display-only — nothing is written to the note — and it never appears inside a code block or on a line that already has text.',
-      "emptyLineHint"
+      this.list,
+      "Backspace removes list markers",
+      "At the start of a list item, to-do or heading, Backspace removes its marker in one step.",
+      "markerBackspace"
     );
     this.toggle(
-      this.containerEl,
+      this.list,
+      "Paste URLs as links",
+      "Pasting a URL over selected text turns it into [text](url).",
+      "pasteUrlLinks"
+    );
+    this.toggle(
+      this.list,
+      "Paste URLs with page titles",
+      "Pasting a URL with nothing selected fetches the page title in the background and turns the URL into [title](url). The plain URL stays when the page cannot be reached; code contexts are never touched.",
+      "pasteUrlTitles"
+    );
+    this.toggle(
+      this.list,
+      "Paste spreadsheet cells as a table",
+      "Tab-separated text pasted on an empty line becomes a Markdown table.",
+      "pasteTableFromTsv"
+    );
+
+    this.group(t("Blocks"));
+    this.toggle(
+      this.list,
+      "Drag-and-drop blocks",
+      "Show a drag handle in the left margin to reorder paragraphs, headings, lists, quotes, callouts, tables, and code blocks.",
+      "dragHandles",
+      { note: blockChordNote(this.app) }
+    );
+    this.toggle(
+      this.list,
       "Select blocks with Escape",
       "Escape selects the block holding the caret; ↑/↓ walk to the block above or below, Shift+↑/↓ extend the selection, and Enter returns to writing at its end. Everything the mouse selection already offers — copy, cut, duplicate, delete, format — works on it.",
-      "blockSelectKey"
+      "blockSelectKey",
+      { dependsOn: "dragHandles", needs: t("Needs Drag-and-drop blocks") }
     );
     this.toggle(
-      this.containerEl,
+      this.list,
+      "Block indentation with Tab",
+      "Tab and Shift+Tab step the block holding the caret through the same nesting levels a sideways drag offers — a paragraph, heading, quote, or Callout tucks under the list item above it. List items stay with Obsidian's own indent, table cells with table navigation, and code blocks with code indentation; where a block has nowhere to go, Tab keeps its ordinary meaning.",
+      "blockIndent"
+    );
+    this.toggle(
+      this.list,
+      "Callout and quote enhancements",
+      "Enter continues the block and exits on an empty line, Backspace at the text start removes a \">\" marker, multi-line pastes stay inside the block, a Callout keeps its rendered look while you edit inside it, and clicking its icon opens the type menu.",
+      "calloutEditing"
+    );
+    this.toggle(
+      this.list,
+      "Code block enhancements",
+      "In fenced code blocks, Enter keeps the current line's indentation (so blocks nested in lists stay aligned), Backspace at the text start removes one indent level, Enter after an unclosed ``` writes the closing fence, and Cmd/Ctrl+Shift+Enter (the \"Exit code block\" command) exits below the block.",
+      "codeBlockEditing"
+    );
+
+    this.group(t("Structures"));
+    this.toggle(
+      this.list,
       "Columns",
       'Notion-style side-by-side layout. Insert with "/columns", pick "Turn into columns" from a block menu, or drag a block to the right edge of another. Written as nested [!nf-cols]/[!nf-col] callouts — plain quotes in any other Markdown app. "[!nf-col|30]" pins a column to 30% width.',
       "columnLayout"
     );
     this.toggle(
-      this.containerEl,
+      this.list,
       "Toggles",
       'Notion-style foldable blocks. Insert with "/toggle" or pick "Turn into toggle" from a block menu; click the triangle to fold. Written as a [!nf-toggle] callout whose +/- marker holds the open state, so it is saved in the note and travels with it — a plain quote in any other Markdown app.',
       "toggleBlocks"
     );
     this.toggle(
-      this.containerEl,
+      this.list,
       "Comments",
       'Select text and add a note to it — from the toolbar 💬 button, the "Add comment" command, or Cmd/Ctrl+Shift+M. The anchor highlights in yellow with a 💬 marker; click the marker to read, edit, or resolve. Comments are stored inside the note and stay invisible in other Markdown apps.',
       "commenting"
     );
-
-    this.heading(
-      "Tables",
-      "Combine table editing, visual styling, header tint, and stripes independently."
-    );
     this.toggle(
-      this.containerEl,
+      this.list,
+      "Comment hover card",
+      "Show a styled card with Edit and Resolve when hovering commented text.",
+      "commentHoverCard",
+      { dependsOn: "commenting", needs: t("Needs Comments") }
+    );
+
+    this.group(t("Keyboard shortcuts"));
+    const chords = this.row()
+      .setName(t("Block chords"))
+      .addButton((button) =>
+        button
+          .setButtonText(t("Open shortcut guide"))
+          .onClick(() => this.plugin.openShortcutGuide())
+      )
+      .addButton((button) =>
+        button
+          .setButtonText(t("Customize in Hotkeys"))
+          .onClick(() => this.openHotkeys())
+      );
+    this.describe(
+      chords,
+      t("Chords for turning, wrapping, inserting, moving and selecting blocks. All are rebindable under {path}."),
+      { vars: { path: t("Settings → Hotkeys") } }
+    );
+    // The chips wrap onto a full-width grid inside the row, built in place.
+    // Settings open in a popout window, and setDesc only takes a fragment
+    // from the MAIN window's realm (anything else prints "[object
+    // DocumentFragment]"); the element helpers create nodes in the
+    // settings' own document.
+    const chordGrid = chords.settingEl.createDiv({ cls: "nf-chord-grid" });
+    for (const { chord, label } of blockChordRows(this.app, this.plugin.settings)) {
+      const item = chordGrid.createDiv({ cls: "nf-chord-item" });
+      // A command with no chord on this platform shows its name alone.
+      if (chord) item.createEl("kbd", { cls: "nf-help-key", text: chord });
+      item.createSpan({ cls: "nf-chord-label", text: label });
+    }
+
+    this.group(t("Canvas"));
+    this.toggle(this.list, "Canvas enhancements",
+      "Mind maps on any canvas: a toolbar, \"+\" buttons on cards, actions in the card menus, and commands for growing, arranging, folding, focusing, finding, and presenting cards, plus turning notes into maps and back.",
+      "canvasEnhancements");
+    this.toggle(this.list, "Canvas keyboard shortcuts",
+      "With one card selected: Tab adds a child and Enter the next card (a sibling; from a map's centre, a main topic; below a lone card, a new card), Shift+Enter a sibling above, Shift+Tab selects the parent, Space or F2 edits, Mod+/ folds, arrows walk a mind map, Alt+arrows move between any cards, and Alt+Shift+arrows reorder siblings. Mod+F finds a card.",
+      "canvasKeyboard", canvas);
+    this.toggle(this.list, "Canvas typing flow",
+      "While typing in a card, Enter finishes it and keeps it selected, so the next Enter adds the next card and Tab a child, all without the mouse. Shift+Enter breaks the line, and in a list, quote, table or code Enter keeps writing. Tab finishes and adds a child at once, and Shift+Tab takes a topic up a level. A new card left empty is removed when its editor closes; Escape finishes from anywhere.",
+      "canvasEditorKeys", canvas);
+    this.toggle(this.list, "Keep mind maps tidy",
+      "After you add, delete, resize, fold, or drag cards in a mind map, it re-arranges itself. Dragging a card carries its branch; drop it on another card to move it there, or past a sibling to reorder. Deleting a card keeps its children. Every adjustment joins the undo step of the change that caused it.",
+      "canvasAutoLayout", canvas);
+    this.toggle(this.list, "Fit mind-map cards to their text",
+      "After text changes, fit both dimensions with comfortable padding and a limit on long cards. Opening and closing an unchanged card keeps its size.",
+      "canvasAutoFit", canvas);
+    this.toggle(this.list, "Comfortable card editing",
+      "Cards are edited where they are, at the canvas zoom and in their own look, so nothing jumps when editing starts. A card grows only when its words need more room and keeps that room when you finish; a free card only grows taller, and never into the card below. Off: Obsidian's fixed-size editor.",
+      "canvasComfortableEdit", canvas);
+    this.dropdown(
+      "Card sizing",
+      "Roomy adds breathing room; Compact keeps topics small and needs Canvas appearance; Preserve width keeps your chosen width and fits only the height. Applies when text changes or you fit cards to content.",
+      "canvasCardSize",
+      [["comfortable", "Roomy"], ["compact", "Compact"], ["preserve", "Preserve width"]],
+      canvas
+    );
+    this.toggle(this.list, "Smooth mind-map motion",
+      "Cards glide to their new places when a map re-arranges, folds, or unfolds, instead of jumping. Follows the system's reduced-motion setting.",
+      "canvasAnimation", canvas);
+    this.toggle(this.list, "Canvas minimap",
+      "An overview in the corner whenever part of the canvas is off screen: click or drag it to move around. Also toggled from the canvas toolbar.",
+      "canvasMinimap", canvas);
+    this.toggle(this.list, "Task progress on cards",
+      "A card whose branch holds tasks (\"- [ ]\") shows how many are done, counting folded cards and the notes that file cards show. A card with a checklist of its own shows its count too.",
+      "canvasTaskProgress", canvas);
+
+    this.group(t("Default look"));
+    this.toggle(this.list, "Canvas appearance",
+      "Softer cards and clearer selection; in mind maps, a prominent root, bolder main branches, and branch lines without arrowheads. Requires Canvas enhancements.",
+      "canvasAppearance", canvas);
+    this.dropdown(
+      "Mind-map style",
+      "The look of maps that have not picked their own in {panel}. Clean: a tinted central topic, soft pills for main branches, plain words for subtopics. Cards: every topic keeps its card. Vivid: solid colorful topics. Minimal: words and lines only. Pastel: soft color blocks without outlines. Gradient: glowing gradient topics. Cards that hold files, images, or links always stay cards.",
+      "canvasMapStyle",
+      [
+        ["clean", "Clean"],
+        ["cards", "Cards"],
+        ["vivid", "Vivid"],
+        ["minimal", "Minimal"],
+        ["pastel", "Pastel"],
+        ["gradient", "Gradient"],
+      ],
+      { ...canvasLook, vars: panel }
+    );
+    this.toggle(this.list, "Maps follow the note palette",
+      "Mind maps without a palette of their own use the one paired with the note palette. Nothing is written to the canvas.",
+      "canvasFollowPalette", canvasLook);
+    this.dropdown(
+      "Mind-map branch lines",
+      "How maps draw their branches unless they pick their own in {panel}. Automatic: tapered branches for mind maps and logic charts, right-angled elbows for org charts, trees, and timelines.",
+      "canvasLineStyle",
+      [
+        ["auto", "Automatic"],
+        ["organic", "Tapered"],
+        ["curve", "Curved"],
+        ["elbow", "Elbow"],
+        ["straight", "Straight"],
+      ],
+      { ...canvasLook, vars: panel }
+    );
+    this.dropdown(
+      "Mind-map typeface",
+      "The typeface of maps that have not picked their own in {panel}. Note font follows Obsidian's text font; Kai uses LXGW WenKai or the system Kaiti when installed.",
+      "canvasFont",
+      [["default", "Note font"], ["sans", "Sans"], ["serif", "Serif"], ["kai", "Kai"]],
+      { ...canvasLook, vars: panel }
+    );
+    this.dropdown(
+      "Mind-map card shape",
+      "The outline of topic cards in maps that have not picked their own in {panel}: rounded corners, pills, square corners, or words on an underline.",
+      "canvasShape",
+      [["rounded", "Rounded"], ["pill", "Pill"], ["square", "Square"], ["underline", "Underline"]],
+      { ...canvasLook, vars: panel }
+    );
+    this.dropdown(
+      "Mind-map line weight",
+      "How heavy branch lines are drawn in maps that have not picked their own.",
+      "canvasLineWeight",
+      [["thin", "Thin"], ["normal", "Normal"], ["bold", "Bold"]],
+      canvasLook
+    );
+    this.dropdown(
+      "Mind-map text size",
+      "The size of topics relative to the note font, for maps that have not picked their own. Cards refit when it changes.",
+      "canvasTextScale",
+      [["small", "Small"], ["normal", "Normal"], ["large", "Large"]],
+      canvasLook
+    );
+    this.dropdown(
+      "Canvas background",
+      "The dot pattern behind every canvas: Obsidian's dots, fainter dots, or a plain background.",
+      "canvasBackground",
+      [["dots", "Dots"], ["faint", "Faint dots"], ["plain", "Plain"]],
+      canvas
+    );
+
+    this.group(t("Tables"));
+    this.toggle(
+      this.list,
       "Table editing enhancements",
       "In tables, Tab and Enter move between cells, and new rows are added automatically at the end.",
       "tableEditing"
     );
     this.toggle(
-      this.containerEl,
+      this.list,
       "Notion-style tables",
       "Rounded outer border, clearer focus and hover states, and comfortable cell spacing.",
       "tableStyle"
     );
     this.colorDropdown(
-      this.containerEl,
+      this.list,
       "Table header background",
       "Background tint of table header rows.",
       "tableHeaderColor",
-      [["default", "Theme default"], ["none", "None"]]
+      [["auto", "Follow palette"], ["default", "Theme default"], ["none", "None"]]
     );
     this.toggle(
-      this.containerEl,
+      this.list,
       "Striped table rows",
       "Shade every other table row.",
       "tableStripes"
     );
 
-    this.heading(
-      "Appearance",
-      "Tune Markdown rendering and colors without changing the meaning of your notes."
+    // Note style (DESIGN-SPEC §7.1): palette and look galleries, their
+    // options and the per-component rows, callout style among them. The
+    // section updates itself in place; nothing here re-renders the tab.
+    // Its wrapper is a setting group, so it takes a group's spacing and
+    // heading rhythm between Tables and Appearance, while the galleries keep
+    // the full width (three cards a row).
+    const styleHost = this.styleHost();
+    this.noteStyleSection = renderNoteStyleSection(
+      this.containerEl.createDiv({ cls: "setting-group" }),
+      styleHost
     );
+
+    const appearance = this.group(t("Appearance"));
+    // The group opens on a live preview of the note style. It renders once:
+    // palette, look and colour changes reach it through the body classes
+    // Obsidian mirrors into the Settings window.
+    this.previewComponent = new Component();
+    this.previewComponent.load();
+    const previewHolder = this.containerEl.createDiv();
+    appearance.listEl.before(previewHolder);
+    renderSettingsPreview(previewHolder, this.app, this.previewComponent);
     this.toggle(
-      this.containerEl,
+      this.list,
       "Cleaner WYSIWYG rendering",
-      "Apply display-only polish to quotes, dividers, headings, tasks, inline code, and Mermaid diagrams in Live Preview and Reading view. List cycles stay enabled independently. Your Markdown is never changed.",
+      "Apply display-only polish to quotes, dividers, headings, tasks, inline code, and Mermaid diagrams in Live Preview and Reading view. Bullet and number styles by list depth are unaffected. Your Markdown is never changed.",
       "cleanRendering"
     );
     this.toggle(
-      this.containerEl,
+      this.list,
       "Conceal HTML formatting tags",
       "Hide the raw <span>, <mark>, <u>, <b>, <i>, and <s> tags written by the formatting tools in Live Preview, and render them as styled text inside code blocks in Reading view.",
       "concealHtml"
     );
+    this.toggle(
+      this.list,
+      "Conceal inline Markdown syntax",
+      "Hide the non-text markers in **bold**, *italic*, ~~strikethrough~~, `inline code`, and ==highlight==. Links stay fully visible and editable. A marker reappears only when the caret enters its source; Source mode is unchanged.",
+      "concealMarkdown"
+    );
+    this.toggle(
+      this.list,
+      "Conceal heading markers while writing",
+      'Hide a heading\'s "#" run on the line you are writing, not only after you leave it, so typing "## " makes the line a heading the way Notion does. Move the caret in front of the text to bring the marker back, or press Backspace there to remove the whole marker at once. The Markdown is unchanged.',
+      "concealHeadings"
+    );
+    this.toggle(
+      this.list,
+      "Page icon and cover",
+      "Hover above a note's title to add an emoji icon or a cover. Stored in the icon, cover and cover-style properties.",
+      "pageHeader"
+    );
     this.colorDropdown(
-      this.containerEl,
+      this.list,
       "List marker color",
       "Color of bullets and list numbers.",
       "listMarkerColor",
-      [["accent", "Accent color"], ["default", "Theme default"]]
+      [["auto", "Follow palette"], ["accent", "Accent color"], ["default", "Theme default"]]
     );
     this.colorDropdown(
-      this.containerEl,
+      this.list,
       "Quote bar color",
       "Color of the vertical bar beside quote blocks.",
       "quoteBarColor",
       [
+        ["auto", "Follow palette"],
         ["text", "Text color"],
         ["accent", "Accent color"],
         ["default", "Theme default"],
       ]
     );
     this.colorDropdown(
-      this.containerEl,
+      this.list,
       "Inline code color",
       "Ink of `inline code` text, Notion-style. Fenced code blocks are unaffected.",
       "inlineCodeColor",
-      [["default", "Theme default"]]
+      [["auto", "Follow palette"], ["default", "Theme default"]]
     );
-    this.codeThemeDropdown(this.containerEl);
+    // Code block theme: a gallery of mini code cards (Follow palette, then
+    // every theme), in the row under its name.
+    const codeTheme = this.describe(
+      this.row().setName(t("Code block theme")),
+      t("Syntax colors for fenced code blocks in Live Preview and Reading view. Obsidian adaptive is designed for the default theme and follows light/dark mode.")
+    );
+    this.codeGallery = codeThemeGallery(codeTheme.infoEl.createDiv(), styleHost);
 
-    this.heading(
-      "Markdown syntax",
-      "Choose whether inline formatting source should stay visible in Live Preview."
-    );
-    this.toggle(
-      this.containerEl,
-      "Conceal inline Markdown syntax",
-      "Hide the non-text markers in **bold**, *italic*, ~~strikethrough~~, `inline code`, and ==highlight==. Links stay fully visible and editable. A marker reappears only when the caret enters its source; Source mode is unchanged.",
-      "concealMarkdown"
-    );
-    this.toggle(
-      this.containerEl,
-      "Conceal heading markers while writing",
-      'Hide a heading\'s "#" run on the line you are writing, not only after you leave it, so typing "## " makes the line a heading the way Notion does. Move the caret in front of the text to bring the marker back, or press Backspace there to remove the whole marker at once. The Markdown is unchanged.',
-      "concealHeadings"
-    );
-
-    this.heading(
-      "Help & examples",
-      "Open documentation and guided example notes in English or Chinese."
-    );
-    new Setting(this.containerEl)
+    this.group(t("Help & examples"));
+    this.row()
       .setName(t("Documentation"))
       .setDesc(t("Complete setup, feature, keyboard, and troubleshooting guide."))
       .addButton((button) =>
@@ -18925,7 +29675,7 @@ class NotionFlowSettingTab extends PluginSettingTab {
           .setButtonText("简体中文")
           .onClick(() => this.openExternal(NOTION_FLOW_DOCS_ZH_URL))
       );
-    new Setting(this.containerEl)
+    this.row()
       .setName(t("Example notes"))
       .setDesc(t("Hands-on tours you can copy into your vault."))
       .addButton((button) =>
@@ -18938,26 +29688,41 @@ class NotionFlowSettingTab extends PluginSettingTab {
           .setButtonText("简体中文")
           .onClick(() => this.openExternal(NOTION_FLOW_DEMO_ZH_URL))
       );
-    this.heading(
-      "About",
-      "Plugin version, source code, and issue reporting."
-    );
-    new Setting(this.containerEl)
+    // This release's highlights in the app, and the tour written into the
+    // vault (the same two things the update notice leads to).
+    this.row()
+      .setName(t("What's new"))
+      .setDesc(t("Highlights of this release, and hands-on tour notes you can add to your vault."))
+      .addButton((button) =>
+        button.setButtonText(t("What's new")).onClick(() => this.plugin.openWhatsNew())
+      )
+      .addButton((button) =>
+        button
+          .setButtonText(t("Create tour notes in my vault"))
+          .onClick(() => void createTourNote(this.app))
+      );
+
+    // The buttons say where they go; no raw-URL tooltips.
+    this.group(t("About"));
+    this.row()
       .setName(`Notion Flow v${this.plugin.manifest.version}`)
       .setDesc(t("Open source under the MIT license."))
       .addButton((button) =>
         button
+          .setButtonText(t("Release notes on GitHub"))
+          .onClick(() => this.openExternal(`${NOTION_FLOW_REPO_URL}/releases/latest`))
+      )
+      .addButton((button) =>
+        button
           .setButtonText("GitHub")
-          .setTooltip(NOTION_FLOW_REPO_URL)
           .onClick(() => this.openExternal(NOTION_FLOW_REPO_URL))
       )
       .addButton((button) =>
         button
           .setButtonText(t("Report an issue"))
-          .setTooltip(`${NOTION_FLOW_REPO_URL}/issues`)
           .onClick(() => this.openExternal(`${NOTION_FLOW_REPO_URL}/issues`))
       );
-    new Setting(this.containerEl)
+    this.row()
       .setName(t("Restore defaults"))
       .setDesc(t("Reset every Notion Flow option to its original value."))
       .addButton((button) => {
@@ -18967,10 +29732,18 @@ class NotionFlowSettingTab extends PluginSettingTab {
           .onClick(() => {
             new ConfirmModal(
               this.app,
+              t("Restore defaults"),
               t("Reset all Notion Flow settings to their defaults?"),
               t("Restore defaults"),
               async () => {
-                this.plugin.settings = { ...DEFAULT_SETTINGS };
+                // Slash recents are menu state and saved canvas schemes are
+                // the user's own content, not preferences: they survive a
+                // reset the way they are ignored by the check.
+                this.plugin.settings = {
+                  ...DEFAULT_SETTINGS,
+                  slashRecent: this.plugin.settings.slashRecent,
+                  canvasUserSchemes: this.plugin.settings.canvasUserSchemes,
+                };
                 await this.plugin.saveSettings();
                 this.display();
                 new Notice(t("Notion Flow settings restored."));
@@ -18980,5 +29753,6 @@ class NotionFlowSettingTab extends PluginSettingTab {
         this.resetButton = button.buttonEl;
       });
     this.syncResetButton();
+    this.syncDependents();
   }
 }

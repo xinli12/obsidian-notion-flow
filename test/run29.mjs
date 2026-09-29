@@ -36,6 +36,10 @@ equal(
     caption: "A & B",
     collapsed: false,
     prefix: "> ",
+    // The text slice between the two tags: Live Preview hides the tags and
+    // edits exactly this range in place.
+    bodyFrom: 49,
+    bodyTo: 58,
   }
 );
 equal(
@@ -63,6 +67,8 @@ equal(
     caption: "The answer",
     collapsed: false,
     prefix: "",
+    bodyFrom: 46,
+    bodyTo: 56,
     lineNo: 4,
   });
   equal("fence and caption drag as one block", getBlockRange(doc, 2, fences), {
@@ -87,6 +93,8 @@ equal(
     caption: "System map",
     collapsed: false,
     prefix: "",
+    bodyFrom: 47,
+    bodyTo: 57,
     lineNo: 2,
   });
   equal("image and caption drag as one block", getBlockRange(doc, 2), {

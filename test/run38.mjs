@@ -44,8 +44,9 @@ const UNDERLINE = { open: "<u>", close: "</u>" };
 /* What a marquee resolves to                                          */
 /* ------------------------------------------------------------------ */
 
-// Every line the sweep covers belongs to exactly one block, in order. A line
-// reported by two blocks would be edited twice by one transaction.
+// Every non-blank line the sweep covers belongs to exactly one block, in
+// order. A line reported by two blocks would be edited twice by one
+// transaction. Blank separator rows are not blocks and stay unselected.
 const CORPUS = [
   ["alpha", "", "## beta", "", "- a", "  - b", "", "```js", "x", "```"],
   ["> [!note] Title", "> body", "> ", "> - item", "", "after"],
@@ -70,13 +71,15 @@ for (const lines of CORPUS) {
       seen.add(n);
     }
   }
-  for (let n = 1; n <= d.lines; n++) if (!seen.has(n)) uncovered++;
+  for (let n = 1; n <= d.lines; n++) {
+    if (!seen.has(n) && !/^[\s>]*$/.test(d.line(n).text)) uncovered++;
+  }
   for (let i = 1; i < blocks.length; i++) {
     if (blocks[i].startLine <= blocks[i - 1].endLine) unordered++;
   }
 }
 check("no line lands in two selected blocks", overlaps, 0);
-check("the sweep leaves no line unselected", uncovered, 0);
+check("the sweep leaves no non-blank line unselected", uncovered, 0);
 check("selected blocks come out in document order", unordered, 0);
 
 // A sweep that starts inside a bigger block still yields whole blocks: from
@@ -177,7 +180,10 @@ check("deleting an empty note is a no-op", afterDelete([""], 1, 1), "");
 
 const afterPaste = (lines, from, to, clip) => {
   const d = doc(lines);
-  const blocks = blocksInLineSpan(d, from, to);
+  // A span of blank rows alone selects nothing now; a seam can still be
+  // held in a selection directly (its own drag handle), so hand it over.
+  const span = blocksInLineSpan(d, from, to);
+  const blocks = span.length > 0 ? span : [{ startLine: from, endLine: to }];
   const insert = blockSelectionPasteInsert(d, blocks, clip);
   const text = d.toString();
   return (
@@ -198,7 +204,7 @@ check(
   "above\n\n---\n\nbelow"
 );
 check(
-  "pasting over a blank seam restores it",
+  "pasting over a blank seam held directly restores it",
   afterPaste(["above", "", "| a |", "| - |"], 2, 2, "text"),
   "above\n\ntext\n\n| a |\n| - |"
 );
@@ -339,11 +345,17 @@ check(
   "T\nbody"
 );
 check("a task keeps its text when it becomes a list item", turn(["- [ ] a"], "- ").text, "- a");
-check("an empty block can be given a type", turn([""], "- ").text, "- ");
+// A lone empty block selected on its own (Esc on an empty row) still takes
+// a type; blank seams between other blocks never do.
+check("an empty block can be given a type", (() => {
+  const d = doc([""]);
+  return apply(d.toString(), batchTurnIntoChanges(d, [{ startLine: 1, endLine: 1 }], "- ").changes);
+})(), "- ");
+check("a span of blank rows alone selects nothing to type", turn([""], "- ").text, "");
 check(
   "structural blocks are reported rather than mangled",
   turn(["para", "", "| a |", "| - |", "```", "x", "```", "---"], "# "),
-  { text: "# para\n# \n| a |\n| - |\n```\nx\n```\n---", skipped: 3 }
+  { text: "# para\n\n| a |\n| - |\n```\nx\n```\n---", skipped: 3 }
 );
 
 if (fail) process.exit(1);

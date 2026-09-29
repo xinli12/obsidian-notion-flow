@@ -1,0 +1,82 @@
+{
+  "nodes": [
+    {
+      "id": "root",
+      "type": "text",
+      "text": "更舒服的思考空间",
+      "x": 0,
+      "y": 0,
+      "width": 240,
+      "height": 72,
+      "nfLayout": "right",
+      "nfPalette": "ocean",
+      "nfTheme": "clean"
+    },
+    {
+      "id": "n0",
+      "type": "text",
+      "text": "短标题",
+      "x": 420,
+      "y": -200,
+      "width": 80,
+      "height": 32
+    },
+    {
+      "id": "n1",
+      "type": "text",
+      "text": "把短标题改成长段文字后，卡片会根据内容变宽，并保留舒服的留白。",
+      "x": 420,
+      "y": -50,
+      "width": 320,
+      "height": 120
+    },
+    {
+      "id": "n2",
+      "type": "text",
+      "text": "- [ ] 梳理问题\n- [x] 设计方案\n- [ ] 开始验证",
+      "x": 420,
+      "y": 100,
+      "width": 320,
+      "height": 120
+    },
+    {
+      "id": "n3",
+      "type": "text",
+      "text": "## 阅读与编辑\n\n支持 **Markdown**、[[双向链接]] 和多行笔记。",
+      "x": 420,
+      "y": 250,
+      "width": 320,
+      "height": 120
+    }
+  ],
+  "edges": [
+    {
+      "id": "e0",
+      "fromNode": "root",
+      "toNode": "n0",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "e1",
+      "fromNode": "root",
+      "toNode": "n1",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "e2",
+      "fromNode": "root",
+      "toNode": "n2",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "e3",
+      "fromNode": "root",
+      "toNode": "n3",
+      "fromSide": "right",
+      "toSide": "left"
+    }
+  ]
+}

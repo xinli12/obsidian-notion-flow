@@ -31,14 +31,13 @@ const doc = EditorState.create({
   ].join("\n"),
 }).doc;
 
+// Blank separator rows are not blocks: the span skips them.
 check(
   "line span returns logical blocks once",
   blocksInLineSpan(doc, 1, 6),
   [
     { startLine: 1, endLine: 1 },
-    { startLine: 2, endLine: 2 },
     { startLine: 3, endLine: 3 },
-    { startLine: 4, endLine: 4 },
     { startLine: 5, endLine: 6 },
   ]
 );
@@ -46,13 +45,14 @@ check(
 const blocks = blocksInLineSpan(doc, 1, doc.lines);
 const result = batchTurnIntoChanges(doc, blocks, "# ");
 // A fence and a table still have no line prefix that could describe them.
-// A multi-line quote no longer counts: it is retyped as a whole block, all
-// of its rows shedding the quote level in one change.
+// A multi-line quote no longer counts: it is retyped as a whole block in
+// one change — by its first row, the way a Callout goes by its title; the
+// rows below shed the quote level and follow the heading as its body.
 check("batch conversion skips structural blocks", result.skipped, 2);
 check(
   "batch conversion changes ordinary block first lines",
   result.changes.map((change) => change.insert),
-  ["# alpha", "# ", "# beta", "# ", "# parent", "# ", "# ", "# quote\n# continued", "# "]
+  ["# alpha", "# beta", "# parent", "# quote\n\ncontinued"]
 );
 
 if (fail) process.exit(1);

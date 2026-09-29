@@ -121,15 +121,6 @@ const ok = (name, condition, detail = "") => {
   ok("ConcealView has no main-window document API", !globalDocumentApi.test(conceal));
   ok("ConcealView uses the owner-window DOM realm", conceal.includes("this.ownerWindow.Element"));
 
-  const commentStart = source.indexOf("class CommentPopover");
-  const commentEnd = source.indexOf("let activeCommentPopover", commentStart);
-  const commentPopover = source.slice(commentStart, commentEnd);
-  ok(
-    "comment popover recognizes clicks across DOM realms",
-    commentPopover.includes("evt.composedPath().includes(this.el)") &&
-      !commentPopover.includes("evt.target instanceof Node")
-  );
-
   const dragStart = source.indexOf("function makeDragHandlePlugin");
   const dragEnd = source.indexOf("function makeListMarkerPlugin", dragStart);
   const drag = source.slice(dragStart, dragEnd);
