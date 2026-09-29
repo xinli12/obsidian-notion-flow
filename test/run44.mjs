@@ -129,6 +129,10 @@ equal(
     caption: "Inside",
     collapsed: true,
     prefix: ">   > ",
+    // The editable slice sits after the whole prefix AND the opening tag,
+    // so an interleaved container shifts it by exactly the prefix length.
+    bodyFrom: 77,
+    bodyTo: 83,
   }
 );
 
@@ -350,6 +354,31 @@ const lineDecorationAt = (doc, ranges, lineNo) =>
         range.to <= doc.line(2).to &&
         range.spec?.widget?.constructor?.name === "VisualCalloutLeadWidget"
     )
+  );
+}
+
+{
+  // Edit rows carry their fill sources (R2-W2 item 3): a palette colour
+  // fills from its triplet, a theme type from the palette's wash first.
+  const colored = visualRangesAt(["> [!note|nf-red] T", "> body"], 2);
+  const row = lineDecorationAt(colored.doc, colored.ranges, 2)?.spec?.attributes?.style ?? "";
+  ok(
+    "a palette-coloured Callout row fills from its triplet and inks with the hue token",
+    row.includes("--nf-co-surface:rgb(var(--nf-red-rgb))") &&
+      row.includes("--callout-color:var(--nf-red, #b5554d)") &&
+      row.includes("--nf-co-parent-surface:rgb(var(--nf-red-rgb))"),
+    row
+  );
+  const nested = visualRangesAt(
+    ["> [!note] Outer", "> outer body", "> > [!warning] Inner", "> > inner body"],
+    4
+  );
+  const inner = lineDecorationAt(nested.doc, nested.ranges, 4)?.spec?.attributes?.style ?? "";
+  ok(
+    "a nested theme Callout fills from the palette wash, its parent layer too",
+    inner.includes("--nf-co-surface:var(--nf-co-wash-warning, var(--callout-warning))") &&
+      inner.includes("--nf-co-parent-surface:var(--nf-co-wash-default, var(--callout-default))"),
+    inner
   );
 }
 

@@ -1,0 +1,20 @@
+import assert from "node:assert/strict";
+import { listMarkerBackspacePlan } from "./features.mjs";
+
+const plan = (line, head) => listMarkerBackspacePlan(line, head);
+assert.deepEqual(plan("- [ ] ", 6), { from: 0, to: 6 }, "task marker goes in one step");
+assert.deepEqual(plan("- [x] done", 6), { from: 0, to: 6 }, "checked task too");
+assert.deepEqual(plan("  1. foo", 5), { from: 2, to: 5 }, "indent stays");
+assert.deepEqual(plan("\t* foo", 3), { from: 1, to: 3 }, "tab indent stays");
+assert.deepEqual(plan("3) foo", 3), { from: 0, to: 3 }, "paren numbering");
+assert.deepEqual(plan("> - x", 4), { from: 2, to: 4 }, "quote prefix stays");
+assert.deepEqual(plan("> > + x", 6), { from: 4, to: 6 }, "nested quotes stay");
+assert.equal(plan("- [ ]text", 5), null, "a box without a trailing space is not a task marker");
+assert.deepEqual(plan("- [ ]text", 2), { from: 0, to: 2 }, "…but the bullet before it still is");
+assert.equal(plan("plain", 0), null);
+assert.equal(plan("plain", 5), null);
+assert.equal(plan("- item", 4), null, "caret inside the text");
+assert.equal(plan("- item", 0), null, "caret before the marker");
+assert.equal(plan("-item", 1), null, "no space after the marker: not a list");
+assert.equal(plan("", 0), null);
+console.log("PASS list backspace: marker ladder keeps indent and quotes, ignores text positions");

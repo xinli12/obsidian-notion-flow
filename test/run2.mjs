@@ -29,13 +29,16 @@ function check(name, hoverLine, targetLine, expected) {
 check("para down", 3, 8,
   "# Title\n\n- item A\n  - child\n- item B\n\nfirst para\n\nlast para");
 
-// Move "- item A"+child (lines 5-6) to end (line 10 > doc.lines 9)
+// Move "- item A"+child (lines 5-6) to end (line 10 > doc.lines 9). A
+// block landing at the top level keeps one blank row from its neighbours.
 check("list to end", 5, 10,
-  "# Title\n\nfirst para\n\n- item B\n\nlast para\n- item A\n  - child");
+  "# Title\n\nfirst para\n\n- item B\n\nlast para\n\n- item A\n  - child");
 
 // Move "last para" (line 9) to top (line 1)
+// The seam it leaves behind goes with it, so the note still ends the way
+// it did (without a newline).
 check("last para to top", 9, 1,
-  "last para\n# Title\n\nfirst para\n\n- item A\n  - child\n- item B\n");
+  "last para\n\n# Title\n\nfirst para\n\n- item A\n  - child\n- item B");
 
 // Drop inside own range = no-op
 check("no-op drop", 5, 6, base);

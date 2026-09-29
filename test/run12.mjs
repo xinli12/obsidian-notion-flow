@@ -121,8 +121,8 @@ const makeView = (text) => {
 {
   const editor = insert("    /code", "code", 4);
   ok(
-    "nested code slash indents both fences",
-    editor.text() === "    ```\n\n    ```",
+    "nested code slash indents both fences and the body row",
+    editor.text() === "    ```\n    \n    ```",
     JSON.stringify(editor.text())
   );
 }

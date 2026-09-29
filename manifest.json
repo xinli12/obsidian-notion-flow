@@ -1,8 +1,8 @@
 {
   "id": "notion-flow",
   "name": "Notion Flow",
-  "version": "1.5.0",
-  "minAppVersion": "1.5.0",
+  "version": "1.6.0",
+  "minAppVersion": "1.13.0",
   "description": "Notion-style editing: drag-and-drop blocks, table editing, slash commands, floating format toolbar, and cleaner WYSIWYG rendering. English & 中文.",
   "author": "Xin",
   "isDesktopOnly": true

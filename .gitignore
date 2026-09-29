@@ -6,6 +6,7 @@ main.js
 
 # Generated test bundle
 test/bundle.mjs
+test/features.mjs
 
 # OS / editor noise
 .DS_Store

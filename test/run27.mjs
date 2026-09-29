@@ -330,7 +330,8 @@ eq(
 eq(
   "pointing at a Callout's title drops above the whole box",
   drag(["intro", "", "> [!note] T", "> a", "", "tail"], 6, 3, "top"),
-  ["intro", "", "tail", "> [!note] T", "> a", ""]
+  // One blank row between the two (item 9); the note keeps its ending.
+  ["intro", "", "tail", "", "> [!note] T", "> a"]
 );
 
 /* ------------------------------------------------------------------ */

@@ -41,7 +41,8 @@ check(
 check(
   "paragraph below callout gets sealed above",
   move(["> [!note] hi", "> body", "", "middle", "", "para"], 6, 3),
-  "> [!note] hi\n> body\n\npara\n\nmiddle\n"
+  // The note ended without a newline and still does (item 9).
+  "> [!note] hi\n> body\n\npara\n\nmiddle"
 );
 
 // Callout dropped against another callout: blank line prevents merging
@@ -49,7 +50,7 @@ check(
 check(
   "adjacent callouts do not merge",
   move(["> [!a] one", "", "text", "", "> [!b] two"], 5, 2),
-  "> [!a] one\n\n> [!b] two\n\ntext\n"
+  "> [!a] one\n\n> [!b] two\n\ntext"
 );
 
 // List item dropped directly above a paragraph: blank line keeps the
@@ -71,7 +72,7 @@ check(
 check(
   "paragraph above paragraph gets sealed below",
   move(["alpha", "", "beta", "", "gamma"], 5, 3),
-  "alpha\n\ngamma\n\nbeta\n"
+  "alpha\n\ngamma\n\nbeta"
 );
 
 // `tail` is a legal lazy continuation of the list paragraph, so it rides
@@ -80,7 +81,8 @@ check(
 check(
   "source seam: callout stays separate from moved list paragraph",
   move(["> note", "- item", "tail", "", "end"], 2, 6),
-  "> note\n\nend\n- item\ntail"
+  // A block landing at the top level keeps one blank row (item 9).
+  "> note\n\nend\n\n- item\ntail"
 );
 
 // Removing a fence from between two paragraphs leaves a blank line so the
@@ -88,7 +90,7 @@ check(
 check(
   "source seam: paragraphs do not fuse",
   move(["para1", "```", "code", "```", "para2", "", "end"], 2, 8),
-  "para1\n\npara2\n\nend\n```\ncode\n```"
+  "para1\n\npara2\n\nend\n\n```\ncode\n```"
 );
 
 process.exit(fail ? 1 : 0);
